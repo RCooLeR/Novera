@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "0.1.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "0.1.0",
+			"CompanyName": "rcooler",
+			"FileDescription": "Local-first AI workbench",
+			"LegalCopyright": "(c) 2026, rcooler",
+			"ProductName": "Novera",
+			"Comments": "Novera — local-first AI workbench"
+		}
+	}
+}

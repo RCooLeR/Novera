@@ -1,0 +1,70 @@
+/* Novera design tokens — dark-first IDE palette. */
+:root {
+  /* surfaces */
+  --bg-app: #0d1117;
+  --bg-elevated: #161b22;
+  --bg-panel: #0f141a;
+  --bg-sidebar: #0c1117;
+  --bg-hover: #1b2230;
+  --bg-active: #233044;
+  --bg-input: #0b0f14;
+  --bg-overlay: rgba(1, 4, 9, 0.6);
+  --scrollbar-thumb: #2d3340;
+  --scrollbar-thumb-hover: #3c4453;
+
+  /* lines */
+  --border: #21262d;
+  --border-strong: #30363d;
+  --border-accent: #2f4f86;
+
+  /* text */
+  --text: #c9d1d9;
+  --text-strong: #f0f6fc;
+  --text-muted: #8b949e;
+  --text-faint: #6e7681;
+
+  /* brand / accent */
+  --accent: #4c8dff;
+  --accent-hover: #6ba1ff;
+  --accent-subtle: rgba(76, 141, 255, 0.16);
+  --accent-ring: rgba(76, 141, 255, 0.4);
+
+  /* status */
+  --green: #3fb950;
+  --red: #f85149;
+  --amber: #d29922;
+  --purple: #bc8cff;
+  --cyan: #39c5cf;
+
+  /* git status colors (untracked reuses --git-added in the UI) */
+  --git-modified: #d29922;
+  --git-added: #3fb950;
+  --git-deleted: #f85149;
+
+  /* metrics (sidebar/assistant/panel sizes are state-driven, not tokens) */
+  --activitybar-w: 52px;
+  --statusbar-h: 24px;
+  --titlebar-h: 36px;
+  --tab-h: 38px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* type */
+  --sans: "Segoe UI", Inter, -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+  --mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
+  /* Chrome font sizes derive from --ui-base so the UI font setting scales
+     sidebars, tabs, panels, etc. (the editor has its own font size). */
+  --ui-base: 13px;
+  --fs-xs: calc(var(--ui-base) - 2px);
+  --fs-sm: calc(var(--ui-base) - 1px);
+  --fs-md: var(--ui-base);
+  --fs-lg: calc(var(--ui-base) + 2px);
+
+  /* elevation */
+  --shadow-2: 0 10px 30px rgba(0, 0, 0, 0.45);
+
+  /* z-index scale */
+  --z-splitter: 5;
+  --z-overlay: 100;
+  --z-palette: 200;
+}

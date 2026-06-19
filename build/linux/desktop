@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=Novera
+Comment=Local-first AI workbench
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/Novera %u
+Terminal=false
+Type=Application
+Icon=Novera
+Categories=Utility;
+StartupWMClass=Novera
+
+ 
