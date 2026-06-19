@@ -6,6 +6,48 @@
 import { Create as $Create } from "@wailsio/runtime";
 
 /**
+ * Agent holds runtime controls for Agent mode. These are intentionally exposed:
+ * local LLMs vary wildly by model and hardware, so output/window/step budgets
+ * need to be adjustable without recompiling.
+ */
+export class Agent {
+    "maxToolOutputChars": number;
+    "stepBatch": number;
+    "maxTotalSteps": number;
+    "historyWindowGroups": number;
+    "commandTimeoutSec": number;
+
+    /** Creates a new Agent instance. */
+    constructor($$source: Partial<Agent> = {}) {
+        if (!("maxToolOutputChars" in $$source)) {
+            this["maxToolOutputChars"] = 0;
+        }
+        if (!("stepBatch" in $$source)) {
+            this["stepBatch"] = 0;
+        }
+        if (!("maxTotalSteps" in $$source)) {
+            this["maxTotalSteps"] = 0;
+        }
+        if (!("historyWindowGroups" in $$source)) {
+            this["historyWindowGroups"] = 0;
+        }
+        if (!("commandTimeoutSec" in $$source)) {
+            this["commandTimeoutSec"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new Agent instance from a string or object.
+     */
+    static createFrom($$source: any = {}): Agent {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new Agent($$parsedSource as Partial<Agent>);
+    }
+}
+
+/**
  * Editor holds editor-pane preferences mirrored into Monaco on the frontend.
  */
 export class Editor {
@@ -120,6 +162,7 @@ export class Settings {
     "uiFontSize": number;
     "editor": Editor;
     "llm": LLM;
+    "agent": Agent;
 
     /** Creates a new Settings instance. */
     constructor($$source: Partial<Settings> = {}) {
@@ -141,6 +184,9 @@ export class Settings {
         if (!("llm" in $$source)) {
             this["llm"] = (new LLM());
         }
+        if (!("agent" in $$source)) {
+            this["agent"] = (new Agent());
+        }
 
         Object.assign(this, $$source);
     }
@@ -152,6 +198,7 @@ export class Settings {
         const $$createField2_0 = $$createType0;
         const $$createField4_0 = $$createType1;
         const $$createField5_0 = $$createType2;
+        const $$createField6_0 = $$createType3;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("recentWorkspaces" in $$parsedSource) {
             $$parsedSource["recentWorkspaces"] = $$createField2_0($$parsedSource["recentWorkspaces"]);
@@ -162,6 +209,9 @@ export class Settings {
         if ("llm" in $$parsedSource) {
             $$parsedSource["llm"] = $$createField5_0($$parsedSource["llm"]);
         }
+        if ("agent" in $$parsedSource) {
+            $$parsedSource["agent"] = $$createField6_0($$parsedSource["agent"]);
+        }
         return new Settings($$parsedSource as Partial<Settings>);
     }
 }
@@ -170,3 +220,4 @@ export class Settings {
 const $$createType0 = $Create.Array($Create.Any);
 const $$createType1 = Editor.createFrom;
 const $$createType2 = LLM.createFrom;
+const $$createType3 = Agent.createFrom;

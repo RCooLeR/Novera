@@ -25,6 +25,14 @@ const maxRecent = 12
 const DefaultRequestTimeoutSec = 1800
 const legacyDefaultRequestTimeoutSec = 600
 
+const (
+	DefaultAgentMaxToolOutputChars = 6000
+	DefaultAgentStepBatch          = 50
+	DefaultAgentMaxTotalSteps      = 1000
+	DefaultAgentHistoryWindow      = 8
+	DefaultAgentCommandTimeoutSec  = 60
+)
+
 // Editor holds editor-pane preferences mirrored into Monaco on the frontend.
 type Editor struct {
 	FontSize     int    `json:"fontSize"`
@@ -48,6 +56,17 @@ type LLM struct {
 	RequestTimeoutSec int `json:"requestTimeoutSec"`
 }
 
+// Agent holds runtime controls for Agent mode. These are intentionally exposed:
+// local LLMs vary wildly by model and hardware, so output/window/step budgets
+// need to be adjustable without recompiling.
+type Agent struct {
+	MaxToolOutputChars  int `json:"maxToolOutputChars"`
+	StepBatch           int `json:"stepBatch"`
+	MaxTotalSteps       int `json:"maxTotalSteps"`
+	HistoryWindowGroups int `json:"historyWindowGroups"`
+	CommandTimeoutSec   int `json:"commandTimeoutSec"`
+}
+
 // RequestTimeout resolves the per-request LLM timeout: the configured value, the
 // default when unset, and a 30s floor so a too-small value can't make every
 // request fail before the model has a chance to answer.
@@ -62,6 +81,62 @@ func (l LLM) RequestTimeout() time.Duration {
 	return time.Duration(sec) * time.Second
 }
 
+// Normalized fills missing Agent fields and clamps user-edited values into
+// operationally safe ranges.
+func (a Agent) Normalized() Agent {
+	if a.MaxToolOutputChars <= 0 {
+		a.MaxToolOutputChars = DefaultAgentMaxToolOutputChars
+	}
+	if a.MaxToolOutputChars < 1000 {
+		a.MaxToolOutputChars = 1000
+	}
+	if a.MaxToolOutputChars > 50000 {
+		a.MaxToolOutputChars = 50000
+	}
+	if a.StepBatch <= 0 {
+		a.StepBatch = DefaultAgentStepBatch
+	}
+	if a.StepBatch < 1 {
+		a.StepBatch = 1
+	}
+	if a.StepBatch > 500 {
+		a.StepBatch = 500
+	}
+	if a.MaxTotalSteps <= 0 {
+		a.MaxTotalSteps = DefaultAgentMaxTotalSteps
+	}
+	if a.MaxTotalSteps < a.StepBatch {
+		a.MaxTotalSteps = a.StepBatch
+	}
+	if a.MaxTotalSteps > 10000 {
+		a.MaxTotalSteps = 10000
+	}
+	if a.HistoryWindowGroups <= 0 {
+		a.HistoryWindowGroups = DefaultAgentHistoryWindow
+	}
+	if a.HistoryWindowGroups < 1 {
+		a.HistoryWindowGroups = 1
+	}
+	if a.HistoryWindowGroups > 50 {
+		a.HistoryWindowGroups = 50
+	}
+	if a.CommandTimeoutSec <= 0 {
+		a.CommandTimeoutSec = DefaultAgentCommandTimeoutSec
+	}
+	if a.CommandTimeoutSec < 5 {
+		a.CommandTimeoutSec = 5
+	}
+	if a.CommandTimeoutSec > 3600 {
+		a.CommandTimeoutSec = 3600
+	}
+	return a
+}
+
+func (a Agent) CommandTimeout() time.Duration {
+	n := a.Normalized()
+	return time.Duration(n.CommandTimeoutSec) * time.Second
+}
+
 // Settings is the full persisted preference set.
 type Settings struct {
 	Theme            string   `json:"theme"` // app theme: "dark" | "light"
@@ -70,6 +145,7 @@ type Settings struct {
 	UIFontSize       int      `json:"uiFontSize"` // base font size for the app chrome (px)
 	Editor           Editor   `json:"editor"`
 	LLM              LLM      `json:"llm"`
+	Agent            Agent    `json:"agent"`
 }
 
 func defaults() Settings {
@@ -89,6 +165,13 @@ func defaults() Settings {
 			BaseURL:           "http://localhost:11434/v1",
 			Model:             "",
 			RequestTimeoutSec: DefaultRequestTimeoutSec,
+		},
+		Agent: Agent{
+			MaxToolOutputChars:  DefaultAgentMaxToolOutputChars,
+			StepBatch:           DefaultAgentStepBatch,
+			MaxTotalSteps:       DefaultAgentMaxTotalSteps,
+			HistoryWindowGroups: DefaultAgentHistoryWindow,
+			CommandTimeoutSec:   DefaultAgentCommandTimeoutSec,
 		},
 	}
 }
@@ -164,6 +247,7 @@ func (s *Service) Load() Settings {
 	if out.LLM.RequestTimeoutSec == legacyDefaultRequestTimeoutSec {
 		out.LLM.RequestTimeoutSec = DefaultRequestTimeoutSec
 	}
+	out.Agent = out.Agent.Normalized()
 	return out
 }
 
@@ -178,6 +262,7 @@ func (s *Service) saveLocked(in Settings) error {
 	if in.RecentWorkspaces == nil {
 		in.RecentWorkspaces = []string{}
 	}
+	in.Agent = in.Agent.Normalized()
 	// Never persist credentials embedded in the LLM base URL.
 	in.LLM.BaseURL = sanitizeBaseURL(in.LLM.BaseURL)
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
@@ -210,6 +295,7 @@ func (s *Service) RememberWorkspace(path string) (Settings, error) {
 	if out.LLM.RequestTimeoutSec == legacyDefaultRequestTimeoutSec {
 		out.LLM.RequestTimeoutSec = DefaultRequestTimeoutSec
 	}
+	out.Agent = out.Agent.Normalized()
 	out.LastWorkspace = path
 	recents := make([]string, 0, maxRecent)
 	recents = append(recents, path)

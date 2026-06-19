@@ -54,6 +54,10 @@ export interface PlanStep {
   status: PlanStatus;
 }
 
+function settleAgentPlan(plan: PlanStep[]): PlanStep[] {
+  return plan.map((step) => (step.status === "in_progress" ? { ...step, status: "todo" } : step));
+}
+
 export interface AgentEvent {
   runId: string;
   type: string;
@@ -73,12 +77,29 @@ export interface LLMConfig {
   requestTimeoutSec: number;
 }
 
+export interface AgentConfig {
+  maxToolOutputChars: number;
+  stepBatch: number;
+  maxTotalSteps: number;
+  historyWindowGroups: number;
+  commandTimeoutSec: number;
+}
+
 let uidCounter = 0;
 const uid = () => `m${++uidCounter}`;
 const API_KEY_REF = "llm.apikey";
 // Ask-mode chat: cap how many recent user/assistant turns are re-sent each
 // message so a long conversation can't blow past the model's context window.
 const MAX_CHAT_HISTORY = 20;
+const MAX_AGENT_CONTEXT_MESSAGES = 8;
+const MAX_AGENT_CONTEXT_CHARS = 8000;
+export const DEFAULT_AGENT_CONFIG: AgentConfig = {
+  maxToolOutputChars: 6000,
+  stepBatch: 50,
+  maxTotalSteps: 1000,
+  historyWindowGroups: 8,
+  commandTimeoutSec: 60,
+};
 
 function applyUIFont(px: number) {
   document.documentElement.style.setProperty("--ui-base", `${px || 13}px`);
@@ -99,6 +120,45 @@ function stripUrlCreds(raw: string): string {
     /* not a full URL yet (still being typed) — leave as-is */
   }
   return raw;
+}
+
+function buildAgentTask(content: string, chat: ChatMsg[]): string {
+  const context = chat
+    .filter((m) => (m.role === "user" || m.role === "assistant") && !m.error && m.content.trim() !== "")
+    .slice(-MAX_AGENT_CONTEXT_MESSAGES)
+    .map((m) => {
+      const trimmed = m.content.trim();
+      const clipped = trimmed.length > 1600 ? `${trimmed.slice(0, 1600)}...` : trimmed;
+      return `${m.role}: ${clipped}`;
+    })
+    .join("\n\n");
+  if (!context) return content;
+  const clippedContext =
+    context.length > MAX_AGENT_CONTEXT_CHARS ? context.slice(context.length - MAX_AGENT_CONTEXT_CHARS) : context;
+  return [
+    'Recent conversation context for resolving references like "it", "that", or "do it".',
+    "Treat this as context only; the current user request below is the instruction to follow.",
+    "",
+    clippedContext,
+    "",
+    "Current user request:",
+    content,
+  ].join("\n");
+}
+
+export function agentConfigFromSettings(settings: SettingsModel | null): AgentConfig {
+  const agent = (settings as (SettingsModel & { agent?: Partial<AgentConfig> }) | null)?.agent ?? {};
+  return { ...DEFAULT_AGENT_CONFIG, ...agent };
+}
+
+function clampAgentConfig(patch: Partial<AgentConfig>, current: AgentConfig): AgentConfig {
+  const next = { ...current, ...patch };
+  next.maxToolOutputChars = Math.max(1000, Math.min(50000, Math.round(next.maxToolOutputChars || DEFAULT_AGENT_CONFIG.maxToolOutputChars)));
+  next.stepBatch = Math.max(1, Math.min(500, Math.round(next.stepBatch || DEFAULT_AGENT_CONFIG.stepBatch)));
+  next.maxTotalSteps = Math.max(next.stepBatch, Math.min(10000, Math.round(next.maxTotalSteps || DEFAULT_AGENT_CONFIG.maxTotalSteps)));
+  next.historyWindowGroups = Math.max(1, Math.min(50, Math.round(next.historyWindowGroups || DEFAULT_AGENT_CONFIG.historyWindowGroups)));
+  next.commandTimeoutSec = Math.max(5, Math.min(3600, Math.round(next.commandTimeoutSec || DEFAULT_AGENT_CONFIG.commandTimeoutSec)));
+  return next;
 }
 
 const dirOf = (rel: string): string => {
@@ -319,6 +379,7 @@ interface State {
   failStream: (reqId: string, message: string) => void;
   loadModels: (silent?: boolean) => Promise<void>;
   saveLLMConfig: (patch: Partial<LLMConfig>) => Promise<void>;
+  saveAgentConfig: (patch: Partial<AgentConfig>) => Promise<void>;
   saveEditorConfig: (patch: Partial<EditorSettings>) => Promise<void>;
   setUIFontSize: (n: number) => Promise<void>;
   setApiKey: (value: string) => Promise<void>;
@@ -1053,11 +1114,13 @@ export const useStore = create<State>()((set, get) => ({
 
   sendAgent: async (text: string) => {
     const content = text.trim();
-    if (!content || get().chatStreaming) return;
+    const st = get();
+    if (!content || st.chatStreaming) return;
+    const agentTask = buildAgentTask(content, st.chat);
     const userMsg: ChatMsg = { id: uid(), role: "user", content };
     set((st) => ({ chat: [...st.chat, userMsg], chatStreaming: true, agentStarting: true, agentPlan: [] }));
     try {
-      const runId = await Agent.Start(content);
+      const runId = await Agent.Start(agentTask);
       set({ agentRunId: runId, agentStarting: false });
     } catch (e) {
       set((st) => ({
@@ -1130,7 +1193,7 @@ export const useStore = create<State>()((set, get) => ({
         set({ agentPlan: ev.plan ?? [] });
         break;
       case "done":
-        set({ chatStreaming: false, agentRunId: null, agentStarting: false });
+        set((st) => ({ chatStreaming: false, agentRunId: null, agentStarting: false, agentPlan: settleAgentPlan(st.agentPlan) }));
         break;
       case "error":
         set((st) => ({
@@ -1138,6 +1201,7 @@ export const useStore = create<State>()((set, get) => ({
           chatStreaming: false,
           agentRunId: null,
           agentStarting: false,
+          agentPlan: settleAgentPlan(st.agentPlan),
         }));
         break;
     }
@@ -1256,6 +1320,20 @@ export const useStore = create<State>()((set, get) => ({
     set({ settings: next });
     try {
       await Settings.Save(next);
+    } catch (e) {
+      get().setStatus(errMessage(e), "error");
+    }
+  },
+
+  saveAgentConfig: async (patch: Partial<AgentConfig>) => {
+    const cur = get().settings;
+    if (!cur) return;
+    const current = agentConfigFromSettings(cur);
+    const agent = clampAgentConfig(patch, current);
+    const next = { ...cur, agent } as SettingsModel & { agent: AgentConfig };
+    set({ settings: next });
+    try {
+      await Settings.Save(next as SettingsModel);
     } catch (e) {
       get().setStatus(errMessage(e), "error");
     }

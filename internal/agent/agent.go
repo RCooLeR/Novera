@@ -32,71 +32,62 @@ import (
 )
 
 const (
-	EventName     = "agent:event"
-	maxToolOutput = 6000
-	// stepBatch is how many tool rounds run before the agent pauses to ask the
-	// user whether to keep going. It's a checkpoint, NOT a hard stop — long
-	// tasks (surveying hundreds of DB tables, multi-file refactors) just confirm
-	// at each boundary and continue.
-	stepBatch = 50
-	// maxTotalSteps is an absolute runaway backstop, even across continuations.
-	maxTotalSteps = 1000
+	EventName = "agent:event"
 	// continueWait is how long a checkpoint waits for the user's keep-going/stop
 	// decision before defaulting to stop (so an abandoned run can't live forever).
 	continueWait    = 10 * time.Minute
 	approvalTimeout = 5 * time.Minute
-	// historyWindowGroups caps how many recent assistant+tool rounds are re-sent
-	// to the provider each step. The transcript grows with every round (now up
-	// to maxTotalSteps), so without a window a long run would balloon the request
-	// past the model's context limit. The system prompt and the original user
-	// task are always kept; only older middle rounds are dropped.
-	historyWindowGroups = 8
 )
 
 const systemPrompt = `You are Novera's coding agent, operating inside the user's open workspace.
 You can call tools to inspect and modify the project. Prefer reading before writing.
 
-Start by calling update_plan with your ordered steps (each "todo"), then work through them — re-call update_plan to mark the current step "in_progress" and completed steps "done" so the user sees live progress.
-
-Available tools (call them by these EXACT names):
-- update_plan{steps}: record/update your ordered plan; each step is {title, status: todo|in_progress|done}. Call first with all steps "todo", then keep statuses current as you progress
-- list_files: list source file paths in the workspace (generated noise — lockfiles, minified bundles, source maps, generated code — is omitted; reach those with list_dir or read_file by exact path)
-- list_dir{path}: list one directory's immediate entries
-- read_file{path}: read a text file
-- read_many_files{paths}: read several files at once
-- search_workspace{query}: find a literal string across files
-- git_status: branch + changed files
-- git_diff{path?}: unified diff vs HEAD (optionally one file)
-- read_diagnostics: static issues (TODO/FIXME/HACK/XXX, merge conflicts) with file:line
-- infer_csv_schema{path}: infer a CSV/TSV file's column schema (SQL types, null counts, sample values) from a row sample
-- analyze_sql_dump{path}: inventory a .sql/.dump file's tables + CREATE/INSERT statement counts (streamed; safe on huge dumps)
-- csv_to_sql{path, outPath, tableName}: convert a CSV/TSV to a .sql file (CREATE TABLE + INSERTs) (requires approval)
-- extract_dump_table{path, table, outPath}: copy one table out of a SQL dump into a new file (requires approval)
-- split_dump{path, outDir}: split a SQL dump into one .sql per table under outDir (requires approval)
-- dump_table_to_csv{path, table, outPath}: extract a pg_dump COPY block for a table into a CSV (requires approval)
-- clean_sql_dump{path, outPath, removeDefiner?, dropAutoIncrement?, engine?, charset?, fromDatabase?, toDatabase?}: clean a dump into a new file (requires approval)
-- csv_select_columns{path, outPath, columns}: write a CSV keeping only/reordering the named columns (requires approval)
-- csv_add_column{path, outPath, name, value}: write a CSV with a constant column appended (requires approval)
-- db_list_connections: list configured database connections (id, name, kind)
-- db_list_tables{connectionId}: tables/views for a connection
-- db_query{connectionId, sql}: run a read-only SELECT against a connection
-- write_file{path, content}: create/overwrite a whole file (requires approval)
-- apply_edit{path, oldText, newText}: surgical replace of a unique snippet (requires approval) — prefer this over write_file for small changes
-- append_file{path, content}: append text to the end of a file (requires approval)
-- apply_patch{path, patch}: apply a unified-diff patch (multiple hunks) to one file (requires approval)
-- copy_file{from, to}: copy a file (requires approval)
-- move_file{from, to}: move/rename a file (requires approval)
-- delete_file{path}: delete a file or directory (requires approval)
-- list_rollbacks: list recent undoable file mutations with their ids
-- rollback_file_mutation{id}: undo a previous file mutation by its id (requires approval)
-- create_artifact{path, kind, title?, sources?, note?}: register a file you produced as a tracked artifact with lineage
-- list_artifacts: list registered artifacts and their freshness
-- run_command{command}: run a shell command in the workspace (requires approval)
+Start by calling update_plan with your ordered steps (each "todo"), then work through them. Re-call update_plan to mark the current step "in_progress" and completed steps "done" so the user sees live progress.
 
 Rules:
+- Available tools for this run are supplied in the API tools field and summarized below. Call only those exact names.
+- Never invent pseudo-tools such as thought, analysis, channel, or commentary.
 - Each tool call returns a result. USE that result; never repeat an identical call — the answer will not change.
-- Read tools run immediately. write_file modifies the user's files and is approval-gated each time.
+- Mutating or sensitive tools are approval-gated each time.
+- If the current request is vague, use the provided recent conversation context only to resolve references such as "it", "that", or "do it".
 - When you have enough information, STOP calling tools and reply with a normal text answer to finish the task.`
+
+var allAgentToolNames = []string{
+	"update_plan",
+	"list_files", "list_dir", "read_file", "read_many_files", "search_workspace",
+	"git_status", "git_diff", "read_diagnostics",
+	"infer_csv_schema", "analyze_sql_dump",
+	"db_list_connections", "db_list_tables", "db_query",
+	"csv_to_sql", "extract_dump_table", "split_dump", "dump_table_to_csv",
+	"clean_sql_dump", "csv_select_columns", "csv_add_column",
+	"write_file", "apply_edit", "append_file", "apply_patch",
+	"copy_file", "move_file", "delete_file",
+	"list_rollbacks", "rollback_file_mutation",
+	"create_artifact", "list_artifacts",
+	"run_command",
+}
+
+var inspectToolNames = []string{
+	"update_plan", "list_files", "list_dir", "read_file", "read_many_files", "search_workspace", "read_diagnostics",
+}
+
+var writeToolNames = []string{
+	"write_file", "apply_edit", "append_file", "apply_patch", "copy_file", "move_file", "delete_file",
+}
+
+var gitToolNames = []string{"git_status", "git_diff"}
+
+var dataToolNames = []string{
+	"infer_csv_schema", "analyze_sql_dump",
+	"csv_to_sql", "extract_dump_table", "split_dump", "dump_table_to_csv",
+	"clean_sql_dump", "csv_select_columns", "csv_add_column",
+}
+
+var dbToolNames = []string{"db_list_connections", "db_list_tables", "db_query"}
+
+var rollbackToolNames = []string{"list_rollbacks", "rollback_file_mutation"}
+
+var artifactToolNames = []string{"create_artifact", "list_artifacts"}
 
 // SecretReader resolves an API key ref.
 type SecretReader interface {
@@ -105,12 +96,12 @@ type SecretReader interface {
 
 // Service is the bound Wails agent service.
 type Service struct {
-	settings *settings.Service
-	secrets  SecretReader
-	ws       *workspace.Service
-	git      *gitsvc.Service
-	db       *db.Service
-	http     *http.Client
+	settings  *settings.Service
+	secrets   SecretReader
+	ws        *workspace.Service
+	git       *gitsvc.Service
+	db        *db.Service
+	http      *http.Client
 	audit     *auditLog
 	rollback  *rollbackJournal
 	jobs      *jobs.Service
@@ -186,6 +177,93 @@ func normalizeToolName(name string) string {
 		}
 	}
 	return b.String()
+}
+
+func selectToolNamesForPrompt(prompt string) []string {
+	text := strings.ToLower(prompt)
+	chosen := map[string]bool{}
+	add := func(names ...string) {
+		for _, name := range names {
+			chosen[name] = true
+		}
+	}
+	add(inspectToolNames...)
+
+	wantsWrite := containsAny(text,
+		"write", "save", "create", "edit", "modify", "fix", "implement", "change",
+		"patch", "append", "delete", "remove", "move", "rename", "copy", "refactor",
+		"generate", "add ", "update ", "replace", "overwrite", "persist",
+		"write these findings", "write the result", "write the review", "to file", "into file",
+	)
+	wantsData := containsAny(text,
+		"csv", "tsv", "sql dump", ".dump", "dump file", "pg_dump", "schema", "column",
+		"convert csv", "clean dump", "split dump", "extract table", "select columns",
+	)
+	wantsDB := containsAny(text,
+		"database", "db ", "connection", "connections", "table", "tables", "query",
+		"select ", "sqlite", "postgres", "mysql", "mariadb",
+	)
+	wantsGit := containsAny(text,
+		"git", "diff", "status", "branch", "commit", "push", "staged", "unstaged",
+		"working tree", "pull request", " pr ", "review changes",
+	)
+	wantsRun := wantsWrite || containsAny(text,
+		"run ", "execute", "command", "shell", "terminal", "powershell", "cmd ",
+		"test", "tests", "typecheck", "lint", "format", "build", "rebuild", "re-build",
+		"npm ", "pnpm ", "yarn ", "go test", "task ",
+	)
+	wantsRollback := containsAny(text, "rollback", "undo", "revert", "restore previous")
+	wantsArtifact := containsAny(text, "artifact", "artifacts", "register artifact", "lineage", "freshness")
+
+	if wantsWrite {
+		add(writeToolNames...)
+	}
+	if wantsGit {
+		add(gitToolNames...)
+	}
+	if wantsData {
+		add(dataToolNames...)
+	}
+	if wantsDB {
+		add(dbToolNames...)
+	}
+	if wantsRollback {
+		add(rollbackToolNames...)
+	}
+	if wantsArtifact {
+		add(artifactToolNames...)
+	}
+	if wantsRun {
+		add("run_command")
+	}
+	return orderedToolSubset(chosen)
+}
+
+func containsAny(text string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func orderedToolSubset(chosen map[string]bool) []string {
+	out := make([]string, 0, len(chosen))
+	for _, name := range allAgentToolNames {
+		if chosen[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func toolNameSet(names []string) map[string]bool {
+	out := make(map[string]bool, len(names))
+	for _, name := range names {
+		out[name] = true
+	}
+	return out
 }
 
 // Start kicks off an agent run for the prompt and returns the run id.
@@ -286,22 +364,31 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 		}
 	}()
 
-	cfg := s.settings.Load().LLM
+	appSettings := s.settings.Load()
+	cfg := appSettings.LLM
+	agentCfg := appSettings.Agent.Normalized()
 	key := ""
 	if cfg.APIKeyRef != "" && s.secrets != nil {
 		key, _ = s.secrets.Get(cfg.APIKeyRef)
 	}
 
+	activeToolNames := selectToolNamesForPrompt(prompt)
 	messages := []wireMsg{
-		{Role: "system", Content: systemPrompt},
+		{Role: "system", Content: s.systemPromptForTools(activeToolNames)},
 		{Role: "user", Content: prompt},
 	}
-	toolDefs := s.toolDefs()
+	toolDefs := s.toolDefsFor(activeToolNames)
+	activeToolSet := toolNameSet(activeToolNames)
 	seen := map[string]int{} // signature -> times called, to break repeat-loops
+	var currentPlan []planStep
+	retriedNoProgressCompletion := false
+	s.jobs.Append(jobID, fmt.Sprintf("active tools: %s", strings.Join(activeToolNames, ", ")))
+	s.jobs.Append(jobID, fmt.Sprintf("limits: requestTimeout=%s stepBatch=%d maxSteps=%d historyWindow=%d maxToolOutput=%d commandTimeout=%s",
+		cfg.RequestTimeout(), agentCfg.StepBatch, agentCfg.MaxTotalSteps, agentCfg.HistoryWindowGroups, agentCfg.MaxToolOutputChars, agentCfg.CommandTimeout()))
 
 	totalSteps := 0
 	for {
-		batchEnd := totalSteps + stepBatch
+		batchEnd := totalSteps + agentCfg.StepBatch
 		for totalSteps < batchEnd {
 			if ctx.Err() != nil {
 				s.emit(agentEvent{RunID: runID, Type: "error", Text: "Run cancelled."})
@@ -318,7 +405,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 				defer ccancel()
 				// Send a recency-windowed view; the full transcript is still kept
 				// locally (messages) for correct tool-call/result pairing.
-				return s.complete(cctx, cfg.BaseURL, cfg.Model, key, windowMessages(messages, historyWindowGroups), toolDefs)
+				return s.complete(cctx, cfg.BaseURL, cfg.Model, key, windowMessages(messages, agentCfg.HistoryWindowGroups), toolDefs)
 			}()
 			if err != nil {
 				if ctx.Err() != nil {
@@ -336,15 +423,34 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 				jobErr = text
 				return
 			}
-			if strings.TrimSpace(comp.Content) != "" {
-				s.emit(agentEvent{RunID: runID, Type: "assistant_text", Text: comp.Content})
-				s.jobs.Append(jobID, "assistant: "+clip(comp.Content, 160))
-			}
+			visibleContent := visibleAssistantContent(comp.Content)
 			if len(comp.ToolCalls) == 0 {
+				if hasOpenPlanStep(currentPlan) {
+					if !retriedNoProgressCompletion {
+						retriedNoProgressCompletion = true
+						messages = append(messages,
+							wireMsg{Role: "assistant", Content: comp.Content},
+							wireMsg{
+								Role:    "user",
+								Content: "You stopped without completing the visible plan. Continue now by emitting real tool_calls, not by describing them in text. If the remaining step is to create or update a file, call write_file/apply_edit/apply_patch with valid JSON arguments. After the tool succeeds, call update_plan to mark the step done.",
+							},
+						)
+						continue
+					}
+					text := "The model stopped without completing the plan or emitting a real tool call. This provider may not support OpenAI-compatible tool calls reliably; it wrote text instead of calling the file-writing tool."
+					s.emit(agentEvent{RunID: runID, Type: "error", Text: text})
+					jobErr = text
+					return
+				}
+				if visibleContent != "" {
+					s.emit(agentEvent{RunID: runID, Type: "assistant_text", Text: visibleContent})
+					s.jobs.Append(jobID, "assistant: "+clip(visibleContent, 160))
+				}
 				jobStatus = jobs.StatusSuccess
 				s.emit(agentEvent{RunID: runID, Type: "done"})
 				return
 			}
+			knownCalls := 0
 			// Some providers omit tool-call ids; synthesize a stable, unique one so
 			// the echoed assistant message, the follow-up tool message, and the
 			// frontend tool cards / approvals all correlate.
@@ -355,24 +461,58 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 			}
 			messages = append(messages, wireMsg{Role: "assistant", Content: comp.Content, ToolCalls: comp.ToolCalls})
 			for _, tc := range comp.ToolCalls {
-				sig := normalizeToolName(tc.Function.Name) + "|" + strings.TrimSpace(tc.Function.Arguments)
-				seen[sig]++
-				var result string
-				if seen[sig] > 2 {
-					result = "You already made this exact tool call twice; the result will not change. Stop calling tools and use what you already have to write your final answer."
-					s.emit(agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: tc.Function.Name, Result: result})
-				} else {
-					result = s.dispatch(ctx, runID, tc)
+				canon, known := s.toolCanonical[normalizeToolName(tc.Function.Name)]
+				if known && activeToolSet[canon] {
+					knownCalls++
 				}
-				messages = append(messages, wireMsg{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result})
-				s.jobs.Append(jobID, fmt.Sprintf("%s: %s", tc.Function.Name, clip(result, 160)))
+				sigName := normalizeToolName(tc.Function.Name)
+				if known {
+					sigName = canon
+				}
+				sig := sigName + "|" + strings.TrimSpace(tc.Function.Arguments)
+				seen[sig]++
+				var result dispatchResult
+				if seen[sig] > 2 {
+					result.output = "You already made this exact tool call twice; the result will not change. Stop calling tools and use what you already have to write your final answer."
+					s.emit(agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: tc.Function.Name, Result: result.output})
+				} else {
+					result = s.dispatch(ctx, runID, tc, activeToolSet, activeToolNames, agentCfg)
+				}
+				if result.denied {
+					text := fmt.Sprintf("Action denied: %s was not run. The agent stopped and made no fallback changes.", result.tool)
+					s.jobs.Append(jobID, text)
+					jobErr = text
+					jobStatus = jobs.StatusCanceled
+					s.emit(agentEvent{RunID: runID, Type: "error", Text: text})
+					return
+				}
+				if canon == "update_plan" && activeToolSet[canon] {
+					currentPlan = parsePlan(parseArgs(tc.Function.Arguments))
+				}
+				messages = append(messages, wireMsg{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result.output})
+				s.jobs.Append(jobID, fmt.Sprintf("%s: %s", tc.Function.Name, clip(result.output, 160)))
 			}
+			if knownCalls == 0 {
+				if !retriedNoProgressCompletion {
+					retriedNoProgressCompletion = true
+					messages = append(messages, wireMsg{
+						Role:    "user",
+						Content: fmt.Sprintf("The tool calls you just emitted were not valid active Novera tools. Do not use pseudo-tools such as thought, analysis, or channel. Continue by calling one of these active function tools exactly as named, with valid JSON arguments: %s.", strings.Join(activeToolNames, ", ")),
+					})
+					continue
+				}
+				text := "The model repeatedly emitted invalid pseudo-tool calls instead of Novera tools. This provider may not support OpenAI-compatible tool calls reliably."
+				s.emit(agentEvent{RunID: runID, Type: "error", Text: text})
+				jobErr = text
+				return
+			}
+			retriedNoProgressCompletion = false
 			totalSteps++
 		}
 		// Reached a checkpoint without finishing. Absolute backstop first…
-		if totalSteps >= maxTotalSteps {
-			jobErr = fmt.Sprintf("reached the absolute step ceiling (%d)", maxTotalSteps)
-			s.emit(agentEvent{RunID: runID, Type: "error", Text: fmt.Sprintf("Reached the absolute step ceiling (%d). Send another message to continue.", maxTotalSteps)})
+		if totalSteps >= agentCfg.MaxTotalSteps {
+			jobErr = fmt.Sprintf("reached the absolute step ceiling (%d)", agentCfg.MaxTotalSteps)
+			s.emit(agentEvent{RunID: runID, Type: "error", Text: fmt.Sprintf("Reached the absolute step ceiling (%d). Send another message to continue.", agentCfg.MaxTotalSteps)})
 			return
 		}
 		// …then ask the user whether to keep going.
@@ -399,18 +539,27 @@ func (s *Service) awaitContinue(ctx context.Context, runID string, steps int) bo
 	})
 }
 
-func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall) string {
+type dispatchResult struct {
+	output string
+	denied bool
+	tool   string
+}
+
+func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, active map[string]bool, activeNames []string, cfg settings.Agent) dispatchResult {
 	name := tc.Function.Name
 	args := parseArgs(tc.Function.Arguments)
-	s.emit(agentEvent{RunID: runID, Type: "tool_call", CallID: tc.ID, Tool: name, Args: tc.Function.Arguments})
 
 	canon, known := s.toolCanonical[normalizeToolName(name)]
 	if !known {
-		out := fmt.Sprintf("Unknown tool %q. Available tools: %s. Call one of these exactly.", name, strings.Join(s.toolOrder, ", "))
-		s.emit(agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: name, Result: out})
-		return out
+		out := fmt.Sprintf("Unknown tool %q. Active tools: %s. Call one of these exactly.", name, strings.Join(activeNames, ", "))
+		return dispatchResult{output: out, tool: name}
 	}
 	name = canon
+	if !active[name] {
+		out := fmt.Sprintf("Tool %q is not active for this run. Active tools: %s. Continue with one of those tools, or explain why the task cannot be completed with them.", name, strings.Join(activeNames, ", "))
+		return dispatchResult{output: out, tool: name}
+	}
+	s.emit(agentEvent{RunID: runID, Type: "tool_call", CallID: tc.ID, Tool: name, Args: tc.Function.Arguments})
 	t := s.toolset[name]
 	if name == "update_plan" {
 		s.emit(agentEvent{RunID: runID, Type: "plan", Plan: parsePlan(args)})
@@ -421,7 +570,7 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall) s
 			out := "The user denied this action."
 			s.audit.record(AuditEntry{RunID: runID, CallID: tc.ID, Tool: name, Summary: auditSummary(args), Decision: "denied", Status: "denied", Detail: out})
 			s.emit(agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: name, Result: out})
-			return out
+			return dispatchResult{output: out, denied: true, tool: name}
 		}
 		decision = "approved"
 	}
@@ -430,21 +579,21 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall) s
 	var out string
 	var err error
 	if name == "run_command" {
-		out, err = s.runCommand(ctx, getStr(args, "command"))
+		out, err = s.runCommand(ctx, getStr(args, "command"), cfg.CommandTimeout())
 	} else {
 		out, err = t.run(args)
 	}
 	if err != nil {
 		out = "error: " + err.Error()
 	}
-	out = clip(out, maxToolOutput)
+	out = clip(out, cfg.Normalized().MaxToolOutputChars)
 	status := "ok"
 	if err != nil {
 		status = "error"
 	}
 	s.audit.record(AuditEntry{RunID: runID, CallID: tc.ID, Tool: name, Summary: auditSummary(args), Decision: decision, Status: status, Detail: clip(out, 300)})
 	s.emit(agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: name, Result: out})
-	return out
+	return dispatchResult{output: out, tool: name}
 }
 
 func (s *Service) awaitApproval(ctx context.Context, runID, callID, tool, args string) bool {
@@ -634,6 +783,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 				if len(raw) == 0 {
 					return "", errors.New("paths is required")
 				}
+				limit := s.settings.Load().Agent.Normalized().MaxToolOutputChars * 2
 				var b strings.Builder
 				for _, p := range raw {
 					path, ok := p.(string)
@@ -651,11 +801,11 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 						b.WriteString(fc.Content)
 						b.WriteString("\n\n")
 					}
-					if b.Len() > maxToolOutput*2 {
+					if b.Len() > limit {
 						break
 					}
 				}
-				return clip(b.String(), maxToolOutput*2), nil
+				return clip(b.String(), limit), nil
 			},
 		},
 		"git_status": {
@@ -1193,30 +1343,30 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			run: func(args map[string]any) (string, error) {
 				// dispatch special-cases run_command with the run ctx; this closure
 				// is a ctx-less fallback only.
-				return s.runCommand(context.Background(), getStr(args, "command"))
+				return s.runCommand(context.Background(), getStr(args, "command"), s.settings.Load().Agent.CommandTimeout())
 			},
 		},
 	}
-	order := []string{
-		"update_plan",
-		"list_files", "list_dir", "read_file", "read_many_files", "search_workspace",
-		"git_status", "git_diff", "read_diagnostics",
-		"infer_csv_schema", "analyze_sql_dump",
-		"db_list_connections", "db_list_tables", "db_query",
-		"csv_to_sql", "extract_dump_table", "split_dump", "dump_table_to_csv",
-		"clean_sql_dump", "csv_select_columns", "csv_add_column",
-		"write_file", "apply_edit", "append_file", "apply_patch",
-		"copy_file", "move_file", "delete_file",
-		"list_rollbacks", "rollback_file_mutation",
-		"create_artifact", "list_artifacts",
-		"run_command",
-	}
-	return m, order
+	return m, append([]string(nil), allAgentToolNames...)
 }
 
-func (s *Service) toolDefs() []wireToolDef {
-	defs := make([]wireToolDef, 0, len(s.toolOrder))
-	for _, name := range s.toolOrder {
+func (s *Service) systemPromptForTools(names []string) string {
+	var b strings.Builder
+	b.WriteString(systemPrompt)
+	b.WriteString("\n\nActive tools for this run:\n")
+	for _, name := range names {
+		t, ok := s.toolset[name]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&b, "- %s: %s\n", name, t.description)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (s *Service) toolDefsFor(names []string) []wireToolDef {
+	defs := make([]wireToolDef, 0, len(names))
+	for _, name := range names {
 		t := s.toolset[name]
 		defs = append(defs, wireToolDef{
 			Type:     "function",
@@ -1307,7 +1457,7 @@ func parseArgs(raw string) map[string]any {
 	return out
 }
 
-func (s *Service) runCommand(parent context.Context, command string) (string, error) {
+func (s *Service) runCommand(parent context.Context, command string, timeout time.Duration) (string, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return "", errors.New("command is required")
@@ -1319,8 +1469,11 @@ func (s *Service) runCommand(parent context.Context, command string) (string, er
 		return "", errors.New("open a folder first — refusing to run a command with no workspace")
 	}
 	// Derive from the run's context so cancelling/timing-out the run also kills
-	// the child process; cap any single command at 60s.
-	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
+	// the child process; cap any single command by the Agent runtime setting.
+	if timeout <= 0 {
+		timeout = time.Duration(settings.DefaultAgentCommandTimeoutSec) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -1331,7 +1484,7 @@ func (s *Service) runCommand(parent context.Context, command string) (string, er
 	cmd.Dir = root
 	hideCmd(cmd)
 	out, runErr := cmd.CombinedOutput()
-	text := clip(string(out), maxToolOutput)
+	text := clip(string(out), s.settings.Load().Agent.Normalized().MaxToolOutputChars)
 	if ctx.Err() == context.DeadlineExceeded {
 		return text + "\n(command timed out)", nil
 	}
@@ -1377,6 +1530,77 @@ func parsePlan(args map[string]any) []planStep {
 		}
 	}
 	return out
+}
+
+func hasOpenPlanStep(steps []planStep) bool {
+	for _, step := range steps {
+		if step.Status != "done" {
+			return true
+		}
+	}
+	return false
+}
+
+func visibleAssistantContent(content string) string {
+	text := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(content, "\r\n", "\n"), "\r", "\n"))
+	if text == "" {
+		return ""
+	}
+	if idx := hiddenAssistantTailIndex(text); idx >= 0 {
+		text = text[:idx]
+	}
+	return strings.TrimSpace(text)
+}
+
+func hiddenAssistantTailIndex(text string) int {
+	best := -1
+	for _, marker := range []string{"<channel|>", "<|channel", "<|thought", "\nthought\n", "\nanalysis\n"} {
+		if idx := strings.Index(text, marker); idx >= 0 && (best < 0 || idx < best) {
+			best = idx
+		}
+	}
+	offset := 0
+	for _, line := range strings.SplitAfter(text, "\n") {
+		if isInternalAssistantLine(strings.TrimSpace(line)) && (best < 0 || offset < best) {
+			best = offset
+			break
+		}
+		offset += len(line)
+	}
+	return best
+}
+
+func isInternalAssistantLine(line string) bool {
+	lower := strings.ToLower(line)
+	switch {
+	case lower == "thought" || lower == "analysis":
+		return true
+	case strings.HasPrefix(lower, "the user denied the write_file request"):
+		return true
+	case strings.HasPrefix(lower, "the user denied the append_file request"):
+		return true
+	case strings.HasPrefix(lower, "the write_file was rejected"):
+		return true
+	case strings.HasPrefix(lower, "since write_file was denied"):
+		return true
+	case strings.HasPrefix(lower, "wait, looking at the previous turn"):
+		return true
+	case strings.HasPrefix(lower, "wait, i see what happened"):
+		return true
+	case strings.HasPrefix(lower, "wait, i see the instruction"):
+		return true
+	case strings.HasPrefix(lower, "actually, looking at the error"):
+		return true
+	case strings.HasPrefix(lower, "actually, let me try"):
+		return true
+	case strings.HasPrefix(lower, "let me try append_file"):
+		return true
+	case strings.Contains(lower, "continue now by emitting real tool_calls"):
+		return true
+	case strings.HasPrefix(lower, "the prompt says") && strings.Contains(lower, "tool"):
+		return true
+	}
+	return false
 }
 
 func firstStr(m map[string]any, keys ...string) string {

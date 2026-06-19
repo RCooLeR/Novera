@@ -1,8 +1,9 @@
-import { useStore } from "../state/store";
+import { agentConfigFromSettings, useStore } from "../state/store";
 
 export default function SettingsView() {
   const settings = useStore((s) => s.settings);
   const saveEditorConfig = useStore((s) => s.saveEditorConfig);
+  const saveAgentConfig = useStore((s) => s.saveAgentConfig);
   const setUIFontSize = useStore((s) => s.setUIFontSize);
   const saveLLMConfig = useStore((s) => s.saveLLMConfig);
   const setApiKey = useStore((s) => s.setApiKey);
@@ -12,6 +13,7 @@ export default function SettingsView() {
   if (!settings) return <div className="settingsv__empty">Loading…</div>;
   const ed = settings.editor;
   const llm = settings.llm;
+  const agent = agentConfigFromSettings(settings);
 
   return (
     <div className="settingsv">
@@ -123,6 +125,67 @@ export default function SettingsView() {
         <button className="btn" onClick={() => void loadModels()}>
           Load models
         </button>
+      </section>
+
+      <section className="settingsv__group">
+        <h3>Agent runtime</h3>
+        <label className="settingsv__row">
+          <span>Tool output chars</span>
+          <input
+            key={`agent-output-${agent.maxToolOutputChars}`}
+            type="number"
+            min={1000}
+            max={50000}
+            step={500}
+            defaultValue={agent.maxToolOutputChars}
+            onBlur={(e) => void saveAgentConfig({ maxToolOutputChars: Number(e.target.value) || 6000 })}
+          />
+        </label>
+        <label className="settingsv__row">
+          <span>Step batch</span>
+          <input
+            key={`agent-batch-${agent.stepBatch}`}
+            type="number"
+            min={1}
+            max={500}
+            defaultValue={agent.stepBatch}
+            onBlur={(e) => void saveAgentConfig({ stepBatch: Number(e.target.value) || 50 })}
+          />
+        </label>
+        <label className="settingsv__row">
+          <span>Max steps</span>
+          <input
+            key={`agent-steps-${agent.maxTotalSteps}`}
+            type="number"
+            min={1}
+            max={10000}
+            defaultValue={agent.maxTotalSteps}
+            onBlur={(e) => void saveAgentConfig({ maxTotalSteps: Number(e.target.value) || 1000 })}
+          />
+        </label>
+        <label className="settingsv__row">
+          <span>History window</span>
+          <input
+            key={`agent-history-${agent.historyWindowGroups}`}
+            type="number"
+            min={1}
+            max={50}
+            defaultValue={agent.historyWindowGroups}
+            onBlur={(e) => void saveAgentConfig({ historyWindowGroups: Number(e.target.value) || 8 })}
+          />
+        </label>
+        <label className="settingsv__row">
+          <span>Command timeout</span>
+          <input
+            key={`agent-cmd-${agent.commandTimeoutSec}`}
+            type="number"
+            min={5}
+            max={3600}
+            defaultValue={agent.commandTimeoutSec}
+            onBlur={(e) => void saveAgentConfig({ commandTimeoutSec: Number(e.target.value) || 60 })}
+          />
+        </label>
+        <div className="settingsv__note">Tuning for slow local models and long-running agent work.</div>
       </section>
 
       <section className="settingsv__group">

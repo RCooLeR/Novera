@@ -7,6 +7,46 @@ import Splitter from "./Splitter";
 const DEFAULT_REQUEST_TIMEOUT_SEC = 1800;
 const MAX_REQUEST_TIMEOUT_SEC = 21600;
 
+function visibleAssistantContent(content: string): string {
+  let text = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!text) return "";
+  const markerIndexes = ["<channel|>", "<|channel", "<|thought", "\nthought\n", "\nanalysis\n"]
+    .map((marker) => text.indexOf(marker))
+    .filter((idx) => idx >= 0);
+  let cut = markerIndexes.length ? Math.min(...markerIndexes) : -1;
+  let offset = 0;
+  for (const line of text.match(/[^\n]*(?:\n|$)/g) ?? []) {
+    if (line === "") break;
+    if (isInternalAssistantLine(line.trim())) {
+      cut = cut < 0 ? offset : Math.min(cut, offset);
+      break;
+    }
+    offset += line.length;
+  }
+  if (cut >= 0) text = text.slice(0, cut);
+  return text.trim();
+}
+
+function isInternalAssistantLine(line: string): boolean {
+  const lower = line.toLowerCase();
+  return (
+    lower === "thought" ||
+    lower === "analysis" ||
+    lower.startsWith("the user denied the write_file request") ||
+    lower.startsWith("the user denied the append_file request") ||
+    lower.startsWith("the write_file was rejected") ||
+    lower.startsWith("since write_file was denied") ||
+    lower.startsWith("wait, looking at the previous turn") ||
+    lower.startsWith("wait, i see what happened") ||
+    lower.startsWith("wait, i see the instruction") ||
+    lower.startsWith("actually, looking at the error") ||
+    lower.startsWith("actually, let me try") ||
+    lower.startsWith("let me try append_file") ||
+    lower.includes("continue now by emitting real tool_calls") ||
+    (lower.startsWith("the prompt says") && lower.includes("tool"))
+  );
+}
+
 // Minimal, dependency-free, XSS-safe markdown for assistant output: fenced code
 // blocks and inline `code` rendered as real elements, everything else as plain
 // React text nodes (never raw HTML), so model output can't inject markup.
@@ -23,7 +63,7 @@ function renderInline(text: string): ReactNode[] {
 }
 
 function MessageBody({ content }: { content: string }) {
-  const parts = content.split(/```/);
+  const parts = visibleAssistantContent(content).split(/```/);
   return (
     <>
       {parts.map((part, i) => {
@@ -297,11 +337,11 @@ export default function AssistantPanel() {
                 {m.role === "assistant" ? <MessageBody content={m.content} /> : m.content}
                 {m.streaming && <span className="msg__cursor">▍</span>}
               </div>
-              {m.role === "assistant" && !m.streaming && m.content && (
+              {m.role === "assistant" && !m.streaming && visibleAssistantContent(m.content) && (
                 <button
                   className="msg__copy"
                   title="Copy message"
-                  onClick={() => void navigator.clipboard?.writeText(m.content)}
+                  onClick={() => void navigator.clipboard?.writeText(visibleAssistantContent(m.content))}
                 >
                   <Copy size={12} />
                 </button>

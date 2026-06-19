@@ -7,6 +7,7 @@ export {
 };
 
 export {
+    Agent,
     Editor,
     LLM,
     Settings

@@ -73,3 +73,19 @@ func TestAddCSVColumn(t *testing.T) {
 		t.Fatalf("add-column wrong:\n%q", out.String())
 	}
 }
+
+func TestAddCSVColumnToleratesRaggedRows(t *testing.T) {
+	csvData := "a,b\n1\n2,3,4\n"
+	var out strings.Builder
+	rows, err := AddCSVColumn(strings.NewReader(csvData), &out, ',', "src", "import")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 {
+		t.Fatalf("rows = %d, want 2", rows)
+	}
+	want := "a,b,src\n1,import\n2,3,4,import\n"
+	if out.String() != want {
+		t.Fatalf("add-column ragged wrong:\n got %q\nwant %q", out.String(), want)
+	}
+}

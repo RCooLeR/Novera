@@ -1,20 +1,24 @@
 package db
 
-import "testing"
+import (
+	"database/sql"
+	"path/filepath"
+	"testing"
+)
 
 func TestIsLoopbackHost(t *testing.T) {
 	cases := map[string]bool{
-		"":             true,
-		"localhost":    true,
-		"LocalHost":    true,
-		"127.0.0.1":    true,
-		"127.0.0.5":    true,
-		"::1":          true,
-		"[::1]":        true,
+		"":               true,
+		"localhost":      true,
+		"LocalHost":      true,
+		"127.0.0.1":      true,
+		"127.0.0.5":      true,
+		"::1":            true,
+		"[::1]":          true,
 		"db.example.com": false,
-		"10.0.0.5":     false,
-		"192.168.1.10": false,
-		"0.0.0.0":      false,
+		"10.0.0.5":       false,
+		"192.168.1.10":   false,
+		"0.0.0.0":        false,
 	}
 	for host, want := range cases {
 		if got := isLoopbackHost(host); got != want {
@@ -82,6 +86,52 @@ func TestDSNMySQLSecureByDefault(t *testing.T) {
 	}
 }
 
+func TestSQLiteQueryIsReadOnlyAndLimited(t *testing.T) {
+	path := seedSQLite(t)
+	s := &Service{profiles: []Profile{{ID: "local", Name: "Local", Kind: "sqlite", File: path}}}
+
+	got, err := s.Query("local", "SELECT id, name FROM users ORDER BY id", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RowCount != 1 || !got.Truncated {
+		t.Fatalf("RowCount=%d Truncated=%v, want 1/true", got.RowCount, got.Truncated)
+	}
+	if len(got.Rows) != 1 || got.Rows[0][1] != "Ada" {
+		t.Fatalf("unexpected rows: %+v", got.Rows)
+	}
+
+	if _, err := s.Query("local", "DELETE FROM users", 10); err == nil {
+		t.Fatal("DELETE should be rejected by read-only query guard")
+	}
+	if _, err := s.Query("local", "SELECT id FROM users; DROP TABLE users;", 10); err == nil {
+		t.Fatal("multi-statement query should be rejected")
+	}
+
+	after, err := s.Query("local", "SELECT count(*) FROM users", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Rows[0][0] != "2" {
+		t.Fatalf("table changed after rejected writes, count=%q", after.Rows[0][0])
+	}
+}
+
+func TestSQLiteListColumnsRejectsUnsafeTableName(t *testing.T) {
+	path := seedSQLite(t)
+	s := &Service{profiles: []Profile{{ID: "local", Name: "Local", Kind: "sqlite", File: path}}}
+	if _, err := s.ListColumns("local", `users"; DROP TABLE users; --`); err == nil {
+		t.Fatal("unsafe sqlite table identifier should be rejected")
+	}
+	cols, err := s.ListColumns("local", "users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cols) != 2 || cols[0].Name != "id" || cols[1].Name != "name" {
+		t.Fatalf("columns = %+v, want id/name", cols)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
@@ -89,4 +139,19 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func seedSQLite(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Bob');`); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

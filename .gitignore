@@ -1,4 +1,6 @@
 .task
+.gotmp
+.claude
 .idea
 .tmp-test-files
 bin

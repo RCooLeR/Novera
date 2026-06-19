@@ -1,102 +1,190 @@
-# Novera (Wails v3)
+# Novera
 
-Novera is a local-first AI workbench — an IDE-like desktop app. This is the
-**Wails v3 + React/TypeScript** rebuild of the original Go/Fyne `Novera_v2`,
-chosen so the hard UI surfaces (code editor, terminal, diff) can use mature web
-components (Monaco, xterm.js, Monaco diff) instead of hand-built canvas widgets.
+Novera is a local-first AI workbench for working with code, data files, SQL
+dumps, databases, terminals, and local or OpenAI-compatible LLMs from one
+desktop app.
 
-The Go backend stays native; the UI is web tech in a system WebView2 window.
+The app is built with a native Go backend and a React/TypeScript frontend in
+Wails v3. The backend owns filesystem, Git, terminal, database, LLM, and
+mutation safety. The frontend provides the editor/workbench UI with Monaco,
+xterm.js, virtualized grids, and generated Wails bindings.
+
+## Current Capabilities
+
+- Workspace explorer with lazy tree loading, new file/folder, rename, delete,
+  stale-save protection, encoding conversion, and large/binary file handling.
+- Monaco editor tabs, diff viewer, breadcrumbs, status bar, command palette,
+  quick-open, and global workspace search.
+- Source Control panel with status, stage/unstage, commit, and changed-file
+  diffs.
+- Integrated terminal backed by a native PTY/ConPTY.
+- Problems panel for TODO/FIXME/HACK/XXX and merge-conflict markers.
+- AI Ask mode for chat against Ollama, OpenAI, or a custom OpenAI-compatible
+  endpoint, with active-file context.
+- AI Agent mode with contextual tool selection, approval-gated mutations,
+  visible plan updates, audit log, Jobs log integration, and configurable
+  runtime limits for slow local models.
+- Data tools for CSV/TSV schema inference, CSV-to-SQL generation, SQL dump
+  analysis, dump cleaning, table extraction, dump splitting, CSV projection,
+  and constant-column export.
+- Database connections for SQLite/Postgres/MySQL with encrypted credentials,
+  schema browsing, guarded read-only queries, and virtualized result grids.
+- Artifact registry for produced files and lineage/freshness tracking.
 
 ## Stack
 
-- **Backend:** Go 1.24+, [Wails v3](https://v3.wails.io) (alpha). Services in `internal/*`.
-- **Frontend:** React 18 + TypeScript + Vite, [Monaco editor](https://microsoft.github.io/monaco-editor/), zustand, lucide icons.
-- **Windows runtime:** WebView2 (preinstalled on Windows 11).
+- Go 1.24+
+- Wails v3 alpha
+- React 18 + TypeScript + Vite
+- Monaco editor
+- xterm.js
+- Zustand
+- lucide-react
 
 ## Prerequisites
 
-- Go 1.24+ and Node 18+
-- `wails3` CLI (`go install github.com/wailsapp/wails/v3/cmd/wails3@latest`)
-
-## Run (dev, hot reload)
+- Go 1.24+
+- Node 18+
+- Wails v3 CLI:
 
 ```powershell
-cd E:\Development\projects\apps\rcooler\Novera_Wails3
+go install github.com/wailsapp/wails/v3/cmd/wails3@latest
+```
+
+## Development
+
+Install frontend dependencies:
+
+```powershell
+cd frontend
+npm install
+```
+
+Run the app with hot reload:
+
+```powershell
+cd ..
 wails3 dev -config ./build/config.yml -port 9245
 ```
 
-## Build (production Windows exe)
+Run frontend checks:
 
 ```powershell
-wails3 task build        # -> bin\Novera.exe  (single self-contained binary)
+cd frontend
+npm run typecheck
+npm run test
 ```
 
-After changing any Go service signature, regenerate the TypeScript bindings:
+Run focused backend tests:
 
 ```powershell
-wails3 generate bindings -ts
+go test ./internal/settings ./internal/agent ./internal/datatools ./internal/db
 ```
 
-## Project layout
+Run all backend tests:
 
+```powershell
+go test ./...
 ```
-main.go                     App bootstrap: window + service registration
-shell_service.go            Shell service: native folder picker, open-external
+
+## Build
+
+Production Windows build:
+
+```powershell
+task build
+```
+
+The executable is written to:
+
+```text
+bin/Novera.exe
+```
+
+If Go service types or method signatures change, regenerate TypeScript bindings:
+
+```powershell
+wails3 generate bindings -f '-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui"' -clean=true -ts
+```
+
+The generated bindings live in `frontend/bindings/` and are committed so the
+frontend remains type-safe without requiring every contributor to regenerate
+them before editing UI code.
+
+## Project Layout
+
+```text
+main.go                         Wails app bootstrap and service wiring
+secret_service.go               Secret API exposed to the frontend
+shell_service.go                Native shell helpers and folder picker
 internal/
-  paths/                    Workspace-rooted path containment (securejoin)
-  workspace/                File service: list/read/write, atomic + stale-guarded
-  settings/                 Persisted preferences (%AppData%/Novera/settings.json)
+  agent/                        Agent mode, tool loop, approvals, audit, rollback
+  artifacts/                    Artifact registry and freshness checks
+  datatools/                    CSV and SQL dump inspection/transforms
+  db/                           Database profiles, read-only query service
+  gitsvc/                       Git status/diff/stage/commit service
+  jobs/                         Background job ledger and logs
+  llm/                          Ask-mode streaming and provider integration
+  netsafe/                      Endpoint/redirect safety helpers
+  secret/                       OS-backed secret storage
+  settings/                     Persisted non-secret preferences
+  sqlguard/                     Single read-only SQL query guard
+  terminal/                     PTY/ConPTY terminal service
+  watcher/                      Filesystem watcher bridge
+  workspace/                    Workspace path containment and file APIs
 frontend/
-  src/
-    lib/        monaco.ts (workers+theme), services.ts (bindings), lang.ts
-    state/      store.ts (zustand: workspace, tree, tabs, editor, ui)
-    components/ TitleBar, ActivityBar, SideBar, FileTree, EditorTabs,
-                EditorPane (Monaco), StatusBar, Welcome
-  bindings/                 Auto-generated TS bindings (do not edit)
+  src/components/               Workbench views and panels
+  src/state/store.ts            App state and async actions
+  src/lib/                      Bindings re-exports, Monaco setup, utilities
+  bindings/                     Generated Wails TypeScript bindings
+build/                          Wails build config and platform packaging files
 ```
 
-## Architecture
+## Safety Model
 
-Services own all filesystem/OS access and never touch the UI; the React layer
-calls them through generated, type-safe bindings (async Promises). This mirrors
-the clean services/UI split from the previous generation — which is why the Go
-logic is portable — while replacing the entire view layer with web components.
+Novera is local-first and intentionally conservative around user data:
 
-### Fixes carried over by design (from the `Novera_v2` review)
+- Workspace paths are resolved through containment checks before reads/writes.
+- Saves are atomic and guarded by a revision hash to avoid stale clobbers.
+- Secrets are stored in the OS secret store, not plaintext settings.
+- Agent file mutations, shell commands, and sensitive DB reads require explicit
+  approval.
+- Agent tool results are clipped, logged, and audited; raw tool bodies are not
+  shown in the assistant log.
+- Denied agent actions stop the run cleanly instead of attempting fallback
+  mutations.
+- Database user queries pass `sqlguard` and run through read-only execution
+  paths.
 
-- **Path containment:** all UI paths resolve through `securejoin` — no symlink
-  escape from the workspace root.
-- **UTF-8-safe reads:** binary sniffing + size caps; no mid-rune truncation.
-- **Atomic writes + optimistic concurrency:** writes go temp→rename, guarded by
-  a content-hash revision so a stale save can't clobber on-disk changes.
-- **Secrets never in plain config:** settings hold no credential material.
+See [Agent Runtime](docs/agent-runtime.md) for Agent mode behavior and tuning.
 
-## Status / roadmap
+## Runtime Settings
 
-Implemented: app shell, dark theme + branding, Open Folder, lazy file tree,
-Monaco editor with tabs + save (stale-guarded), recents, settings persistence,
-**Source Control** (status / stage / unstage / commit, with the changed-file
-diff rendered in Monaco's diff editor; hardened non-interactive `git` with
-correct `-z`/`core.quotepath` porcelain parsing), an **integrated terminal**
-(real ConPTY/PTY shell via go-pty, xterm.js frontend, bottom panel, Ctrl+`),
-an **AI assistant** (right-hand panel, streaming chat against any
-OpenAI-compatible provider — Ollama/OpenAI/custom — with the active file sent as
-context; API keys live in a dedicated DPAPI-encrypted secret store, never in
-settings or chat history), and **Database** connections + read-only query
-(SQLite/Postgres/MySQL; queries pass `sqlguard`'s single read-only-SELECT check
-AND run inside a read-only transaction; credentials in the encrypted secret
-store; results in a virtualised grid; click a table to query it),
-**file operations** (right-click / header: new file·folder, rename, delete —
-via inline modals since WebView2 blocks `window.prompt`; rename remaps open
-tabs), and a **command palette + quick-open** (Ctrl+P fuzzy file open, Ctrl+Shift+P
-commands; fed by a recursive `ListAllFiles` that skips heavy dirs).
+Settings are stored under the OS user config directory, for example
+`%AppData%/Novera/settings.json` on Windows. Credential material is stored
+separately by the secret service.
 
-**workspace search** (Go grep skipping heavy dirs/binaries; results grouped by
-file; click a match to open + reveal the line in Monaco), **Problems** (static
-TODO/FIXME/HACK/XXX + merge-conflict scan in the bottom panel, anchored to avoid
-false positives), and assistant **Agent mode** (a tool-calling loop —
-list/read/search/git-status run automatically, `write_file` is gated behind
-per-call user approval; streamed to the panel with an Ask/Agent toggle and
-inline Allow/Deny cards).
+Important local-LLM controls:
 
-The core feature set is complete; ongoing work is review-driven hardening.
+- Request timeout: per LLM request/agent completion timeout.
+- Tool output chars: maximum tool result text sent back to the model.
+- Step batch: how many tool rounds run before asking whether to continue.
+- Max steps: hard runaway limit for one agent run.
+- History window: number of recent assistant/tool rounds sent to the model.
+- Command timeout: maximum duration for one approved shell command.
+
+## Repository Hygiene
+
+Generated and local-only folders are ignored:
+
+- `bin/`
+- `frontend/dist/`
+- `frontend/node_modules/`
+- `.task/`
+- `.gotmp/`
+- `.idea/`
+- `.claude/`
+- `.tmp-test-files/`
+
+Do not commit local datasets, generated build outputs, IDE metadata, or
+temporary LLM/tool scratch files.
