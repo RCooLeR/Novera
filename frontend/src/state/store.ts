@@ -93,6 +93,7 @@ const API_KEY_REF = "llm.apikey";
 const MAX_CHAT_HISTORY = 20;
 const MAX_AGENT_CONTEXT_MESSAGES = 8;
 const MAX_AGENT_CONTEXT_CHARS = 8000;
+export const DEFAULT_OLLAMA_MODELS = ["gemma4:12b-it-q_8_0", "gemma4:12b"];
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   maxToolOutputChars: 6000,
   stepBatch: 50,
@@ -159,6 +160,18 @@ function clampAgentConfig(patch: Partial<AgentConfig>, current: AgentConfig): Ag
   next.historyWindowGroups = Math.max(1, Math.min(50, Math.round(next.historyWindowGroups || DEFAULT_AGENT_CONFIG.historyWindowGroups)));
   next.commandTimeoutSec = Math.max(5, Math.min(3600, Math.round(next.commandTimeoutSec || DEFAULT_AGENT_CONFIG.commandTimeoutSec)));
   return next;
+}
+
+function mergeModels(preferred: string[], discovered: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const model of [...preferred, ...discovered]) {
+    const trimmed = model.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
 }
 
 const dirOf = (rel: string): string => {
@@ -459,7 +472,7 @@ export const useStore = create<State>()((set, get) => ({
   agentMode: false,
   chat: [],
   chatStreaming: false,
-  models: [],
+  models: DEFAULT_OLLAMA_MODELS,
   streamReqId: null,
   streamMsgId: null,
   agentRunId: null,
@@ -1300,14 +1313,23 @@ export const useStore = create<State>()((set, get) => ({
   },
 
   loadModels: async (silent = false) => {
-    if (!get().settings?.llm.baseURL) return;
+    const llm = get().settings?.llm;
+    const fallbackModels = llm?.provider === "ollama" ? DEFAULT_OLLAMA_MODELS : [];
+    if (!llm?.baseURL) {
+      set({ models: fallbackModels });
+      return;
+    }
     try {
       const m = await LLM.ListModels();
-      set({ models: m });
+      const models = mergeModels(fallbackModels, m);
+      set({ models });
       // Auto-select a model on first run so chat works without manual setup.
       const cur = get().settings?.llm.model;
-      if (!cur && m.length > 0) await get().saveLLMConfig({ model: m[0] });
+      if (!cur && models.length > 0) await get().saveLLMConfig({ model: models[0] });
     } catch (e) {
+      set({ models: fallbackModels });
+      const cur = get().settings?.llm.model;
+      if (!cur && fallbackModels.length > 0) await get().saveLLMConfig({ model: fallbackModels[0] });
       if (!silent) get().setStatus(errMessage(e), "error");
     }
   },

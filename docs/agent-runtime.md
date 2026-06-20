@@ -52,6 +52,12 @@ copy-to-clipboard path.
 
 ## Runtime Limits
 
+New installs default to local Ollama at `http://localhost:11434/v1` and prefer
+`gemma4:12b-it-q_8_0`, with `gemma4:12b` kept as a secondary local option in
+the UI. OpenAI and custom OpenAI-compatible providers do not inherit those local
+model names; their selected model should come from the provider or be entered
+explicitly.
+
 Agent limits are configurable in Settings > Agent runtime:
 
 - Tool output chars

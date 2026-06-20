@@ -10,15 +10,23 @@ export function setActiveEditor(ed: Ed | null) {
   current = ed;
 }
 
-export async function formatActiveDocument(): Promise<void> {
+export async function runActiveEditorAction(actionId: string): Promise<boolean> {
   const ed = current;
-  if (!ed) return;
+  if (!ed) return false;
   try {
-    const action = ed.getAction("editor.action.formatDocument");
-    if (action) await action.run();
+    ed.focus();
+    const action = ed.getAction(actionId);
+    if (!action) return false;
+    await action.run();
+    return true;
   } catch {
     // The editor may have been disposed between capture and run (e.g. the tab
     // closed) — the optional-chaining only guarded a null handle, not a disposed
     // one. Swallow rather than surfacing an unhandled rejection.
+    return false;
   }
+}
+
+export async function formatActiveDocument(): Promise<void> {
+  await runActiveEditorAction("editor.action.formatDocument");
 }

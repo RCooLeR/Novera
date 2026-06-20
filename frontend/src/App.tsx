@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 import { Events } from "@wailsio/runtime";
 import { useStore } from "./state/store";
-import type { ViewId } from "./state/store";
+import { runMenuAction } from "./lib/menuActions";
+import type { AppMenuAction } from "./lib/menuActions";
 import TitleBar from "./components/TitleBar";
 import AssistantPanel from "./components/AssistantPanel";
 import ActivityBar from "./components/ActivityBar";
@@ -30,6 +31,7 @@ export default function App() {
   const assistantVisible = useStore((s) => s.assistantVisible);
   const sidebarWidth = useStore((s) => s.sidebarWidth);
   const assistantWidth = useStore((s) => s.assistantWidth);
+  const pickAndOpen = useStore((s) => s.pickAndOpen);
   const saveActive = useStore((s) => s.saveActive);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const togglePanel = useStore((s) => s.togglePanel);
@@ -84,33 +86,7 @@ export default function App() {
     });
     const offMenu = Events.On("menu", (e: { data: unknown }) => {
       const action = String(Array.isArray(e.data) ? e.data[0] : e.data);
-      const g = useStore.getState();
-      const showView = (v: ViewId) => {
-        g.setView(v);
-        if (!useStore.getState().sidebarVisible) g.toggleSidebar();
-      };
-      switch (action) {
-        case "open_folder": void g.pickAndOpen(); break;
-        case "new_file": g.startNewFile(""); break;
-        case "new_folder": g.startNewFolder(""); break;
-        case "save": void g.saveActive(); break;
-        case "palette": g.openPalette("commands"); break;
-        case "quickopen": g.openPalette("files"); break;
-        case "view_explorer": showView("explorer"); break;
-        case "view_search": showView("search"); break;
-        case "view_git": showView("git"); break;
-        case "view_db": showView("db"); break;
-        case "view_settings": showView("settings"); break;
-        case "view_problems": g.showProblems(); break;
-        case "tool_csv_schema": void g.runCsvSchema(); break;
-        case "tool_csv_to_sql": void g.runCsvToSql(); break;
-        case "tool_dump_analyze": void g.runDumpAnalyze(); break;
-        case "tool_clean_dump": g.openCleanDump(); break;
-        case "tool_save_artifact": void g.saveActiveAsArtifact("file"); break;
-        case "toggle_sidebar": g.toggleSidebar(); break;
-        case "toggle_panel": g.togglePanel(); break;
-        case "toggle_assistant": g.toggleAssistant(); break;
-      }
+      runMenuAction(action as AppMenuAction);
     });
     return () => {
       offDelta();
@@ -145,6 +121,11 @@ export default function App() {
         void saveActive();
         return;
       }
+      if (mod && key === "o") {
+        e.preventDefault();
+        void pickAndOpen();
+        return;
+      }
       if (inPlainField) return;
       if (mod && e.shiftKey && key === "p") {
         e.preventDefault();
@@ -162,7 +143,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [saveActive, toggleSidebar, togglePanel, openPalette]);
+  }, [pickAndOpen, saveActive, toggleSidebar, togglePanel, openPalette]);
 
   const showSidebar = isOpen && sidebarVisible;
   const showAssistant = isOpen && assistantVisible;

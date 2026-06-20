@@ -43,15 +43,17 @@ input, textarea { font-family: inherit; color: inherit; }
 
 /* ---- title bar ---- */
 .titlebar {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 8px;
   height: var(--titlebar-h);
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
   padding: 0 10px;
+  position: relative;
+  z-index: 50;
   --wails-draggable: drag;
 }
 .titlebar .no-drag { --wails-draggable: no-drag; }
-.titlebar__brand { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text-strong); }
+.titlebar__brand { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text-strong); flex: none; }
 .titlebar__brand img { width: 18px; height: 18px; }
 .titlebar__ws { color: var(--text-muted); font-size: var(--fs-sm); }
 .titlebar__spacer { flex: 1; }
@@ -61,6 +63,82 @@ input, textarea { font-family: inherit; color: inherit; }
   font-size: var(--fs-sm);
 }
 .titlebar__btn:hover { background: var(--bg-hover); color: var(--text-strong); }
+
+/* ---- app menu ---- */
+.appmenu {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 100%;
+  flex: none;
+}
+.appmenu__root { position: relative; }
+.appmenu__trigger {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1;
+}
+.appmenu__trigger:hover,
+.appmenu__trigger.active {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+.appmenu__dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: var(--z-overlay);
+  min-width: 230px;
+  max-height: min(70vh, 480px);
+  overflow: auto;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+}
+.appmenu__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+  width: 100%;
+  min-height: 27px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  text-align: left;
+  white-space: nowrap;
+}
+.appmenu__item:hover:not(:disabled),
+.appmenu__item:focus-visible:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+  outline: none;
+}
+.appmenu__item:disabled {
+  color: var(--text-faint);
+  cursor: default;
+  opacity: 0.68;
+}
+.appmenu__shortcut {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+.appmenu__item:hover:not(:disabled) .appmenu__shortcut,
+.appmenu__item:focus-visible:not(:disabled) .appmenu__shortcut {
+  color: rgba(255, 255, 255, 0.72);
+}
+.appmenu__sep {
+  height: 1px;
+  margin: 4px 3px;
+  background: var(--border);
+}
 
 /* ---- activity bar ---- */
 .activitybar {

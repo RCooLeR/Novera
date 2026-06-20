@@ -17,6 +17,12 @@ import (
 
 const maxRecent = 12
 
+const (
+	DefaultLLMProvider = "ollama"
+	DefaultLLMBaseURL  = "http://localhost:11434/v1"
+	DefaultLLMModel    = "gemma4:12b-it-q_8_0"
+)
+
 // DefaultRequestTimeoutSec is the fallback per-request LLM timeout. It is
 // generous on purpose: a local model's first call also pays model-load time,
 // and agent completions are non-streaming (the whole answer must be generated
@@ -54,6 +60,24 @@ type LLM struct {
 	// the whole Ask-mode stream). User-tunable because local-model latency
 	// varies wildly with hardware. 0 means "use the default" — see RequestTimeout.
 	RequestTimeoutSec int `json:"requestTimeoutSec"`
+}
+
+// Normalized fills missing LLM fields. The default model is local-Ollama only:
+// custom/OpenAI profiles should stay explicit instead of inheriting a local tag.
+func (l LLM) Normalized() LLM {
+	if strings.TrimSpace(l.Provider) == "" {
+		l.Provider = DefaultLLMProvider
+	}
+	if strings.TrimSpace(l.BaseURL) == "" && strings.EqualFold(l.Provider, DefaultLLMProvider) {
+		l.BaseURL = DefaultLLMBaseURL
+	}
+	if strings.TrimSpace(l.Model) == "" && strings.EqualFold(l.Provider, DefaultLLMProvider) {
+		l.Model = DefaultLLMModel
+	}
+	if l.RequestTimeoutSec == legacyDefaultRequestTimeoutSec {
+		l.RequestTimeoutSec = DefaultRequestTimeoutSec
+	}
+	return l
 }
 
 // Agent holds runtime controls for Agent mode. These are intentionally exposed:
@@ -161,9 +185,9 @@ func defaults() Settings {
 			Theme:    "novera-dark",
 		},
 		LLM: LLM{
-			Provider:          "ollama",
-			BaseURL:           "http://localhost:11434/v1",
-			Model:             "",
+			Provider:          DefaultLLMProvider,
+			BaseURL:           DefaultLLMBaseURL,
+			Model:             DefaultLLMModel,
 			RequestTimeoutSec: DefaultRequestTimeoutSec,
 		},
 		Agent: Agent{
@@ -241,12 +265,7 @@ func (s *Service) Load() Settings {
 	if out.RecentWorkspaces == nil {
 		out.RecentWorkspaces = []string{}
 	}
-	// Existing installs may have the previous default persisted explicitly. Move
-	// that old default forward so slow local models benefit without asking users
-	// to hand-edit settings.
-	if out.LLM.RequestTimeoutSec == legacyDefaultRequestTimeoutSec {
-		out.LLM.RequestTimeoutSec = DefaultRequestTimeoutSec
-	}
+	out.LLM = out.LLM.Normalized()
 	out.Agent = out.Agent.Normalized()
 	return out
 }
@@ -262,6 +281,7 @@ func (s *Service) saveLocked(in Settings) error {
 	if in.RecentWorkspaces == nil {
 		in.RecentWorkspaces = []string{}
 	}
+	in.LLM = in.LLM.Normalized()
 	in.Agent = in.Agent.Normalized()
 	// Never persist credentials embedded in the LLM base URL.
 	in.LLM.BaseURL = sanitizeBaseURL(in.LLM.BaseURL)
@@ -292,9 +312,7 @@ func (s *Service) RememberWorkspace(path string) (Settings, error) {
 			out = defaults()
 		}
 	}
-	if out.LLM.RequestTimeoutSec == legacyDefaultRequestTimeoutSec {
-		out.LLM.RequestTimeoutSec = DefaultRequestTimeoutSec
-	}
+	out.LLM = out.LLM.Normalized()
 	out.Agent = out.Agent.Normalized()
 	out.LastWorkspace = path
 	recents := make([]string, 0, maxRecent)

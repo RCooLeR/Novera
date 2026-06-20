@@ -126,79 +126,9 @@ func run() error {
 			},
 		},
 	})
-	win.SetMenu(appMenu())
 	mainWindow = win
 
 	// app.Run blocks until the app quits; returning the error lets main log it
 	// and exit non-zero without an abrupt log.Fatal.
 	return app.Run()
-}
-
-// emitMenu forwards a menu action to the frontend, which routes it to a store action.
-func emitMenu(action string) {
-	if app := application.Get(); app != nil {
-		app.Event.Emit("menu", action)
-	}
-}
-
-// guarded wraps a menu callback so a panic in a handler is logged instead of
-// crashing the UI thread (and the whole app) with it.
-func guarded(fn func()) func(*application.Context) {
-	return func(*application.Context) {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("menu handler panicked: %v", r)
-			}
-		}()
-		fn()
-	}
-}
-
-// appMenu builds the native menu bar. Items emit "menu" events handled by the UI.
-func appMenu() *application.Menu {
-	m := application.NewMenu()
-
-	file := m.AddSubmenu("File")
-	file.Add("Open Folder…").SetAccelerator("Ctrl+O").OnClick(guarded(func() { emitMenu("open_folder") }))
-	file.Add("New File").OnClick(guarded(func() { emitMenu("new_file") }))
-	file.Add("New Folder").OnClick(guarded(func() { emitMenu("new_folder") }))
-	file.AddSeparator()
-	file.Add("Save").SetAccelerator("Ctrl+S").OnClick(guarded(func() { emitMenu("save") }))
-	file.AddSeparator()
-	file.Add("Quit").OnClick(guarded(func() {
-		if app := application.Get(); app != nil {
-			app.Quit()
-		}
-	}))
-
-	// Standard Edit menu (undo/redo/cut/copy/paste/select-all) — native roles.
-	m.AddRole(application.EditMenu)
-
-	view := m.AddSubmenu("View")
-	view.Add("Command Palette").SetAccelerator("Ctrl+Shift+P").OnClick(guarded(func() { emitMenu("palette") }))
-	view.Add("Go to File…").SetAccelerator("Ctrl+P").OnClick(guarded(func() { emitMenu("quickopen") }))
-	view.AddSeparator()
-	view.Add("Explorer").OnClick(guarded(func() { emitMenu("view_explorer") }))
-	view.Add("Search").OnClick(guarded(func() { emitMenu("view_search") }))
-	view.Add("Source Control").OnClick(guarded(func() { emitMenu("view_git") }))
-	view.Add("Database").OnClick(guarded(func() { emitMenu("view_db") }))
-	view.Add("Problems").OnClick(guarded(func() { emitMenu("view_problems") }))
-	view.Add("Settings").OnClick(guarded(func() { emitMenu("view_settings") }))
-	view.AddSeparator()
-	view.Add("Toggle Sidebar").SetAccelerator("Ctrl+B").OnClick(guarded(func() { emitMenu("toggle_sidebar") }))
-	view.Add("Toggle Terminal").OnClick(guarded(func() { emitMenu("toggle_panel") }))
-	view.Add("Toggle Assistant").OnClick(guarded(func() { emitMenu("toggle_assistant") }))
-
-	// Data tools that operate on the active file (CSV/TSV or .sql/.dump). The
-	// same operations are also exposed to the AI assistant as agent tools.
-	tools := m.AddSubmenu("Tools")
-	tools.Add("Infer CSV Schema").OnClick(guarded(func() { emitMenu("tool_csv_schema") }))
-	tools.Add("CSV → SQL…").OnClick(guarded(func() { emitMenu("tool_csv_to_sql") }))
-	tools.AddSeparator()
-	tools.Add("Analyze SQL Dump").OnClick(guarded(func() { emitMenu("tool_dump_analyze") }))
-	tools.Add("Clean SQL Dump…").OnClick(guarded(func() { emitMenu("tool_clean_dump") }))
-	tools.AddSeparator()
-	tools.Add("Save File as Artifact").OnClick(guarded(func() { emitMenu("tool_save_artifact") }))
-
-	return m
 }

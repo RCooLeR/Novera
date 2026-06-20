@@ -1,9 +1,52 @@
 package settings
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestLLMDefaultsPreferLocalModels(t *testing.T) {
+	got := defaults().LLM
+	if got.Provider != DefaultLLMProvider {
+		t.Errorf("Provider = %q, want %q", got.Provider, DefaultLLMProvider)
+	}
+	if got.BaseURL != DefaultLLMBaseURL {
+		t.Errorf("BaseURL = %q, want %q", got.BaseURL, DefaultLLMBaseURL)
+	}
+	if got.Model != DefaultLLMModel {
+		t.Errorf("Model = %q, want %q", got.Model, DefaultLLMModel)
+	}
+}
+
+func TestLLMNormalizeOnlyDefaultsModelForOllama(t *testing.T) {
+	got := (LLM{}).Normalized()
+	if got.Model != DefaultLLMModel {
+		t.Errorf("empty LLM model = %q, want %q", got.Model, DefaultLLMModel)
+	}
+
+	custom := (LLM{Provider: "custom"}).Normalized()
+	if custom.Model != "" {
+		t.Errorf("custom LLM model = %q, want empty", custom.Model)
+	}
+	if custom.BaseURL != "" {
+		t.Errorf("custom LLM baseURL = %q, want empty", custom.BaseURL)
+	}
+}
+
+func TestLoadMigratesBlankOllamaModel(t *testing.T) {
+	svc := &Service{path: filepath.Join(t.TempDir(), "settings.json")}
+	raw := []byte(`{"llm":{"provider":"ollama","baseURL":"http://localhost:11434/v1","model":""}}`)
+	if err := os.MkdirAll(filepath.Dir(svc.path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(svc.path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.Load().LLM.Model; got != DefaultLLMModel {
+		t.Fatalf("loaded model = %q, want %q", got, DefaultLLMModel)
+	}
+}
 
 func TestAgentSettingsNormalizeDefaultsAndClamp(t *testing.T) {
 	got := (Agent{}).Normalized()

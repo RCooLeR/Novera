@@ -13,8 +13,9 @@ xterm.js, virtualized grids, and generated Wails bindings.
 
 - Workspace explorer with lazy tree loading, new file/folder, rename, delete,
   stale-save protection, encoding conversion, and large/binary file handling.
-- Monaco editor tabs, diff viewer, breadcrumbs, status bar, command palette,
-  quick-open, and global workspace search.
+- Monaco editor tabs, diff viewer, breadcrumbs, status bar, in-app
+  File/Edit/View/Tools menus, command palette, quick-open, and global
+  workspace search.
 - Source Control panel with status, stage/unstage, commit, and changed-file
   diffs.
 - Integrated terminal backed by a native PTY/ConPTY.
@@ -166,6 +167,9 @@ separately by the secret service.
 
 Important local-LLM controls:
 
+- Provider defaults: new installs start on local Ollama at
+  `http://localhost:11434/v1` with `gemma4:12b-it-q_8_0`; OpenAI and custom
+  OpenAI-compatible providers keep their model choice explicit.
 - Request timeout: per LLM request/agent completion timeout.
 - Tool output chars: maximum tool result text sent back to the model.
 - Step batch: how many tool rounds run before asking whether to continue.

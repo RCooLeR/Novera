@@ -1,5 +1,6 @@
 import { Bot, FolderOpen, PanelLeft } from "lucide-react";
 import { useStore } from "../state/store";
+import AppMenu from "./AppMenu";
 
 export default function TitleBar() {
   const wsName = useStore((s) => s.wsName);
@@ -14,6 +15,7 @@ export default function TitleBar() {
         <img src="/novera-logo.png" alt="Novera" />
         Novera
       </div>
+      <AppMenu />
       {isOpen && (
         <button
           className="titlebar__btn no-drag"
