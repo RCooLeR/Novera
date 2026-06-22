@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -447,6 +448,38 @@ func TestRunHTTPRequestRejectsCrossHostRedirect(t *testing.T) {
 	_, err := (&Service{}).runHTTPRequest(context.Background(), map[string]any{"url": source.URL})
 	if err == nil || !strings.Contains(err.Error(), "cross-host redirect") {
 		t.Fatalf("expected cross-host redirect error, got %v", err)
+	}
+}
+
+func TestSameHTTPToolRedirectHostAllowsApexWWWOnly(t *testing.T) {
+	mustURL := func(raw string) *url.URL {
+		t.Helper()
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	if !sameHTTPToolRedirectHost(mustURL("https://clarivate.com/"), mustURL("https://www.clarivate.com/")) {
+		t.Fatal("expected www -> apex redirect to be treated as same site")
+	}
+	if !sameHTTPToolRedirectHost(mustURL("https://www.clarivate.com/"), mustURL("https://clarivate.com/")) {
+		t.Fatal("expected apex -> www redirect to be treated as same site")
+	}
+	if sameHTTPToolRedirectHost(mustURL("https://evilclarivate.com/"), mustURL("https://www.clarivate.com/")) {
+		t.Fatal("different registrable host must not be treated as same site")
+	}
+	if sameHTTPToolRedirectHost(mustURL("https://login.example.net/"), mustURL("https://www.clarivate.com/")) {
+		t.Fatal("unrelated redirect host must not be treated as same site")
+	}
+	if sameHTTPToolRedirectHost(mustURL("http://127.0.0.1:1234/"), mustURL("http://www.127.0.0.1:1234/")) {
+		t.Fatal("IP-like redirects must not be treated as apex/www redirects")
+	}
+	if sameHTTPToolRedirectHost(mustURL("https://clarivate.com:444/"), mustURL("https://www.clarivate.com:443/")) {
+		t.Fatal("redirects across different ports must not be treated as same site")
+	}
+	if sameHTTPToolRedirectHost(mustURL("http://clarivate.com/"), mustURL("https://www.clarivate.com/")) {
+		t.Fatal("redirects across schemes must not be treated as same site")
 	}
 }
 

@@ -20,6 +20,10 @@ func TestArtifactLifecycleAndStaleness(t *testing.T) {
 	}
 	write("report.md", "# report")
 	write("data.csv", "a,b\n1,2\n")
+	past := time.Now().Add(-2 * time.Second)
+	if err := os.Chtimes(filepath.Join(root, "data.csv"), past, past); err != nil {
+		t.Fatal(err)
+	}
 
 	s := New(fakeWS{root: root})
 

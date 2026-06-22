@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -627,12 +628,15 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 				sig := sigName + "|" + strings.TrimSpace(tc.Function.Arguments)
 				seen[sig]++
 				var result dispatchResult
-				if seen[sig] > 2 {
-					result.output = "You already made this exact tool call twice; the result will not change. Stop calling tools and use what you already have to write your final answer."
+				if seen[sig] > 1 {
+					result.output = "You already made this exact tool call; the result will not change. Stop calling tools and use what you already have to write your final answer."
 					s.emit(agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: tc.Function.Name, Result: result.output})
 				} else {
 					result = s.dispatch(ctx, runID, tc, activeToolSet, activeToolNames, agentCfg)
 				}
+				toolMsg := wireMsg{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result.output}
+				messages = append(messages, toolMsg)
+				s.appendSession(sessionID, toolMsg)
 				if result.denied {
 					text := fmt.Sprintf("Action not approved: %s was not run. %s", result.tool, result.output)
 					s.jobs.Append(jobID, text)
@@ -644,9 +648,6 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 				if canon == "update_plan" && activeToolSet[canon] {
 					currentPlan = parsePlan(parseArgs(tc.Function.Arguments))
 				}
-				toolMsg := wireMsg{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result.output}
-				messages = append(messages, toolMsg)
-				s.appendSession(sessionID, toolMsg)
 				s.jobs.Append(jobID, fmt.Sprintf("%s: %s", tc.Function.Name, clip(result.output, 160)))
 			}
 			// Grow the active tool set as the task evolves: union in any tool the
@@ -1963,8 +1964,55 @@ func agentHTTPClient() *http.Client {
 			if err := netsafe.ValidateEndpoint(req.URL.String()); err != nil {
 				return err
 			}
-			return redirectPolicy(req, via)
+			if err := redirectPolicy(req, via); err != nil {
+				if len(via) > 0 && sameHTTPToolRedirectHost(req.URL, via[0].URL) {
+					return nil
+				}
+				return err
+			}
+			return nil
 		},
+	}
+}
+
+func sameHTTPToolRedirectHost(next, original *url.URL) bool {
+	if next == nil || original == nil {
+		return false
+	}
+	if !strings.EqualFold(next.Scheme, original.Scheme) {
+		return false
+	}
+	nextHost := strings.ToLower(strings.TrimSuffix(next.Hostname(), "."))
+	origHost := strings.ToLower(strings.TrimSuffix(original.Hostname(), "."))
+	if nextHost == "" || origHost == "" || net.ParseIP(nextHost) != nil || net.ParseIP(origHost) != nil {
+		return false
+	}
+	nextBase, nextWWW := stripHTTPToolWWW(nextHost)
+	origBase, origWWW := stripHTTPToolWWW(origHost)
+	if nextBase == "" || nextBase != origBase || nextWWW == origWWW {
+		return false
+	}
+	return canonicalHTTPToolPort(next) == canonicalHTTPToolPort(original)
+}
+
+func stripHTTPToolWWW(host string) (string, bool) {
+	if strings.HasPrefix(host, "www.") {
+		return strings.TrimPrefix(host, "www."), true
+	}
+	return host, false
+}
+
+func canonicalHTTPToolPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
 	}
 }
 
