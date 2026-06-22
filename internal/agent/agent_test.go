@@ -54,8 +54,8 @@ func TestWindowMessages(t *testing.T) {
 	if got[0].Role != "system" || got[0].Content != "SYS" {
 		t.Errorf("first message must be the original system prompt, got %+v", got[0])
 	}
-	if got[1].Role != "user" || got[1].Content != "TASK" {
-		t.Errorf("second message must be the original user task, got %+v", got[1])
+	if got[1].Role != "system" || !strings.Contains(got[1].Content, "Earlier steps omitted") {
+		t.Errorf("second message should be the omission marker, got %+v", got[1])
 	}
 	// Invariant: no tool message may appear without its assistant tool_calls
 	// earlier in the output (OpenAI-compatible APIs reject orphaned tool msgs).
@@ -84,6 +84,39 @@ func TestWindowMessages(t *testing.T) {
 	}
 	if !hasA4 {
 		t.Error("most recent round a4 should be kept")
+	}
+	for _, m := range got {
+		if m.Role == "user" && m.Content == "TASK" {
+			t.Error("the first user prompt should not be pinned forever in a long session")
+		}
+	}
+}
+
+func TestWindowMessagesKeepsUserBeforeFirstKeptRound(t *testing.T) {
+	asst := func(id string) wireMsg {
+		return wireMsg{Role: "assistant", ToolCalls: []wireToolCall{{ID: id, Type: "function", Function: wireFunc{Name: "read_file", Arguments: "{}"}}}}
+	}
+	tool := func(id string) wireMsg {
+		return wireMsg{Role: "tool", ToolCallID: id, Name: "read_file", Content: "ok"}
+	}
+	msgs := []wireMsg{
+		{Role: "system", Content: "SYS"},
+		{Role: "user", Content: "first"},
+		asst("a1"), tool("a1"),
+		{Role: "user", Content: "second"},
+		asst("a2"), tool("a2"),
+		{Role: "user", Content: "third"},
+		asst("a3"), tool("a3"),
+	}
+	got := windowMessages(msgs, 2)
+	var kept []string
+	for _, m := range got {
+		if m.Role == "user" {
+			kept = append(kept, m.Content)
+		}
+	}
+	if strings.Join(kept, ",") != "second,third" {
+		t.Fatalf("kept users = %v, want [second third]", kept)
 	}
 }
 
@@ -172,6 +205,43 @@ func TestAwaitGateDecisionReasons(t *testing.T) {
 			t.Fatalf("awaitGate = %s, want %s", got, gateTimedOut)
 		}
 	})
+}
+
+func TestSessionAppendAndReset(t *testing.T) {
+	s := &Service{
+		cancels:   map[string]context.CancelFunc{},
+		approvals: map[string]chan bool{},
+	}
+	call := wireToolCall{ID: "call-1", Type: "function", Function: wireFunc{Name: "db_query", Arguments: `{"sql":"select 1"}`}}
+	msg := wireMsg{Role: "assistant", ToolCalls: []wireToolCall{call}}
+	s.appendSession(0, msg)
+	msg.ToolCalls[0].Function.Name = "mutated"
+	if got := s.session[0].ToolCalls[0].Function.Name; got != "db_query" {
+		t.Fatalf("session did not deep-copy tool calls, got %q", got)
+	}
+
+	canceled := false
+	s.cancels["run-1"] = func() { canceled = true }
+	s.approvals["call-1"] = make(chan bool, 1)
+	s.ResetConversation()
+	if !canceled {
+		t.Fatal("ResetConversation did not cancel active runs")
+	}
+	if len(s.session) != 0 {
+		t.Fatalf("session length after reset = %d, want 0", len(s.session))
+	}
+	if len(s.cancels) != 0 || len(s.approvals) != 0 {
+		t.Fatalf("reset did not clear maps: cancels=%d approvals=%d", len(s.cancels), len(s.approvals))
+	}
+
+	s.appendSession(0, wireMsg{Role: "assistant", Content: "stale"})
+	if len(s.session) != 0 {
+		t.Fatal("stale run appended to reset session")
+	}
+	s.appendSession(s.sessionID, wireMsg{Role: "assistant", Content: "fresh"})
+	if len(s.session) != 1 || s.session[0].Content != "fresh" {
+		t.Fatalf("fresh append failed: %+v", s.session)
+	}
 }
 
 func TestParsePlan(t *testing.T) {

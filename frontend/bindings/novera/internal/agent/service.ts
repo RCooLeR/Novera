@@ -45,6 +45,15 @@ export function Cancel(runID: string): $CancellablePromise<void> {
 }
 
 /**
+ * ResetConversation clears the backend Agent-mode transcript. Use this when the
+ * user clears chat or switches workspaces; provider requests are stateless, but
+ * Novera keeps this transcript so follow-up messages behave like one session.
+ */
+export function ResetConversation(): $CancellablePromise<void> {
+    return $Call.ByID(3646622219);
+}
+
+/**
  * Start kicks off an agent run for the prompt and returns the run id.
  */
 export function Start(prompt: string): $CancellablePromise<string> {

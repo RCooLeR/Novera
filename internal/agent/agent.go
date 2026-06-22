@@ -48,6 +48,7 @@ const (
 	httpToolMaxResponseBytes    = 128 * 1024
 	httpToolMaxHeaders          = 30
 	httpToolMaxHeaderValueBytes = 4096
+	maxConversationMessages     = 240
 )
 
 const systemPrompt = `You are Novera's coding agent, operating inside the user's open workspace.
@@ -130,6 +131,8 @@ type Service struct {
 	cancels   map[string]context.CancelFunc
 	approvals map[string]chan bool
 	seq       int
+	session   []wireMsg
+	sessionID int
 
 	toolset       map[string]tool
 	toolOrder     []string          // stable order for a reproducible, cache-friendly wire payload
@@ -336,12 +339,35 @@ func (s *Service) Start(prompt string) (string, error) {
 	s.seq++
 	id := fmt.Sprintf("run-%d", s.seq)
 	s.cancels[id] = cancel
+	sessionID := s.sessionID
+	userMsg := wireMsg{Role: "user", Content: prompt}
+	s.session = trimConversationMessages(append(s.session, cloneWireMsg(userMsg)))
+	session := cloneWireMessages(s.session)
 	s.mu.Unlock()
 	// Mirror the run into the jobs ledger so it appears in the Jobs panel and can
 	// be cancelled there too (the cancel hook is this run's context cancel).
 	jobID := s.jobs.Start("agent", clip(prompt, 80), cancel)
-	go s.run(ctx, id, jobID, prompt)
+	go s.run(ctx, id, jobID, prompt, sessionID, session)
 	return id, nil
+}
+
+// ResetConversation clears the backend Agent-mode transcript. Use this when the
+// user clears chat or switches workspaces; provider requests are stateless, but
+// Novera keeps this transcript so follow-up messages behave like one session.
+func (s *Service) ResetConversation() {
+	s.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(s.cancels))
+	for _, cancel := range s.cancels {
+		cancels = append(cancels, cancel)
+	}
+	clear(s.cancels)
+	clear(s.approvals)
+	s.session = nil
+	s.sessionID++
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 // Approve resolves a pending mutating-tool approval or step checkpoint. The
@@ -382,7 +408,85 @@ func (s *Service) Cancel(runID string) {
 	}
 }
 
-func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
+func (s *Service) appendSession(sessionID int, msgs ...wireMsg) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sessionID != s.sessionID {
+		return
+	}
+	for _, msg := range msgs {
+		s.session = append(s.session, cloneWireMsg(msg))
+	}
+	s.session = trimConversationMessages(s.session)
+}
+
+func trimConversationMessages(msgs []wireMsg) []wireMsg {
+	if len(msgs) <= maxConversationMessages {
+		return msgs
+	}
+	cut := len(msgs) - maxConversationMessages
+	for cut < len(msgs) && msgs[cut].Role == "tool" {
+		cut++
+	}
+	out := make([]wireMsg, 0, len(msgs)-cut)
+	for _, msg := range msgs[cut:] {
+		out = append(out, cloneWireMsg(msg))
+	}
+	return out
+}
+
+func cloneWireMessages(msgs []wireMsg) []wireMsg {
+	if len(msgs) == 0 {
+		return nil
+	}
+	out := make([]wireMsg, 0, len(msgs))
+	for _, msg := range msgs {
+		out = append(out, cloneWireMsg(msg))
+	}
+	return out
+}
+
+func cloneWireMsg(msg wireMsg) wireMsg {
+	if len(msg.ToolCalls) == 0 {
+		return msg
+	}
+	msg.ToolCalls = cloneWireToolCalls(msg.ToolCalls)
+	return msg
+}
+
+func cloneWireToolCalls(calls []wireToolCall) []wireToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]wireToolCall, len(calls))
+	copy(out, calls)
+	return out
+}
+
+func toolSelectionText(msgs []wireMsg) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	start := max(0, len(msgs)-40)
+	for _, msg := range msgs[start:] {
+		switch msg.Role {
+		case "user", "assistant":
+			b.WriteString(msg.Content)
+			b.WriteByte('\n')
+			for _, tc := range msg.ToolCalls {
+				b.WriteString(tc.Function.Name)
+				b.WriteByte('\n')
+			}
+		case "tool":
+			b.WriteString(msg.Name)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionID int, session []wireMsg) {
 	// Job outcome: defaults to failed so an unexpected return path still closes
 	// the ledger entry; terminal points below set success, and the finalizer
 	// promotes to canceled when the context was cancelled. Declared first so it
@@ -417,11 +521,8 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 		key, _ = s.secrets.Get(cfg.APIKeyRef)
 	}
 
-	activeToolNames := selectToolNamesForPrompt(prompt)
-	messages := []wireMsg{
-		{Role: "system", Content: s.systemPromptForTools(activeToolNames)},
-		{Role: "user", Content: prompt},
-	}
+	activeToolNames := selectToolNamesForPrompt(prompt + "\n" + toolSelectionText(session))
+	messages := append([]wireMsg{{Role: "system", Content: s.systemPromptForTools(activeToolNames)}}, cloneWireMessages(session)...)
 	toolDefs := s.toolDefsFor(activeToolNames)
 	activeToolSet := toolNameSet(activeToolNames)
 	seen := map[string]int{} // signature -> times called, to break repeat-loops
@@ -472,6 +573,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 			if len(comp.ToolCalls) == 0 {
 				if visibleContent != "" {
 					s.emit(agentEvent{RunID: runID, Type: "assistant_text", Text: visibleContent})
+					s.appendSession(sessionID, wireMsg{Role: "assistant", Content: visibleContent})
 					s.jobs.Append(jobID, "assistant: "+clip(visibleContent, 160))
 					jobStatus = jobs.StatusSuccess
 					s.emit(agentEvent{RunID: runID, Type: "done"})
@@ -507,7 +609,9 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 					comp.ToolCalls[idx].ID = fmt.Sprintf("%s-%d-%d", runID, totalSteps, idx)
 				}
 			}
-			messages = append(messages, wireMsg{Role: "assistant", Content: comp.Content, ToolCalls: comp.ToolCalls})
+			assistantMsg := wireMsg{Role: "assistant", Content: comp.Content, ToolCalls: comp.ToolCalls}
+			messages = append(messages, assistantMsg)
+			s.appendSession(sessionID, assistantMsg)
 			for _, tc := range comp.ToolCalls {
 				canon, known := s.toolCanonical[normalizeToolName(tc.Function.Name)]
 				if known {
@@ -540,7 +644,9 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 				if canon == "update_plan" && activeToolSet[canon] {
 					currentPlan = parsePlan(parseArgs(tc.Function.Arguments))
 				}
-				messages = append(messages, wireMsg{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result.output})
+				toolMsg := wireMsg{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result.output}
+				messages = append(messages, toolMsg)
+				s.appendSession(sessionID, toolMsg)
 				s.jobs.Append(jobID, fmt.Sprintf("%s: %s", tc.Function.Name, clip(result.output, 160)))
 			}
 			// Grow the active tool set as the task evolves: union in any tool the
@@ -1542,22 +1648,19 @@ func (s *Service) complete(ctx context.Context, base, model, key string, msgs []
 }
 
 // windowMessages returns a recency-trimmed copy of the transcript to send to
-// the provider: the leading system message(s) and the original user prompt are
-// always kept, then only the last keepGroups assistant+tool "rounds". The cut
-// always lands on an assistant message so a tool message is never orphaned from
-// the assistant tool_calls it answers (which OpenAI-compatible APIs reject).
-// The caller keeps the full slice for local bookkeeping; this only shapes the
-// wire payload.
+// the provider: leading system message(s) are kept, then only the latest
+// assistant+tool "rounds" plus the user message that led into the first kept
+// round. The cut never starts on a tool message, so tool results are not
+// orphaned from their assistant tool_calls (which OpenAI-compatible APIs
+// reject). The caller keeps the full slice for local bookkeeping; this only
+// shapes the wire payload.
 func windowMessages(msgs []wireMsg, keepGroups int) []wireMsg {
 	if keepGroups <= 0 || len(msgs) <= 2 {
 		return msgs
 	}
-	// Preserve leading system message(s) and the first user prompt.
+	// Preserve leading system message(s).
 	head := 0
 	for head < len(msgs) && msgs[head].Role == "system" {
-		head++
-	}
-	if head < len(msgs) && msgs[head].Role == "user" {
 		head++
 	}
 	rest := msgs[head:]
@@ -1573,6 +1676,15 @@ func windowMessages(msgs []wireMsg, keepGroups int) []wireMsg {
 		return msgs // nothing old enough to trim
 	}
 	cut := starts[len(starts)-keepGroups] // index in rest of the first kept assistant
+	for i := cut - 1; i >= 0; i-- {
+		if rest[i].Role == "user" {
+			cut = i
+			break
+		}
+		if rest[i].Role == "assistant" {
+			break
+		}
+	}
 	out := make([]wireMsg, 0, head+1+len(rest)-cut)
 	out = append(out, msgs[:head]...)
 	out = append(out, wireMsg{Role: "system", Content: "(Earlier steps omitted to stay within the context limit; continue from the recent results below.)"})
