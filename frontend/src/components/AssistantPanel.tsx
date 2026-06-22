@@ -91,18 +91,34 @@ function ToolCard({ msg }: { msg: ChatMsg }) {
   } catch {
     /* keep empty */
   }
-  const summary = args.command ?? args.path ?? args.sql ?? (args.query ? `"${args.query}"` : "");
+  const toolName = msg.tool ?? "tool";
+  const summary =
+    args.url ??
+    args.command ??
+    args.path ??
+    args.outPath ??
+    args.connectionId ??
+    args.table ??
+    args.sql ??
+    (args.query ? `"${args.query}"` : "");
 
   // Tool-specific approval prompt + the exact thing being approved.
   let prompt = "Allow this action?";
   let detail: string | null = null;
-  if (msg.tool === "run_command") {
+  if (toolName === "run_command") {
     prompt = "Run this shell command in the workspace?";
     detail = args.command ?? "";
-  } else if (msg.tool === "write_file") {
+  } else if (toolName === "http_request") {
+    prompt = "Send this HTTP request?";
+    detail = `${args.method || "GET"} ${args.url || ""}`;
+    if (args.body) detail += `\n\n${args.body.slice(0, 1200)}`;
+  } else if (toolName === "db_query") {
+    prompt = "Run this database query?";
+    detail = args.sql ?? "";
+  } else if (toolName === "write_file") {
     prompt = `Create or overwrite ${args.path}?`;
     detail = (args.content ?? "").slice(0, 1200);
-  } else if (msg.tool === "apply_edit") {
+  } else if (toolName === "apply_edit") {
     prompt = `Apply this edit to ${args.path}?`;
     detail = `- ${(args.oldText ?? "").slice(0, 600)}\n+ ${(args.newText ?? "").slice(0, 600)}`;
   }
@@ -111,12 +127,12 @@ function ToolCard({ msg }: { msg: ChatMsg }) {
     <div className="toolcard">
       <div className="toolcard__head">
         <Wrench size={13} />
-        <span className="toolcard__name">{msg.tool}</span>
+        <span className="toolcard__name">{toolName}</span>
         <span className="toolcard__arg">{String(summary)}</span>
       </div>
       {msg.approval === "pending" && msg.callId && (
         <div className="toolcard__approve">
-          <span className={msg.tool === "run_command" ? "toolcard__warn" : ""}>{prompt}</span>
+          <span className={toolName === "run_command" || toolName === "http_request" ? "toolcard__warn" : ""}>{prompt}</span>
           {detail && <pre className="toolcard__detail">{detail}</pre>}
           <div className="toolcard__approvebtns">
             <button className="btn btn--primary" onClick={() => void approveAgent(msg.callId!, true)}>

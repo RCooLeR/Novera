@@ -1,9 +1,9 @@
-// Package netsafe holds shared guards for outbound HTTP to user-configured LLM
-// endpoints: base-URL validation (scheme / host / SSRF) and a redirect policy
-// that refuses cross-host hops so a request body can't follow a redirect to a
-// different host. Both the llm and agent services dial endpoints whose base URL
-// is free-form, editable from the UI, and persisted in settings.json, so they
-// share one validator rather than each rolling their own.
+// Package netsafe holds shared guards for outbound HTTP: base-URL validation
+// (scheme / host / SSRF) and a redirect policy that refuses cross-host hops so
+// a request body can't follow a redirect to a different host. The llm service,
+// agent completions, and the approval-gated agent HTTP tool all dial URLs that
+// can be influenced outside this package, so they share one validator rather
+// than each rolling their own.
 package netsafe
 
 import (

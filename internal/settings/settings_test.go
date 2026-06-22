@@ -48,6 +48,20 @@ func TestLoadMigratesBlankOllamaModel(t *testing.T) {
 	}
 }
 
+func TestLoadMigratesLegacyBadOllamaModel(t *testing.T) {
+	svc := &Service{path: filepath.Join(t.TempDir(), "settings.json")}
+	raw := []byte(`{"llm":{"provider":"ollama","baseURL":"http://localhost:11434/v1","model":"gemma4:12b-it-q_8_0"}}`)
+	if err := os.MkdirAll(filepath.Dir(svc.path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(svc.path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.Load().LLM.Model; got != DefaultLLMModel {
+		t.Fatalf("loaded model = %q, want %q", got, DefaultLLMModel)
+	}
+}
+
 func TestAgentSettingsNormalizeDefaultsAndClamp(t *testing.T) {
 	got := (Agent{}).Normalized()
 	if got.MaxToolOutputChars != DefaultAgentMaxToolOutputChars {

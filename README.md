@@ -31,8 +31,8 @@ xterm.js, virtualized grids, and generated Wails bindings.
 - AI Ask mode for chat against Ollama, OpenAI, or a custom OpenAI-compatible
   endpoint, with active-file context.
 - AI Agent mode with contextual tool selection, approval-gated mutations,
-  visible plan updates, audit log, Jobs log integration, and configurable
-  runtime limits for slow local models.
+  approval-gated HTTP requests, visible plan updates, audit log, Jobs log
+  integration, and configurable runtime limits for slow local models.
 - Data tools for CSV/TSV schema inference, CSV-to-SQL generation, SQL dump
   analysis, dump cleaning, table extraction, dump splitting, CSV projection,
   and constant-column export — plus a streaming Data Tools suite (Tools menu)
@@ -140,7 +140,7 @@ internal/
   gitsvc/                       Git status/diff/stage/commit service
   jobs/                         Background job ledger and logs
   llm/                          Ask-mode streaming and provider integration
-  netsafe/                      Endpoint/redirect safety helpers
+  netsafe/                      Endpoint/redirect safety helpers for LLM/HTTP
   secret/                       OS-backed secret storage
   settings/                     Persisted non-secret preferences
   sqlguard/                     Single read-only SQL query guard
@@ -162,8 +162,8 @@ Novera is local-first and intentionally conservative around user data:
 - Workspace paths are resolved through containment checks before reads/writes.
 - Saves are atomic and guarded by a revision hash to avoid stale clobbers.
 - Secrets are stored in the OS secret store, not plaintext settings.
-- Agent file mutations, shell commands, and sensitive DB reads require explicit
-  approval.
+- Agent file mutations, shell commands, sensitive DB reads, and outbound HTTP
+  requests require explicit approval.
 - Agent tool results are clipped, logged, and audited; raw tool bodies are not
   shown in the assistant log.
 - Denied agent actions stop the run cleanly instead of attempting fallback
@@ -182,7 +182,7 @@ separately by the secret service.
 Important local-LLM controls:
 
 - Provider defaults: new installs start on local Ollama at
-  `http://localhost:11434/v1` with `gemma4:12b-it-q_8_0`; OpenAI and custom
+  `http://localhost:11434/v1` with `gemma4:12b-it-q8_0`; OpenAI and custom
   OpenAI-compatible providers keep their model choice explicit.
 - Request timeout: per LLM request/agent completion timeout.
 - Tool output chars: maximum tool result text sent back to the model.

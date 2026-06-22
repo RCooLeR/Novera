@@ -93,7 +93,7 @@ const API_KEY_REF = "llm.apikey";
 const MAX_CHAT_HISTORY = 20;
 const MAX_AGENT_CONTEXT_MESSAGES = 8;
 const MAX_AGENT_CONTEXT_CHARS = 8000;
-export const DEFAULT_OLLAMA_MODELS = ["gemma4:12b-it-q_8_0", "gemma4:12b"];
+export const DEFAULT_OLLAMA_MODELS = ["gemma4:12b-it-q8_0", "gemma4:12b"];
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   maxToolOutputChars: 6000,
   stepBatch: 50,
@@ -1205,6 +1205,7 @@ export const useStore = create<State>()((set, get) => ({
         set((st) => ({ chat: [...st.chat, { id: uid(), role: "assistant", content: ev.text ?? "" }] }));
         break;
       case "tool_call":
+        if (ev.tool === "update_plan") break;
         set((st) => ({
           chat: [
             ...st.chat,

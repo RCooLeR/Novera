@@ -424,10 +424,11 @@ input, textarea { font-family: inherit; color: inherit; }
 .assistant__mode { padding: 3px 12px; border-radius: 4px; font-size: var(--fs-sm); color: var(--text-muted); }
 .assistant__mode.active { background: var(--accent); color: #fff; }
 .assistant__spacer { flex: 1; }
-.toolcard { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg-panel); }
+.toolcard { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg-panel); flex: none; min-width: 0; }
 .toolcard__head { display: flex; align-items: center; gap: 7px; padding: 6px 10px; color: var(--text-muted); font-size: var(--fs-sm); }
-.toolcard__name { font-weight: 600; color: var(--text); font-family: var(--mono); }
-.toolcard__arg { color: var(--text-faint); font-family: var(--mono); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolcard__head svg { flex: none; }
+.toolcard__name { font-weight: 600; color: var(--text); font-family: var(--mono); flex: none; }
+.toolcard__arg { color: var(--text-faint); font-family: var(--mono); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .toolcard__approve { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--border); background: rgba(210,153,34,0.08); font-size: var(--fs-sm); }
 .toolcard__approve > span { color: var(--amber); }
 .toolcard__warn { color: var(--red) !important; font-weight: 600; }
@@ -435,7 +436,7 @@ input, textarea { font-family: inherit; color: inherit; }
 .toolcard__approvebtns { display: flex; gap: 8px; }
 .toolcard__approve .btn { padding: 5px 12px; }
 .toolcard__status { padding: 0 10px 7px 30px; color: var(--text-faint); font-size: var(--fs-xs); }
-.continuecard { border: 1px solid var(--accent); border-radius: var(--radius); background: rgba(88,166,255,0.08); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.continuecard { border: 1px solid var(--accent); border-radius: var(--radius); background: rgba(88,166,255,0.08); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; flex: none; min-width: 0; }
 .continuecard__text { font-size: var(--fs-sm); color: var(--text); }
 .continuecard__btns { display: flex; gap: 8px; }
 .continuecard__btns .btn { padding: 5px 12px; }
@@ -448,12 +449,13 @@ input, textarea { font-family: inherit; color: inherit; }
 .assistant__config .btn { padding: 6px 10px; font-size: var(--fs-sm); }
 .assistant__keyset { color: var(--green); margin-left: 6px; }
 .assistant__messages { flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; min-height: 0; padding: 12px; display: flex; flex-direction: column; gap: 14px; overscroll-behavior: contain; }
+.assistant__messages > * { flex: none; }
 .assistant__empty { color: var(--text-faint); font-size: var(--fs-sm); text-align: center; margin: auto; max-width: 240px; line-height: 1.5; }
-.msg { display: flex; gap: 8px; }
+.msg { display: flex; gap: 8px; min-width: 0; }
 .msg__avatar { width: 22px; height: 22px; border-radius: 5px; display: grid; place-items: center; flex: none; background: var(--bg-active); color: var(--text-muted); }
 .msg--user .msg__avatar { background: var(--accent-subtle); color: var(--accent); }
 .msg { position: relative; }
-.msg__body { font-size: var(--fs-sm); line-height: 1.55; color: var(--text); white-space: pre-wrap; word-break: break-word; padding-top: 2px; user-select: text; cursor: text; }
+.msg__body { flex: 1; min-width: 0; font-size: var(--fs-sm); line-height: 1.55; color: var(--text); white-space: pre-wrap; word-break: break-word; padding-top: 2px; user-select: text; cursor: text; }
 .msg__copy { position: absolute; top: 0; right: 0; opacity: 0; padding: 3px; border-radius: 4px; color: var(--text-muted); background: var(--bg-elevated); }
 .msg:hover .msg__copy { opacity: 0.8; }
 .msg__copy:hover { opacity: 1; color: var(--text-strong); }

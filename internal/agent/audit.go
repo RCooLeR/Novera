@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,7 @@ import (
 // after-the-fact record of what the agent did and which mutations the user
 // approved or denied — the approval/audit surface the UI reads back.
 type AuditEntry struct {
-	Time     string `json:"time"`     // RFC3339
+	Time     string `json:"time"` // RFC3339
 	RunID    string `json:"runId"`
 	CallID   string `json:"callId"`
 	Tool     string `json:"tool"`
@@ -106,12 +107,29 @@ func (a *auditLog) list(limit int) []AuditEntry {
 // deliberately excludes free-form content fields (e.g. write_file "content")
 // so file bodies / pasted secrets never land in the plaintext audit file.
 func auditSummary(args map[string]any) string {
-	for _, k := range []string{"path", "command", "sql", "query", "table", "outPath", "outDir", "connectionId"} {
+	for _, k := range []string{"url", "path", "command", "sql", "query", "table", "outPath", "outDir", "connectionId"} {
 		if v := strings.TrimSpace(getStr(args, k)); v != "" {
+			if k == "url" {
+				return auditURLSummary(v)
+			}
 			return clip(v, 200)
 		}
 	}
 	return ""
+}
+
+func auditURLSummary(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err == nil && u.Host != "" {
+		u.User = nil
+		u.RawQuery = ""
+		u.Fragment = ""
+		return clip(u.String(), 200)
+	}
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		raw = raw[:i]
+	}
+	return clip(strings.TrimSpace(raw), 200)
 }
 
 func auditConfigDir() string {

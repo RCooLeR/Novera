@@ -3,6 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -197,6 +201,12 @@ do it`,
 			prompt: "Convert users.csv to SQL and clean the dump.",
 			want:   []string{"infer_csv_schema", "csv_to_sql", "clean_sql_dump"},
 		},
+		{
+			name:    "http request enables network tool",
+			prompt:  "Fetch https://example.com/api/status and summarize the JSON.",
+			want:    []string{"http_request"},
+			wantNot: []string{"run_command"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -212,6 +222,118 @@ do it`,
 				}
 			}
 		})
+	}
+}
+
+func TestRunHTTPRequestPostsHeadersAndBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("X-Test"); got != "ok" {
+			t.Errorf("X-Test = %q, want ok", got)
+		}
+		if got := r.Header.Get("Cookie"); got != "" {
+			t.Errorf("Cookie should not be sent, got %q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		if string(body) != `{"ping":true}` {
+			t.Errorf("body = %q", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	out, err := (&Service{}).runHTTPRequest(context.Background(), map[string]any{
+		"method":  "POST",
+		"url":     srv.URL + "/api",
+		"headers": map[string]any{"Content-Type": "application/json", "X-Test": "ok"},
+		"body":    `{"ping":true}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"HTTP/1.1 200 OK", "content-type: application/json", `{"ok":true}`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("response missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunHTTPRequestRejectsUnsafeInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "unsupported scheme", args: map[string]any{"url": "file:///etc/passwd"}},
+		{name: "metadata address", args: map[string]any{"url": "http://169.254.169.254/latest/meta-data"}},
+		{name: "url credentials", args: map[string]any{"url": "https://user:pass@example.com/"}},
+		{name: "unsupported method", args: map[string]any{"method": "TRACE", "url": "https://example.com/"}},
+		{name: "cookie header", args: map[string]any{"url": "https://example.com/", "headers": map[string]any{"Cookie": "sid=1"}}},
+		{name: "large body", args: map[string]any{"url": "https://example.com/", "body": strings.Repeat("x", httpToolMaxBodyBytes+1)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := (&Service{}).runHTTPRequest(context.Background(), tt.args); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+func TestRunHTTPRequestResponseLimits(t *testing.T) {
+	t.Run("truncates text", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte(strings.Repeat("a", httpToolMaxResponseBytes+10)))
+		}))
+		defer srv.Close()
+
+		out, err := (&Service{}).runHTTPRequest(context.Background(), map[string]any{"url": srv.URL})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := fmt.Sprintf("body-bytes-read: %d (truncated)", httpToolMaxResponseBytes)
+		if !strings.Contains(out, want) {
+			t.Errorf("expected truncation marker, got:\n%s", out[:min(len(out), 200)])
+		}
+	})
+
+	t.Run("omits binary", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write([]byte{0, 1, 2, 3})
+		}))
+		defer srv.Close()
+
+		out, err := (&Service{}).runHTTPRequest(context.Background(), map[string]any{"url": srv.URL})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "binary or non-UTF-8 response body omitted") {
+			t.Errorf("expected binary omission, got:\n%s", out)
+		}
+	})
+}
+
+func TestRunHTTPRequestRejectsCrossHostRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("should not reach"))
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	_, err := (&Service{}).runHTTPRequest(context.Background(), map[string]any{"url": source.URL})
+	if err == nil || !strings.Contains(err.Error(), "cross-host redirect") {
+		t.Fatalf("expected cross-host redirect error, got %v", err)
 	}
 }
 

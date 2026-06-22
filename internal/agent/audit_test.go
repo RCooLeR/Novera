@@ -41,4 +41,13 @@ func TestAuditSummaryExcludesContent(t *testing.T) {
 	if got != "secrets.env" {
 		t.Errorf("summary should be the path, not content; got %q", got)
 	}
+
+	got = auditSummary(map[string]any{
+		"url":     "https://api.example.test/status?token=secret#frag",
+		"headers": map[string]any{"Authorization": "Bearer secret"},
+		"body":    "token=secret",
+	})
+	if got != "https://api.example.test/status" {
+		t.Errorf("summary should be the URL, not headers/body; got %q", got)
+	}
 }

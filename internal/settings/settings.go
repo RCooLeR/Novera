@@ -20,7 +20,8 @@ const maxRecent = 12
 const (
 	DefaultLLMProvider = "ollama"
 	DefaultLLMBaseURL  = "http://localhost:11434/v1"
-	DefaultLLMModel    = "gemma4:12b-it-q_8_0"
+	DefaultLLMModel    = "gemma4:12b-it-q8_0"
+	legacyBadLLMModel  = "gemma4:12b-it-q_8_0"
 )
 
 // DefaultRequestTimeoutSec is the fallback per-request LLM timeout. It is
@@ -72,6 +73,9 @@ func (l LLM) Normalized() LLM {
 		l.BaseURL = DefaultLLMBaseURL
 	}
 	if strings.TrimSpace(l.Model) == "" && strings.EqualFold(l.Provider, DefaultLLMProvider) {
+		l.Model = DefaultLLMModel
+	}
+	if strings.EqualFold(l.Provider, DefaultLLMProvider) && strings.TrimSpace(l.Model) == legacyBadLLMModel {
 		l.Model = DefaultLLMModel
 	}
 	if l.RequestTimeoutSec == legacyDefaultRequestTimeoutSec {
