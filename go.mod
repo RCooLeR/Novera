@@ -18,7 +18,11 @@ require (
 	modernc.org/sqlite v1.52.0
 )
 
-require github.com/zalando/go-keyring v0.2.8
+require (
+	github.com/zalando/go-keyring v0.2.8
+	golang.org/x/sys v0.44.0
+	golang.org/x/text v0.37.0
+)
 
 require (
 	dario.cat/mergo v1.0.2 // indirect
@@ -73,8 +77,6 @@ require (
 	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

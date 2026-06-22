@@ -14,6 +14,7 @@ import (
 
 	"novera/internal/agent"
 	"novera/internal/artifacts"
+	"novera/internal/bigfile"
 	"novera/internal/db"
 	"novera/internal/gitsvc"
 	"novera/internal/jobs"
@@ -77,6 +78,7 @@ func run() error {
 		},
 		Services: []application.Service{
 			application.NewService(ws),
+			application.NewService(bigfile.NewFileService()),
 			application.NewService(git),
 			application.NewService(terminal.New(ws)),
 			application.NewService(fsWatcher),

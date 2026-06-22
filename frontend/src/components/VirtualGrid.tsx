@@ -13,6 +13,10 @@ const MIN_COL = 5; // chars
 const MAX_COL = 60; // chars
 const WIDTH_SAMPLE = 1000; // rows scanned for width (kept stable thereafter)
 
+// Rainbow-CSV palette (ported from Quarry): each column gets its own colour so a
+// delimited file's fields are visually separable. Cycled past 8 columns.
+const CSV_PALETTE = ["#e06c75", "#d19a66", "#e5c07b", "#98c379", "#56b6c2", "#61afef", "#c678dd", "#b48ead"];
+
 export default function VirtualGrid({
   columns,
   rows,
@@ -24,6 +28,7 @@ export default function VirtualGrid({
   totalRows,
   windowStart,
   onVisibleRange,
+  rainbow,
 }: {
   columns: string[];
   rows: string[][];
@@ -45,6 +50,8 @@ export default function VirtualGrid({
   totalRows?: number;
   windowStart?: number;
   onVisibleRange?: (start: number, end: number) => void;
+  // Colour each column with the rainbow-CSV palette (CSV/TSV grids only).
+  rainbow?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rowRef = useRef<HTMLTableRowElement | null>(null);
@@ -114,7 +121,12 @@ export default function VirtualGrid({
           <tr>
             <th className="dbq__rownum">#</th>
             {columns.map((c, i) => (
-              <th key={i} className="dbq__sortable" onClick={() => onSort(i)}>
+              <th
+                key={i}
+                className="dbq__sortable"
+                onClick={() => onSort(i)}
+                style={rainbow ? { color: CSV_PALETTE[i % CSV_PALETTE.length] } : undefined}
+              >
                 {c}
                 {sortIndicator(sort, i)}
               </th>
@@ -136,7 +148,11 @@ export default function VirtualGrid({
                 <td className="dbq__rownum">{ri + 1}</td>
                 {row
                   ? row.map((cell, ci) => (
-                      <td key={ci} className={nulls?.[li]?.[ci] ? "dbq__null" : ""}>
+                      <td
+                        key={ci}
+                        className={nulls?.[li]?.[ci] ? "dbq__null" : ""}
+                        style={rainbow ? { color: CSV_PALETTE[ci % CSV_PALETTE.length] } : undefined}
+                      >
                         {cell}
                       </td>
                     ))

@@ -3,7 +3,7 @@ import { runMenuAction } from "../lib/menuActions";
 import type { AppMenuAction } from "../lib/menuActions";
 import { useStore } from "../state/store";
 
-type MenuId = "file" | "edit" | "view" | "tools";
+type MenuId = "file" | "edit" | "view" | "tools" | "help";
 
 type MenuEntry =
   | { type: "separator" }
@@ -98,7 +98,18 @@ export default function AppMenu() {
           { type: "item", label: "Analyze SQL Dump", action: "tool_dump_analyze", disabled: toolBusy || !isDump },
           { type: "item", label: "Clean SQL Dump...", action: "tool_clean_dump", disabled: toolBusy || !isDump },
           separator,
+          { type: "item", label: "Data Tools (big-file CSV/SQL)...", action: "tool_data_tools", disabled: !isCsv && !isDump },
           { type: "item", label: "Save File as Artifact", action: "tool_save_artifact", disabled: !canUseFile },
+        ],
+      },
+      {
+        id: "help",
+        label: "Help",
+        items: [
+          { type: "item", label: "About Novera", action: "help_about" },
+          separator,
+          { type: "item", label: "Documentation", action: "help_docs" },
+          { type: "item", label: "Report an Issue", action: "help_issues" },
         ],
       },
     ],

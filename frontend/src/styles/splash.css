@@ -1,0 +1,388 @@
+/* Novera boot splash — JARVIS-style cognition-core loader.
+   Ported from the standalone novera_jarvis_loader and scoped under
+   .novera-loader so none of these generic class names leak into the IDE. */
+.novera-loader {
+  --nv-bg: #02060b;
+  --nv-blue: #0c65ff;
+  --nv-cyan: #12cbff;
+  --nv-green: #31df28;
+  --nv-text: #eefbff;
+  --nv-muted: rgba(220, 241, 255, 0.68);
+
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  overflow: hidden;
+  isolation: isolate;
+  cursor: pointer;
+  background: var(--nv-bg);
+  color: var(--nv-text);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  opacity: 1;
+  transition: opacity 0.64s ease, filter 0.64s ease;
+  /* sit above the Wails title bar without becoming a window-drag region */
+  --wails-draggable: no-drag;
+}
+.novera-loader.leaving {
+  opacity: 0;
+  filter: blur(5px);
+  pointer-events: none;
+}
+
+.novera-loader .bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0.16) 38%, rgba(0, 0, 0, 0.18) 60%, rgba(0, 0, 0, 0.72)),
+    url("/novera-loader-bg.jpg") center center / cover no-repeat;
+  transform: scale(1.02);
+  animation: nvBgDrift 14s ease-in-out infinite alternate;
+}
+.novera-loader .fx {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.novera-loader::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(rgba(255, 255, 255, 0.026) 1px, transparent 1px);
+  background-size: 100% 4px;
+  opacity: 0.3;
+  mix-blend-mode: overlay;
+}
+.novera-loader .global-scan {
+  position: absolute;
+  inset: -14%;
+  z-index: 3;
+  pointer-events: none;
+  background: linear-gradient(
+    104deg,
+    transparent 0%,
+    transparent 43%,
+    rgba(18, 203, 255, 0.08) 48%,
+    rgba(255, 255, 255, 0.24) 50%,
+    rgba(49, 223, 40, 0.11) 52%,
+    transparent 58%,
+    transparent 100%
+  );
+  transform: translateX(-90%);
+  animation: nvGlobalScan 5.2s ease-in-out infinite;
+  mix-blend-mode: screen;
+}
+
+.novera-loader .hud {
+  position: relative;
+  z-index: 5;
+  width: 100%;
+  height: 100%;
+  padding: 40px 56px;
+}
+
+.novera-loader .corner {
+  position: absolute;
+  width: 170px;
+  height: 86px;
+  opacity: 0.82;
+}
+.novera-loader .corner.tl {
+  top: 22px;
+  left: 22px;
+  border-top: 1px solid rgba(18, 203, 255, 0.45);
+  border-left: 1px solid rgba(18, 203, 255, 0.45);
+}
+.novera-loader .corner.tr {
+  top: 22px;
+  right: 22px;
+  border-top: 1px solid rgba(18, 203, 255, 0.45);
+  border-right: 1px solid rgba(18, 203, 255, 0.45);
+}
+.novera-loader .corner.bl {
+  bottom: 22px;
+  left: 22px;
+  border-bottom: 1px solid rgba(18, 203, 255, 0.45);
+  border-left: 1px solid rgba(18, 203, 255, 0.45);
+}
+.novera-loader .corner.br {
+  bottom: 22px;
+  right: 22px;
+  border-bottom: 1px solid rgba(49, 223, 40, 0.4);
+  border-right: 1px solid rgba(49, 223, 40, 0.4);
+}
+
+.novera-loader .brand-top {
+  position: absolute;
+  left: 58px;
+  top: 48px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.novera-loader .logo {
+  width: 50px;
+  height: 50px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 18px rgba(18, 203, 255, 0.45));
+}
+.novera-loader .brand-small {
+  font-size: 20px;
+  font-weight: 750;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  text-shadow: 0 0 22px rgba(18, 203, 255, 0.45);
+}
+.novera-loader .brand-sub {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--nv-muted);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.novera-loader .title-block {
+  position: absolute;
+  left: 72px;
+  top: 42%;
+  transform: translateY(-50%);
+  max-width: 520px;
+}
+.novera-loader .title-block h1 {
+  position: relative;
+  display: inline-block;
+  margin: 0;
+  font-size: clamp(48px, 6.2vw, 90px);
+  line-height: 0.95;
+  font-weight: 330;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  text-shadow: 0 0 30px rgba(18, 203, 255, 0.38);
+  overflow: hidden;
+}
+.novera-loader .title-block h1::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.9), transparent);
+  transform: translateX(-130%);
+  animation: nvTitleScan 3.2s ease-in-out infinite;
+}
+.novera-loader .subtitle {
+  margin-top: 20px;
+  color: rgba(236, 248, 255, 0.78);
+  font-size: 18px;
+  letter-spacing: 0.04em;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+.novera-loader .micro-progress {
+  margin-top: 22px;
+  width: 360px;
+  max-width: 60vw;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.novera-loader .micro-progress span {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--nv-blue), var(--nv-cyan), var(--nv-green));
+  box-shadow: 0 0 16px rgba(18, 203, 255, 0.75);
+  transition: width 0.08s linear;
+}
+
+.novera-loader .right-panel {
+  position: absolute;
+  top: 19%;
+  right: 72px;
+  width: 360px;
+  padding: 26px 28px 28px;
+  border: 1px solid rgba(18, 203, 255, 0.14);
+  background: linear-gradient(180deg, rgba(3, 10, 20, 0.26), rgba(3, 10, 20, 0.52));
+  backdrop-filter: blur(8px);
+  box-shadow: inset 0 0 18px rgba(18, 203, 255, 0.04);
+}
+.novera-loader .panel-title,
+.novera-loader .log-title {
+  font-size: 12px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: rgba(236, 250, 255, 0.82);
+}
+.novera-loader .panel-title {
+  margin-bottom: 18px;
+}
+.novera-loader .metric {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "name value" "line line";
+  gap: 10px 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.novera-loader .name {
+  grid-area: name;
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.novera-loader .value {
+  grid-area: value;
+  font-size: 14px;
+  color: rgba(224, 250, 255, 0.74);
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+.novera-loader .line {
+  grid-area: line;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.novera-loader .line span {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--nv-cyan), var(--nv-green));
+  box-shadow: 0 0 14px rgba(49, 223, 40, 0.36);
+  transition: width 0.08s linear;
+}
+.novera-loader .log-title {
+  margin-top: 18px;
+  margin-bottom: 14px;
+}
+.novera-loader .log {
+  min-height: 126px;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.8;
+  color: rgba(219, 241, 255, 0.68);
+}
+
+.novera-loader .bottom-loader {
+  position: absolute;
+  left: 50%;
+  bottom: 60px;
+  transform: translateX(-50%);
+  width: min(860px, 54vw);
+  text-align: center;
+}
+.novera-loader .percent {
+  font-size: 34px;
+  letter-spacing: 0.08em;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  text-shadow: 0 0 18px rgba(18, 203, 255, 0.55);
+}
+.novera-loader .state {
+  margin-top: 8px;
+  font-size: 13px;
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  color: rgba(235, 248, 255, 0.72);
+}
+.novera-loader .progress-bar {
+  margin-top: 28px;
+  height: 16px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.45);
+}
+.novera-loader .progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--nv-blue), var(--nv-cyan) 55%, var(--nv-green));
+  box-shadow: 0 0 30px rgba(18, 203, 255, 0.58);
+  transition: width 0.08s linear;
+}
+
+@keyframes nvBgDrift {
+  from {
+    transform: scale(1.02) translate3d(-6px, -4px, 0);
+  }
+  to {
+    transform: scale(1.045) translate3d(8px, 5px, 0);
+  }
+}
+@keyframes nvGlobalScan {
+  0%,
+  35% {
+    transform: translateX(-90%);
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+  82%,
+  100% {
+    transform: translateX(90%);
+    opacity: 0;
+  }
+}
+@keyframes nvTitleScan {
+  0%,
+  38% {
+    transform: translateX(-130%);
+  }
+  78%,
+  100% {
+    transform: translateX(130%);
+  }
+}
+
+@media (max-width: 1150px) {
+  .novera-loader .right-panel {
+    display: none;
+  }
+  .novera-loader .bottom-loader {
+    width: min(760px, 76vw);
+  }
+}
+@media (max-width: 760px) {
+  .novera-loader .hud {
+    padding: 26px;
+  }
+  .novera-loader .brand-top {
+    top: 28px;
+    left: 28px;
+  }
+  .novera-loader .logo {
+    width: 42px;
+    height: 42px;
+  }
+  .novera-loader .brand-small {
+    font-size: 16px;
+  }
+  .novera-loader .title-block {
+    left: 30px;
+    right: 30px;
+    top: 40%;
+  }
+  .novera-loader .subtitle {
+    font-size: 14px;
+  }
+  .novera-loader .micro-progress {
+    width: 260px;
+  }
+  .novera-loader .bottom-loader {
+    bottom: 40px;
+    width: calc(100vw - 60px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .novera-loader *,
+  .novera-loader *::before,
+  .novera-loader *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition: none !important;
+  }
+}

@@ -4,6 +4,7 @@
 .idea
 .tmp-test-files
 bin
+/novera.exe
 frontend/dist
 frontend/node_modules
 build/linux/appimage/build

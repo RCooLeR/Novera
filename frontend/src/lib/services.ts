@@ -9,9 +9,29 @@ import { Service as Db } from "../../bindings/novera/internal/db";
 import { Service as Watcher } from "../../bindings/novera/internal/watcher";
 import { Service as Jobs } from "../../bindings/novera/internal/jobs";
 import { Service as Artifacts } from "../../bindings/novera/internal/artifacts";
+import { FileService as BigFile } from "../../bindings/novera/internal/bigfile";
 import { Shell, SecretService } from "../../bindings/novera";
 
-export { Workspace, Settings, Git, Term, LLM, Agent, Db, Watcher, Jobs, Artifacts, Shell, SecretService };
+export { Workspace, Settings, Git, Term, LLM, Agent, Db, Watcher, Jobs, Artifacts, BigFile, Shell, SecretService };
+
+// Big-file engine (ported from Quarry) — windowed access to arbitrarily large files.
+export type {
+  Window as BigWindow,
+  HexWindow,
+  FileMeta as BigFileMeta,
+  SearchHit,
+  SearchAllResult,
+  StagingState,
+  StagedEdit,
+  DiffWindow,
+  SaveResult,
+  TransformResult,
+  CsvProfileResult,
+  CsvInspectResult,
+  CsvSchemaResult,
+  SqlLintResult,
+  SqlSummaryResult,
+} from "../../bindings/novera/internal/bigfile";
 
 export type {
   Profile as DbProfile,

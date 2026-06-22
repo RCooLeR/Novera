@@ -6,7 +6,7 @@ import { useStore } from "../state/store";
 import { setActiveEditor } from "../lib/editorBridge";
 import DbQueryView from "./DbQueryView";
 import TableView from "./TableView";
-import LargeFileView from "./LargeFileView";
+import BigFileView from "./BigFileView";
 
 const MONO = "Cascadia Code, JetBrains Mono, Consolas, monospace";
 
@@ -20,6 +20,7 @@ function applyReveal(ed: EditorInstance, line: number, column: number) {
 
 export default function EditorPane() {
   const tab = useStore((s) => s.tabs.find((t) => t.path === s.activePath) ?? null);
+  const root = useStore((s) => s.root);
   const updateContent = useStore((s) => s.updateContent);
   const saveActive = useStore((s) => s.saveActive);
   const reloadTab = useStore((s) => s.reloadTab);
@@ -90,10 +91,12 @@ export default function EditorPane() {
     );
   }
 
-  // Too large for Monaco, or binary: show the read-only paged viewer (text
-  // pages for huge text files, a hex dump for binary).
+  // Too large for Monaco, or binary: stream it through the big-file engine
+  // (windowed text with real line numbers + search/goto, or a hex view). The
+  // engine opens by absolute path, so resolve it against the workspace root.
   if (tab.tooLarge || tab.binary) {
-    return <LargeFileView rel={tab.path} name={tab.name} />;
+    const abs = root ? `${root}/${tab.path}` : tab.path;
+    return <BigFileView key={tab.path} abs={abs} name={tab.name} binaryHint={tab.binary} />;
   }
 
   const onMount: OnMount = (editor) => {

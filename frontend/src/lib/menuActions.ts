@@ -1,7 +1,10 @@
 import { Application } from "@wailsio/runtime";
 import { useStore } from "../state/store";
 import type { ViewId } from "../state/store";
+import { Shell } from "./services";
 import { formatActiveDocument, runActiveEditorAction } from "./editorBridge";
+
+const REPO_URL = "https://github.com/RCooLeR/Novera";
 
 export type AppMenuAction =
   | "open_folder"
@@ -32,7 +35,11 @@ export type AppMenuAction =
   | "tool_csv_to_sql"
   | "tool_dump_analyze"
   | "tool_clean_dump"
-  | "tool_save_artifact";
+  | "tool_data_tools"
+  | "tool_save_artifact"
+  | "help_about"
+  | "help_docs"
+  | "help_issues";
 
 const editorActionForCommand: Record<string, string> = {
   undo: "undo",
@@ -145,8 +152,20 @@ export function runMenuAction(action: AppMenuAction) {
     case "tool_clean_dump":
       g.openCleanDump();
       break;
+    case "tool_data_tools":
+      g.openDataTools();
+      break;
     case "tool_save_artifact":
       void g.saveActiveAsArtifact("file");
+      break;
+    case "help_about":
+      g.openAbout();
+      break;
+    case "help_docs":
+      void Shell.OpenExternal(`${REPO_URL}#readme`);
+      break;
+    case "help_issues":
+      void Shell.OpenExternal(`${REPO_URL}/issues`);
       break;
     case "toggle_sidebar":
       g.toggleSidebar();

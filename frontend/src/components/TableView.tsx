@@ -208,6 +208,7 @@ export default function TableView({ rel }: { rel: string }) {
             sort={sort}
             onSort={(i) => setSort((s) => nextSort(s, i))}
             onVisibleRange={onVisibleRange}
+            rainbow={isDelimited}
           />
         )}
       </div>

@@ -14,8 +14,16 @@ xterm.js, virtualized grids, and generated Wails bindings.
 - Workspace explorer with lazy tree loading, new file/folder, rename, delete,
   stale-save protection, encoding conversion, and large/binary file handling.
 - Monaco editor tabs, diff viewer, breadcrumbs, status bar, in-app
-  File/Edit/View/Tools menus, command palette, quick-open, and global
+  File/Edit/View/Tools/Help menus, command palette, quick-open, and global
   workspace search.
+- Big-file engine (memory-bounded streaming) that opens and edits files of any
+  size: a windowed viewer with true line numbers, in-file search, go-to
+  line/offset/percent, hex view, follow-tail, and encoding detection; per-line
+  syntax highlighting (~45 languages + SQL) and rainbow-CSV grids; and editing
+  with crash-safe in-place patch or save-as-copy. See
+  [Large-file engine](docs/big-files.md).
+- Animated boot splash shown over startup until the backend finishes
+  initializing.
 - Source Control panel with status, stage/unstage, commit, and changed-file
   diffs.
 - Integrated terminal backed by a native PTY/ConPTY.
@@ -27,14 +35,17 @@ xterm.js, virtualized grids, and generated Wails bindings.
   runtime limits for slow local models.
 - Data tools for CSV/TSV schema inference, CSV-to-SQL generation, SQL dump
   analysis, dump cleaning, table extraction, dump splitting, CSV projection,
-  and constant-column export.
+  and constant-column export — plus a streaming Data Tools suite (Tools menu)
+  that works on files of any size: CSV filter/dedupe/sample/redact/profile and
+  JSONL/SQLite/XLSX export, and SQL lint/extract/split/reshape/preset cleanups
+  and regex harvesting.
 - Database connections for SQLite/Postgres/MySQL with encrypted credentials,
   schema browsing, guarded read-only queries, and virtualized result grids.
 - Artifact registry for produced files and lineage/freshness tracking.
 
 ## Stack
 
-- Go 1.24+
+- Go 1.25+
 - Wails v3 alpha
 - React 18 + TypeScript + Vite
 - Monaco editor
@@ -44,7 +55,7 @@ xterm.js, virtualized grids, and generated Wails bindings.
 
 ## Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - Node 18+
 - Wails v3 CLI:
 
@@ -121,6 +132,9 @@ shell_service.go                Native shell helpers and folder picker
 internal/
   agent/                        Agent mode, tool loop, approvals, audit, rollback
   artifacts/                    Artifact registry and freshness checks
+  bigfile/                      Streaming engine for files of any size: windowed
+                                read/edit, line index, piece-table edits,
+                                crash-safe in-place patch, hex, CSV/SQL tools
   datatools/                    CSV and SQL dump inspection/transforms
   db/                           Database profiles, read-only query service
   gitsvc/                       Git status/diff/stage/commit service

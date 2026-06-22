@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Events } from "@wailsio/runtime";
 import { useStore } from "./state/store";
+import BootSplash from "./components/BootSplash";
 import { runMenuAction } from "./lib/menuActions";
 import type { AppMenuAction } from "./lib/menuActions";
 import TitleBar from "./components/TitleBar";
@@ -21,8 +22,13 @@ import CommandPalette from "./components/CommandPalette";
 import ToolsModal from "./components/ToolsModal";
 import AuditLogModal from "./components/AuditLogModal";
 import CleanDumpModal from "./components/CleanDumpModal";
+import BigToolsModal from "./components/BigToolsModal";
+import AboutModal from "./components/AboutModal";
 
 export default function App() {
+  // One-shot boot splash, shown over the whole app until startup finishes.
+  const [booted, setBooted] = useState(false);
+  const appReady = useStore((s) => s.appReady);
   const init = useStore((s) => s.init);
   const isOpen = useStore((s) => s.isOpen);
   const sidebarVisible = useStore((s) => s.sidebarVisible);
@@ -150,6 +156,7 @@ export default function App() {
 
   return (
     <div className="app">
+      {!booted && <BootSplash ready={appReady} onDone={() => setBooted(true)} />}
       <TitleBar />
       <div
         className="app-body"
@@ -190,6 +197,8 @@ export default function App() {
       <ToolsModal />
       <AuditLogModal />
       <CleanDumpModal />
+      <BigToolsModal />
+      <AboutModal />
     </div>
   );
 }

@@ -308,6 +308,8 @@ interface State {
   toolResult: ToolResult | null;
   toolBusy: boolean;
   cleanDump: { rel: string } | null; // active "Clean SQL dump" form target
+  dataTools: { rel: string } | null; // active "Data tools" (big-file CSV/SQL toolset) target
+  aboutOpen: boolean; // Help → About Novera dialog
 
   // ui
   view: ViewId;
@@ -332,6 +334,7 @@ interface State {
   loadingDiagnostics: boolean;
   status: Status | null;
   settings: SettingsModel | null;
+  appReady: boolean; // backend init() has finished — used to dismiss the boot splash
 
   // actions — workspace/tree
   init: () => Promise<void>;
@@ -359,6 +362,10 @@ interface State {
   exportCsvColumns: (rel: string, columns: string[]) => Promise<void>;
   addCsvColumn: (rel: string, name: string, value: string) => Promise<void>;
   openCleanDump: () => void;
+  openDataTools: () => void;
+  closeDataTools: () => void;
+  openAbout: () => void;
+  closeAbout: () => void;
   applyCleanDump: (rel: string, outRel: string, t: DumpTransform) => Promise<void>;
   cancelCleanDump: () => void;
   closeToolResult: () => void;
@@ -495,6 +502,8 @@ export const useStore = create<State>()((set, get) => ({
   toolResult: null,
   toolBusy: false,
   cleanDump: null,
+  dataTools: null,
+  aboutOpen: false,
   view: "explorer",
   sidebarVisible: true,
   panelVisible: false,
@@ -517,6 +526,7 @@ export const useStore = create<State>()((set, get) => ({
   loadingDiagnostics: false,
   status: null,
   settings: null,
+  appReady: false,
 
   init: async () => {
     try {
@@ -533,6 +543,10 @@ export const useStore = create<State>()((set, get) => ({
       }
     } catch (e) {
       get().setStatus(errMessage(e), "error");
+    } finally {
+      // Signal the boot splash that startup is done (settings loaded and, if
+      // there was a last workspace, its tree opened) so it can fade out.
+      set({ appReady: true });
     }
   },
 
@@ -942,6 +956,20 @@ export const useStore = create<State>()((set, get) => ({
   },
 
   cancelCleanDump: () => set({ cleanDump: null }),
+
+  openDataTools: () => {
+    const path = get().activePath;
+    if (!path || !/\.(csv|tsv|sql|dump)$/i.test(path)) {
+      get().setStatus("Open a .csv, .tsv, .sql, or .dump file to use data tools.", "error");
+      return;
+    }
+    set({ dataTools: { rel: path } });
+  },
+
+  closeDataTools: () => set({ dataTools: null }),
+
+  openAbout: () => set({ aboutOpen: true }),
+  closeAbout: () => set({ aboutOpen: false }),
 
   applyCleanDump: async (rel, outRel, t) => {
     set({ toolBusy: true });
