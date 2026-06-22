@@ -9,18 +9,25 @@ The frontend sends the current user request plus a small recent chat context to
 the backend. The context exists only to resolve vague follow-ups such as
 `do it`, `that`, or `write this`.
 
-The backend then selects a smaller active tool set for the run:
+The backend starts with a smaller active tool set, then lets it grow as the task
+needs it:
 
 - Inspect tools are always available.
-- Write tools are added only when the request or recent context asks to create,
-  edit, fix, patch, move, delete, or persist files.
-- Git, data, database, artifact, rollback, and shell-command tools are added
-  only when relevant keywords appear.
-- A model calling a valid but inactive tool is rejected by dispatch.
+- Write tools are added when the request or recent context asks to create, edit,
+  fix, patch, move, delete, or persist files.
+- Git, data, database, artifact, rollback, and shell-command tools are added when
+  relevant keywords appear.
+- The active set only ever **grows** within a run. After each step it is
+  re-derived from the whole conversation so far, and if the model calls a valid
+  tool that wasn't pre-enabled, that tool is **activated on demand** (and run,
+  still subject to approval) rather than rejected. A task that evolves to need a
+  capability is no longer dead-ended; the system prompt also tells the model the
+  other capability groups exist and turn on when needed.
 - A model inventing pseudo-tools such as `thought`, `analysis`, or `channel` is
   retried once, then the run fails cleanly.
 
-This keeps local models focused and reduces accidental tool misuse.
+This keeps local models focused on a small initial set while letting capability
+expand on demand — approval gating, not tool hiding, is the safety boundary.
 
 ## Approval and Denial
 

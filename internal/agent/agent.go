@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os/exec"
 	"runtime"
@@ -40,13 +41,15 @@ const (
 )
 
 const systemPrompt = `You are Novera's coding agent, operating inside the user's open workspace.
-You can call tools to inspect and modify the project. Prefer reading before writing.
+You can call tools to inspect and modify the project. Prefer reading before writing — read_file a file before you edit it so your change matches its current text exactly.
 
-Start by calling update_plan with your ordered steps (each "todo"), then work through them. Re-call update_plan to mark the current step "in_progress" and completed steps "done" so the user sees live progress.
+For a multi-step task, start by calling update_plan with your ordered steps (each "todo"), then work through them, re-calling update_plan to mark the current step "in_progress" and finished steps "done" so the user sees live progress. For a single trivial lookup you may skip the plan and answer directly.
+
+Choosing how to change a file: use apply_edit for one unique snippet, apply_patch for several edits to one file, write_file only to create a new file or fully replace one, and append_file only to add to the end.
 
 Rules:
-- Available tools for this run are supplied in the API tools field and summarized below. Call only those exact names.
-- Never invent pseudo-tools such as thought, analysis, channel, or commentary.
+- The tools available right now are in the API tools field and summarized below; call only those exact names. Other capabilities — writing files, running commands, git, databases, CSV/SQL data tools, artifacts, rollback — turn on automatically when the task needs them; if you need one that isn't listed yet, just call it (or say you will) and it will be enabled for the rest of the run, subject to approval.
+- Never emit reasoning as a fake tool call or a special channel/markup (e.g. thought, analysis, commentary, <|channel|>). Put reasoning in normal text and real work in real tool_calls.
 - Each tool call returns a result. USE that result; never repeat an identical call — the answer will not change.
 - Mutating or sensitive tools are approval-gated each time.
 - If the current request is vague, use the provided recent conversation context only to resolve references such as "it", "that", or "do it".
@@ -246,6 +249,25 @@ func containsAny(text string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+// growActiveTools unions any tools implied by the whole conversation so far
+// (user + assistant text), plus any already promoted into active by dispatch,
+// into active and reports whether it grew. The active set only ever expands
+// within a run, so the model can pick up a capability the task evolved to need.
+func growActiveTools(messages []wireMsg, active map[string]bool) bool {
+	before := len(active)
+	var sb strings.Builder
+	for _, m := range messages {
+		if m.Role == "user" || m.Role == "assistant" {
+			sb.WriteString(m.Content)
+			sb.WriteByte('\n')
+		}
+	}
+	for _, name := range selectToolNamesForPrompt(sb.String()) {
+		active[name] = true
+	}
+	return len(active) > before
 }
 
 func orderedToolSubset(chosen map[string]bool) []string {
@@ -462,7 +484,10 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 			messages = append(messages, wireMsg{Role: "assistant", Content: comp.Content, ToolCalls: comp.ToolCalls})
 			for _, tc := range comp.ToolCalls {
 				canon, known := s.toolCanonical[normalizeToolName(tc.Function.Name)]
-				if known && activeToolSet[canon] {
+				if known {
+					// A known tool is always executed now (dispatch activates it on
+					// demand), so it counts as real progress — only truly invented
+					// pseudo-tools leave knownCalls at 0.
 					knownCalls++
 				}
 				sigName := normalizeToolName(tc.Function.Name)
@@ -491,6 +516,16 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 				}
 				messages = append(messages, wireMsg{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result.output})
 				s.jobs.Append(jobID, fmt.Sprintf("%s: %s", tc.Function.Name, clip(result.output, 160)))
+			}
+			// Grow the active tool set as the task evolves: union in any tool the
+			// model reached for (activated on demand above) plus any group the
+			// accumulated conversation now implies, then rebuild the wire defs and
+			// the system summary. The set only ever grows, so a focused start can
+			// pick up a capability a later step needs instead of dead-ending.
+			if growActiveTools(messages, activeToolSet) {
+				activeToolNames = orderedToolSubset(activeToolSet)
+				toolDefs = s.toolDefsFor(activeToolNames)
+				messages[0].Content = s.systemPromptForTools(activeToolNames)
 			}
 			if knownCalls == 0 {
 				if !retriedNoProgressCompletion {
@@ -556,8 +591,12 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, a
 	}
 	name = canon
 	if !active[name] {
-		out := fmt.Sprintf("Tool %q is not active for this run. Active tools: %s. Continue with one of those tools, or explain why the task cannot be completed with them.", name, strings.Join(activeNames, ", "))
-		return dispatchResult{output: out, tool: name}
+		// Activate-on-demand: the model reached for a real tool the initial
+		// keyword gate didn't pre-enable. Enable it for the rest of the run and
+		// run it now instead of dead-ending — the mutating/gated approval gate
+		// below remains the real safety boundary. run() rebuilds the wire tool
+		// list from `active` after this batch so the model formally sees it too.
+		active[name] = true
 	}
 	s.emit(agentEvent{RunID: runID, Type: "tool_call", CallID: tc.ID, Tool: name, Args: tc.Function.Arguments})
 	t := s.toolset[name]
@@ -584,7 +623,7 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, a
 		out, err = t.run(args)
 	}
 	if err != nil {
-		out = "error: " + err.Error()
+		out = "error: " + err.Error() + recoveryHint(err)
 	}
 	out = clip(out, cfg.Normalized().MaxToolOutputChars)
 	status := "ok"
@@ -691,7 +730,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			run: func(map[string]any) (string, error) { return "Plan updated.", nil },
 		},
 		"list_files": {
-			description: "List source file paths in the workspace. Generated noise (lockfiles, minified bundles, source maps, *.pb.go/_pb2.py, *.generated.*) is omitted to keep the listing focused; reach those with list_dir or read_file by exact path.",
+			description: "List source file paths in the workspace — a project overview / way to find candidate files. Generated noise (lockfiles, minified bundles, source maps, *.pb.go/_pb2.py, *.generated.*) is omitted to keep it focused, so never conclude a file is absent from this listing alone; reach hidden files with list_dir or read_file by exact path.",
 			parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
 			run: func(map[string]any) (string, error) {
 				files, err := s.ws.ListAllFiles()
@@ -713,7 +752,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"read_file": {
-			description: "Read a UTF-8 text file from the workspace by its relative path.",
+			description: "Read one UTF-8 text file by its workspace-relative path. Use when you already know the exact path; for several known paths prefer read_many_files. Binary or oversized files return a (binary file) / (file too large) marker instead of content — don't retry, read a different or smaller file.",
 			parameters:  strSchema(map[string]any{"path": prop("Workspace-relative file path")}, "path"),
 			run: func(args map[string]any) (string, error) {
 				fc, err := s.ws.ReadFile(getStr(args, "path"))
@@ -730,7 +769,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"search_workspace": {
-			description: "Search the workspace for a literal string. Returns matching path:line: text.",
+			description: "Search file contents for a literal substring (case-insensitive, not a regex). Returns matching path:line: text. Large files, binary files, and build/vendor dirs are skipped and results are capped, so \"(no matches)\" means none in the scanned set, not proof of absence.",
 			parameters:  strSchema(map[string]any{"query": prop("Text to search for")}, "query"),
 			run: func(args map[string]any) (string, error) {
 				r, err := s.ws.Search(getStr(args, "query"), false)
@@ -742,13 +781,16 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 					fmt.Fprintf(&b, "%s:%d: %s\n", m.Path, m.Line, strings.TrimSpace(m.Text))
 				}
 				if b.Len() == 0 {
-					return "(no matches)", nil
+					return "(no matches in the scanned set)", nil
+				}
+				if r.Truncated {
+					b.WriteString("(results capped — narrow your query to see the rest)\n")
 				}
 				return b.String(), nil
 			},
 		},
 		"list_dir": {
-			description: "List the immediate entries of a directory (use \"\" or \".\" for the workspace root).",
+			description: "List the immediate (non-recursive) entries of one directory, including generated files that list_files hides. Use \"\" or \".\" for the workspace root (path is optional).",
 			parameters:  strSchema(map[string]any{"path": prop("Workspace-relative directory path, empty for root")}),
 			run: func(args map[string]any) (string, error) {
 				entries, err := s.ws.ListDir(getStr(args, "path"))
@@ -770,7 +812,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"read_many_files": {
-			description: "Read several text files at once. Provide 'paths' as an array of workspace-relative paths.",
+			description: "Read several text files at once — prefer this over repeated read_file calls when you already know 2+ paths. Provide 'paths' as an array of workspace-relative paths; combined output is capped.",
 			parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -831,7 +873,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"read_diagnostics": {
-			description: "List static issues across the workspace (TODO/FIXME/HACK/XXX markers and merge-conflict markers) with file:line.",
+			description: "Scan the workspace for code markers (TODO/FIXME/HACK/XXX) and unresolved merge-conflict markers, with file:line. This does NOT run a compiler, type-checker, or linter — to find build/type/lint errors, run the project's build or lint via run_command.",
 			parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
 			run: func(map[string]any) (string, error) {
 				d, err := s.ws.Diagnostics()
@@ -960,8 +1002,8 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 					"engine":            prop("Rewrite ENGINE= to this (e.g. InnoDB); empty leaves it"),
 					"charset":           prop("Rewrite CHARSET/CHARACTER SET to this; empty leaves it"),
 					"collation":         prop("Rewrite COLLATE to this; empty leaves it"),
-					"fromDatabase":      prop("Database to rename (requires toDatabase)"),
-					"toDatabase":        prop("New database name"),
+					"fromDatabase":      prop("Database to rename. Only takes effect together with toDatabase — pass both or neither."),
+					"toDatabase":        prop("New database name. Only takes effect together with fromDatabase — pass both or neither."),
 				},
 				"required": []string{"path", "outPath"},
 			},
@@ -1054,7 +1096,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"db_query": {
-			description: "Run a read-only SELECT against a database connection (id from db_list_connections). Returns columns and rows.",
+			description: "Run a single read-only SELECT/WITH against a database connection (id from db_list_connections); other statements are rejected. Returns columns and rows. Requires user approval each call (it surfaces live database rows).",
 			parameters:  strSchema(map[string]any{"connectionId": prop("Connection id"), "sql": prop("A single read-only SELECT/WITH query")}, "connectionId", "sql"),
 			// Read-only, but it surfaces DB rows into the transcript (and onward via
 			// the LLM channel), so a prompt-injection payload shouldn't be able to
@@ -1081,7 +1123,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"git_diff": {
-			description: "Show a unified diff of unsaved/committed changes vs HEAD. Optionally pass a path to limit it to one file.",
+			description: "Show a unified diff of the working tree (staged and unstaged edits to tracked files) against the last commit (HEAD). New/untracked files are NOT included — use git_status to see those. Optionally pass a path to limit it to one file.",
 			parameters:  strSchema(map[string]any{"path": prop("Optional workspace-relative file path")}),
 			run: func(args map[string]any) (string, error) {
 				out, err := s.git.UnifiedDiff(getStr(args, "path"))
@@ -1095,7 +1137,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"write_file": {
-			description: "Create or overwrite a workspace file with the given content. Requires user approval.",
+			description: "Create a new file, or fully replace an existing file's entire content (this overwrites the WHOLE file — to change part of an existing file prefer apply_edit or apply_patch). Requires user approval.",
 			parameters: strSchema(map[string]any{
 				"path":    prop("Workspace-relative file path"),
 				"content": prop("Full new file content"),
@@ -1112,7 +1154,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"apply_edit": {
-			description: "Replace an exact, unique snippet in a file (surgical edit). oldText must occur exactly once. Requires user approval.",
+			description: "Replace an exact, unique snippet in a file (surgical edit). read_file the path first so oldText matches the current text byte-for-byte; oldText must occur exactly once. Requires user approval.",
 			parameters: strSchema(map[string]any{
 				"path":    prop("Workspace-relative file path"),
 				"oldText": prop("Exact existing text to replace (must be unique in the file)"),
@@ -1131,7 +1173,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 				}
 				n := strings.Count(fc.Content, oldText)
 				if oldText == "" || n == 0 {
-					return "", errors.New("oldText was not found in the file")
+					return "", fmt.Errorf("oldText was not found in %s — read_file the path and copy an exact current snippet (including whitespace) before retrying", path)
 				}
 				if n > 1 {
 					return "", fmt.Errorf("oldText is not unique (%d matches) — include more surrounding context", n)
@@ -1168,7 +1210,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"apply_patch": {
-			description: "Apply a unified-diff patch (one or more hunks) to a single file. Provide 'path' and 'patch' (the unified diff body with @@ headers and space/-/+ lines). @@ line numbers may be approximate — each hunk is located by its context/removed lines, which must match the file exactly once. Use this for several edits to one file in a single call; requires user approval.",
+			description: "Apply a unified-diff patch (one or more hunks) to a single file. read_file the path first so the hunk context matches the current text. Provide 'path' and 'patch' (the unified diff body with @@ headers and space/-/+ lines). @@ line numbers may be approximate — each hunk is located by its context/removed lines, which must match the file exactly once. Use this for several edits to one file in a single call; requires user approval.",
 			parameters: strSchema(map[string]any{
 				"path":  prop("Workspace-relative file path to patch"),
 				"patch": prop("Unified diff hunks (@@ ... @@ with ' ', '-', '+' lines)"),
@@ -1288,7 +1330,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			description: "Register a workspace file you produced (a report, chart, SQL, dataset, answer, …) as a tracked artifact, recording its lineage (the source files it derived from) so the user can find and re-generate it later. Write the file first, then register it.",
 			parameters: strSchema(map[string]any{
 				"path":    prop("Workspace-relative path of the content file"),
-				"kind":    prop("Artifact kind: report | chart | sql | dataset | answer | comparison | notebook | file"),
+				"kind":    map[string]any{"type": "string", "enum": []string{"report", "chart", "sql", "dataset", "answer", "comparison", "notebook", "file"}, "description": "Artifact kind"},
 				"title":   prop("Short human title"),
 				"sources": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Workspace-relative source files this derived from (lineage)"},
 				"note":    prop("Optional note"),
@@ -1337,7 +1379,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			},
 		},
 		"run_command": {
-			description: "Run a shell command in the workspace root and return its combined output. Requires user approval.",
+			description: "Run a non-interactive shell command in the workspace root (cmd /c on Windows, sh -c elsewhere) and return its combined output. Use for builds, tests, and tooling; prefer the dedicated git_* and data tools when they fit. No stdin is available. Requires user approval.",
 			parameters:  strSchema(map[string]any{"command": prop("Shell command line to run")}, "command"),
 			mutating:    true,
 			run: func(args map[string]any) (string, error) {
@@ -1687,9 +1729,21 @@ func getStrSlice(args map[string]any, key string) []string {
 
 func clip(s string, max int) string {
 	if r := []rune(s); len(r) > max {
-		return string(r[:max]) + "\n…(truncated)"
+		return string(r[:max]) + "\n…(truncated — refine your query or request a specific section to see more)"
 	}
 	return s
+}
+
+// recoveryHint appends an actionable next step to common workspace errors so a
+// weak model self-corrects instead of repeating the failing call.
+func recoveryHint(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return ` — the path was not found; call list_dir("") or list_files to find the correct workspace-relative path.`
+	case strings.Contains(err.Error(), "escapes the workspace"):
+		return " — paths must be inside the open workspace (no .. or absolute paths)."
+	}
+	return ""
 }
 
 // --- wire types ---
