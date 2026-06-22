@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -272,6 +273,26 @@ func TestParsePlan(t *testing.T) {
 	}
 }
 
+func TestShouldFinishAfterToolTurnContent(t *testing.T) {
+	updatePlan := []wireToolCall{{Function: wireFunc{Name: "update_plan"}}}
+	dbQuery := []wireToolCall{{Function: wireFunc{Name: "db_query"}}}
+	donePlan := []planStep{{Title: "Review", Status: "done"}}
+	openPlan := []planStep{{Title: "Review", Status: "in_progress"}}
+
+	if !shouldFinishAfterToolTurnContent("Here is the final review.", updatePlan, donePlan) {
+		t.Fatal("completed update_plan plus visible text should finish")
+	}
+	if !shouldFinishAfterToolTurnContent(strings.Repeat("SEO review findings. ", 20), updatePlan, openPlan) {
+		t.Fatal("substantive combined answer should finish even if the plan status lags")
+	}
+	if shouldFinishAfterToolTurnContent("Updating the plan.", updatePlan, openPlan) {
+		t.Fatal("short plan chatter should not finish while the plan remains open")
+	}
+	if shouldFinishAfterToolTurnContent(strings.Repeat("SEO review findings. ", 20), dbQuery, donePlan) {
+		t.Fatal("content combined with a data tool should not finish before the tool result is consumed")
+	}
+}
+
 func TestSelectToolNamesForPrompt(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -375,6 +396,29 @@ func TestRunHTTPRequestPostsHeadersAndBody(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("response missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestCompleteOmitsToolChoiceWhenToolsDisabled(t *testing.T) {
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"done"}}]}`))
+	}))
+	defer srv.Close()
+
+	s := &Service{http: srv.Client()}
+	if _, err := s.complete(context.Background(), srv.URL, "model", "", []wireMsg{{Role: "user", Content: "finish"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["tools"]; ok {
+		t.Fatalf("tools should be omitted when disabled: %+v", payload)
+	}
+	if _, ok := payload["tool_choice"]; ok {
+		t.Fatalf("tool_choice should be omitted when tools are disabled: %+v", payload)
 	}
 }
 

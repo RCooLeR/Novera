@@ -529,6 +529,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 	seen := map[string]int{} // signature -> times called, to break repeat-loops
 	var currentPlan []planStep
 	retriedNoProgressCompletion := false
+	forceFinalAnswer := false
 	s.jobs.Append(jobID, fmt.Sprintf("active tools: %s", strings.Join(activeToolNames, ", ")))
 	s.jobs.Append(jobID, fmt.Sprintf("limits: requestTimeout=%s stepBatch=%d maxSteps=%d historyWindow=%d maxToolOutput=%d commandTimeout=%s",
 		cfg.RequestTimeout(), agentCfg.StepBatch, agentCfg.MaxTotalSteps, agentCfg.HistoryWindowGroups, agentCfg.MaxToolOutputChars, agentCfg.CommandTimeout()))
@@ -552,7 +553,11 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 				defer ccancel()
 				// Send a recency-windowed view; the full transcript is still kept
 				// locally (messages) for correct tool-call/result pairing.
-				return s.complete(cctx, cfg.BaseURL, cfg.Model, key, windowMessages(messages, agentCfg.HistoryWindowGroups), toolDefs)
+				wireTools := toolDefs
+				if forceFinalAnswer {
+					wireTools = nil
+				}
+				return s.complete(cctx, cfg.BaseURL, cfg.Model, key, windowMessages(messages, agentCfg.HistoryWindowGroups), wireTools)
 			}()
 			if err != nil {
 				if ctx.Err() != nil {
@@ -578,6 +583,12 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 					s.jobs.Append(jobID, "assistant: "+clip(visibleContent, 160))
 					jobStatus = jobs.StatusSuccess
 					s.emit(agentEvent{RunID: runID, Type: "done"})
+					return
+				}
+				if forceFinalAnswer {
+					text := "The model stopped during the forced final-answer turn without providing visible text."
+					s.emit(agentEvent{RunID: runID, Type: "error", Text: text})
+					jobErr = text
 					return
 				}
 				if hasOpenPlanStep(currentPlan) {
@@ -610,7 +621,12 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 					comp.ToolCalls[idx].ID = fmt.Sprintf("%s-%d-%d", runID, totalSteps, idx)
 				}
 			}
-			assistantMsg := wireMsg{Role: "assistant", Content: comp.Content, ToolCalls: comp.ToolCalls}
+			// Some local OpenAI-compatible providers return normal assistant text
+			// and tool_calls in the same message. Keep the tool-call message clean
+			// for protocol pairing, then surface the visible text after the tools
+			// have been answered so combined "plan + final result" turns don't
+			// disappear from chat.
+			assistantMsg := wireMsg{Role: "assistant", ToolCalls: comp.ToolCalls}
 			messages = append(messages, assistantMsg)
 			s.appendSession(sessionID, assistantMsg)
 			for _, tc := range comp.ToolCalls {
@@ -660,6 +676,18 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 				toolDefs = s.toolDefsFor(activeToolNames)
 				messages[0].Content = s.systemPromptForTools(activeToolNames)
 			}
+			if visibleContent != "" {
+				textMsg := wireMsg{Role: "assistant", Content: visibleContent}
+				messages = append(messages, textMsg)
+				s.emit(agentEvent{RunID: runID, Type: "assistant_text", Text: visibleContent})
+				s.appendSession(sessionID, textMsg)
+				s.jobs.Append(jobID, "assistant: "+clip(visibleContent, 160))
+				if shouldFinishAfterToolTurnContent(visibleContent, comp.ToolCalls, currentPlan) {
+					jobStatus = jobs.StatusSuccess
+					s.emit(agentEvent{RunID: runID, Type: "done"})
+					return
+				}
+			}
 			if knownCalls == 0 {
 				if !retriedNoProgressCompletion {
 					retriedNoProgressCompletion = true
@@ -675,6 +703,13 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 				return
 			}
 			retriedNoProgressCompletion = false
+			forceFinalAnswer = toolCallsOnlyUpdatePlan(comp.ToolCalls) && !hasOpenPlanStep(currentPlan)
+			if forceFinalAnswer {
+				messages = append(messages, wireMsg{
+					Role:    "user",
+					Content: "The visible plan is complete. Do not call tools. Provide the final answer now in normal assistant text.",
+				})
+			}
 			totalSteps++
 		}
 		// Reached a checkpoint without finishing. Absolute backstop first…
@@ -1615,7 +1650,11 @@ func (s *Service) toolDefsFor(names []string) []wireToolDef {
 // --- completion (non-streaming, tools) ---
 
 func (s *Service) complete(ctx context.Context, base, model, key string, msgs []wireMsg, tools []wireToolDef) (completion, error) {
-	body := completionRequest{Model: model, Messages: msgs, Tools: tools, Temperature: 0.2, Stream: false, ToolChoice: "auto"}
+	body := completionRequest{Model: model, Messages: msgs, Temperature: 0.2, Stream: false}
+	if len(tools) > 0 {
+		body.Tools = tools
+		body.ToolChoice = "auto"
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return completion{}, err
@@ -2049,6 +2088,26 @@ func hasOpenPlanStep(steps []planStep) bool {
 		}
 	}
 	return false
+}
+
+func shouldFinishAfterToolTurnContent(content string, calls []wireToolCall, plan []planStep) bool {
+	text := strings.TrimSpace(content)
+	if text == "" || !toolCallsOnlyUpdatePlan(calls) {
+		return false
+	}
+	return len([]rune(text)) >= 240 || !hasOpenPlanStep(plan)
+}
+
+func toolCallsOnlyUpdatePlan(calls []wireToolCall) bool {
+	if len(calls) == 0 {
+		return false
+	}
+	for _, call := range calls {
+		if normalizeToolName(call.Function.Name) != "update_plan" {
+			return false
+		}
+	}
+	return true
 }
 
 func visibleAssistantContent(content string) string {
