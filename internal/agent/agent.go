@@ -530,7 +530,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string) {
 					result = s.dispatch(ctx, runID, tc, activeToolSet, activeToolNames, agentCfg)
 				}
 				if result.denied {
-					text := fmt.Sprintf("Action denied: %s was not run. The agent stopped and made no fallback changes.", result.tool)
+					text := fmt.Sprintf("Action not approved: %s was not run. %s", result.tool, result.output)
 					s.jobs.Append(jobID, text)
 					jobErr = text
 					jobStatus = jobs.StatusCanceled
@@ -597,7 +597,7 @@ func (s *Service) awaitContinue(ctx context.Context, runID string, steps int) bo
 	callID := fmt.Sprintf("%s-continue-%d", runID, steps)
 	return s.awaitGate(ctx, callID, continueWait, func() {
 		s.emit(agentEvent{RunID: runID, Type: "continue_request", CallID: callID, Text: fmt.Sprintf("%d", steps)})
-	})
+	}) == gateApproved
 }
 
 type dispatchResult struct {
@@ -631,9 +631,10 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, a
 	}
 	decision := "auto"
 	if t.mutating || t.gated {
-		if !s.awaitApproval(ctx, runID, tc.ID, name, tc.Function.Arguments) {
-			out := "The user denied this action."
-			s.audit.record(AuditEntry{RunID: runID, CallID: tc.ID, Tool: name, Summary: auditSummary(args), Decision: "denied", Status: "denied", Detail: out})
+		gate := s.awaitApproval(ctx, runID, tc.ID, name, tc.Function.Arguments)
+		if gate != gateApproved {
+			out := deniedToolOutput(gate)
+			s.audit.record(AuditEntry{RunID: runID, CallID: tc.ID, Tool: name, Summary: auditSummary(args), Decision: string(gate), Status: "denied", Detail: out})
 			s.emit(agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: name, Result: out})
 			return dispatchResult{output: out, denied: true, tool: name}
 		}
@@ -665,10 +666,32 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, a
 	return dispatchResult{output: out, tool: name}
 }
 
-func (s *Service) awaitApproval(ctx context.Context, runID, callID, tool, args string) bool {
+func (s *Service) awaitApproval(ctx context.Context, runID, callID, tool, args string) gateDecision {
 	return s.awaitGate(ctx, callID, approvalTimeout, func() {
 		s.emit(agentEvent{RunID: runID, Type: "approval_request", CallID: callID, Tool: tool, Args: args})
 	})
+}
+
+type gateDecision string
+
+const (
+	gateApproved gateDecision = "approved"
+	gateDenied   gateDecision = "denied"
+	gateCanceled gateDecision = "canceled"
+	gateTimedOut gateDecision = "timed_out"
+)
+
+func deniedToolOutput(decision gateDecision) string {
+	switch decision {
+	case gateDenied:
+		return "The user denied this action."
+	case gateCanceled:
+		return "The action was not run because the agent run was canceled while waiting for approval."
+	case gateTimedOut:
+		return "The action was not run because approval timed out."
+	default:
+		return "The action was not approved."
+	}
 }
 
 // awaitGate registers a one-shot decision channel under callID, emits the
@@ -676,8 +699,9 @@ func (s *Service) awaitApproval(ctx context.Context, runID, callID, tool, args s
 // cancelled, or timeout elapses. It is race-free with Approve: de-registration
 // happens under the same lock Approve uses, so on timeout we either drain a
 // decision Approve already buffered or guarantee Approve will find no entry and
-// not send. Returns false on cancel/timeout/no-response (fail-closed).
-func (s *Service) awaitGate(ctx context.Context, callID string, timeout time.Duration, emitReq func()) bool {
+// not send. Anything except gateApproved is fail-closed and does not run the
+// gated tool.
+func (s *Service) awaitGate(ctx context.Context, callID string, timeout time.Duration, emitReq func()) gateDecision {
 	ch := make(chan bool, 1)
 	s.mu.Lock()
 	s.approvals[callID] = ch
@@ -695,20 +719,26 @@ func (s *Service) awaitGate(ctx context.Context, callID string, timeout time.Dur
 	select {
 	case ok := <-ch:
 		deregister()
-		return ok
+		if ok {
+			return gateApproved
+		}
+		return gateDenied
 	case <-ctx.Done():
 		deregister()
-		return false
+		return gateCanceled
 	case <-time.After(timeout):
 		if deregister() {
 			// Approve beat the timer — its decision is buffered; read it.
 			select {
 			case ok := <-ch:
-				return ok
+				if ok {
+					return gateApproved
+				}
+				return gateDenied
 			default:
 			}
 		}
-		return false
+		return gateTimedOut
 	}
 }
 

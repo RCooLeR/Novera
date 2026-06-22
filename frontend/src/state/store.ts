@@ -1207,14 +1207,35 @@ export const useStore = create<State>()((set, get) => ({
       case "tool_call":
         if (ev.tool === "update_plan") break;
         set((st) => ({
-          chat: [
-            ...st.chat,
-            { id: uid(), role: "tool", content: "", tool: ev.tool, args: ev.args, callId: ev.callId, runId: ev.runId },
-          ],
+          chat: st.chat.some(match)
+            ? st.chat.map((m) => (match(m) ? { ...m, tool: ev.tool, args: ev.args } : m))
+            : [
+                ...st.chat,
+                { id: uid(), role: "tool", content: "", tool: ev.tool, args: ev.args, callId: ev.callId, runId: ev.runId },
+              ],
         }));
         break;
       case "approval_request":
-        set((st) => ({ chat: st.chat.map((m) => (match(m) ? { ...m, approval: "pending" } : m)) }));
+        set((st) => {
+          const exists = st.chat.some(match);
+          return {
+            chat: exists
+              ? st.chat.map((m) => (match(m) ? { ...m, tool: m.tool ?? ev.tool, args: m.args ?? ev.args, approval: "pending" } : m))
+              : [
+                  ...st.chat,
+                  {
+                    id: uid(),
+                    role: "tool",
+                    content: "",
+                    tool: ev.tool,
+                    args: ev.args,
+                    callId: ev.callId,
+                    runId: ev.runId,
+                    approval: "pending",
+                  },
+                ],
+          };
+        });
         break;
       case "continue_request":
         set((st) => ({
@@ -1225,11 +1246,19 @@ export const useStore = create<State>()((set, get) => ({
         }));
         break;
       case "tool_result":
-        set((st) => ({
-          chat: st.chat.map((m) =>
-            match(m) ? { ...m, result: ev.result, approval: m.approval === "pending" ? undefined : m.approval } : m,
-          ),
-        }));
+        set((st) => {
+          const exists = st.chat.some(match);
+          return {
+            chat: exists
+              ? st.chat.map((m) =>
+                  match(m) ? { ...m, result: ev.result, approval: m.approval === "pending" ? undefined : m.approval } : m,
+                )
+              : [
+                  ...st.chat,
+                  { id: uid(), role: "tool", content: "", tool: ev.tool, result: ev.result, callId: ev.callId, runId: ev.runId },
+                ],
+          };
+        });
         break;
       case "plan":
         set({ agentPlan: ev.plan ?? [] });

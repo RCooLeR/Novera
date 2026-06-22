@@ -131,6 +131,49 @@ func TestAwaitContinueCancel(t *testing.T) {
 	}
 }
 
+func TestAwaitGateDecisionReasons(t *testing.T) {
+	t.Run("denied", func(t *testing.T) {
+		s := &Service{approvals: map[string]chan bool{}}
+		res := make(chan gateDecision, 1)
+		go func() { res <- s.awaitGate(context.Background(), "deny-me", time.Second, func() {}) }()
+		waitRegistered(t, s, "deny-me")
+		s.Approve("deny-me", false)
+		select {
+		case got := <-res:
+			if got != gateDenied {
+				t.Fatalf("awaitGate = %s, want %s", got, gateDenied)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("awaitGate did not return after denial")
+		}
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		s := &Service{approvals: map[string]chan bool{}}
+		ctx, cancel := context.WithCancel(context.Background())
+		res := make(chan gateDecision, 1)
+		go func() { res <- s.awaitGate(ctx, "cancel-me", time.Second, func() {}) }()
+		waitRegistered(t, s, "cancel-me")
+		cancel()
+		select {
+		case got := <-res:
+			if got != gateCanceled {
+				t.Fatalf("awaitGate = %s, want %s", got, gateCanceled)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("awaitGate did not return after cancel")
+		}
+	})
+
+	t.Run("timed out", func(t *testing.T) {
+		s := &Service{approvals: map[string]chan bool{}}
+		got := s.awaitGate(context.Background(), "timeout-me", time.Millisecond, func() {})
+		if got != gateTimedOut {
+			t.Fatalf("awaitGate = %s, want %s", got, gateTimedOut)
+		}
+	})
+}
+
 func TestParsePlan(t *testing.T) {
 	got := parsePlan(map[string]any{"steps": []any{
 		map[string]any{"title": "Read code", "status": "done"},
