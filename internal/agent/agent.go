@@ -124,6 +124,7 @@ type Service struct {
 	db        *db.Service
 	http      *http.Client
 	audit     *auditLog
+	debug     *agentDebugLog
 	rollback  *rollbackJournal
 	jobs      *jobs.Service
 	artifacts *artifacts.Service
@@ -156,6 +157,7 @@ func New(set *settings.Service, sec SecretReader, ws *workspace.Service, git *gi
 			CheckRedirect: netsafe.RedirectPolicy(5),
 		},
 		audit:     newAuditLog(),
+		debug:     newAgentDebugLog(),
 		rollback:  newRollbackJournal(),
 		cancels:   map[string]context.CancelFunc{},
 		approvals: map[string]chan bool{},
@@ -557,7 +559,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 				if forceFinalAnswer {
 					wireTools = nil
 				}
-				return s.complete(cctx, cfg.BaseURL, cfg.Model, key, windowMessages(messages, agentCfg.HistoryWindowGroups), wireTools)
+				return s.complete(cctx, runID, cfg.BaseURL, cfg.Model, key, windowMessages(messages, agentCfg.HistoryWindowGroups), wireTools)
 			}()
 			if err != nil {
 				if ctx.Err() != nil {
@@ -1649,7 +1651,7 @@ func (s *Service) toolDefsFor(names []string) []wireToolDef {
 
 // --- completion (non-streaming, tools) ---
 
-func (s *Service) complete(ctx context.Context, base, model, key string, msgs []wireMsg, tools []wireToolDef) (completion, error) {
+func (s *Service) complete(ctx context.Context, runID, base, model, key string, msgs []wireMsg, tools []wireToolDef) (completion, error) {
 	body := completionRequest{Model: model, Messages: msgs, Temperature: 0.2, Stream: false}
 	if len(tools) > 0 {
 		body.Tools = tools
@@ -1668,23 +1670,67 @@ func (s *Service) complete(ctx context.Context, base, model, key string, msgs []
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
+	started := time.Now()
 	resp, err := s.http.Do(req)
 	if err != nil {
+		s.recordCompletionDebug(runID, model, endpoint, msgs, tools, len(raw), 0, time.Since(started), nil, err)
 		return completion{}, err
 	}
 	defer resp.Body.Close()
+	rawResp, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		s.recordCompletionDebug(runID, model, endpoint, msgs, tools, len(raw), resp.StatusCode, time.Since(started), rawResp, readErr)
+		return completion{}, readErr
+	}
+	s.recordCompletionDebug(runID, model, endpoint, msgs, tools, len(raw), resp.StatusCode, time.Since(started), rawResp, nil)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return completion{}, fmt.Errorf("provider HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return completion{}, fmt.Errorf("provider HTTP %d: %s", resp.StatusCode, clip(strings.TrimSpace(string(rawResp)), 8192))
 	}
 	var parsed completionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.Unmarshal(rawResp, &parsed); err != nil {
 		return completion{}, err
 	}
 	if len(parsed.Choices) == 0 {
 		return completion{}, errors.New("provider returned no choices")
 	}
 	return completion{Content: parsed.Choices[0].Message.Content, ToolCalls: parsed.Choices[0].Message.ToolCalls}, nil
+}
+
+func (s *Service) recordCompletionDebug(runID, model, endpoint string, msgs []wireMsg, tools []wireToolDef, requestBytes, statusCode int, duration time.Duration, rawResp []byte, err error) {
+	if s == nil || s.debug == nil {
+		return
+	}
+	body, truncated := debugRawBody(rawResp)
+	entry := AgentDebugEntry{
+		RunID:             runID,
+		Event:             "completion_response",
+		Model:             model,
+		Endpoint:          endpoint,
+		StatusCode:        statusCode,
+		DurationMs:        duration.Milliseconds(),
+		MessageCount:      len(msgs),
+		Tools:             debugToolNames(tools),
+		ToolsDisabled:     len(tools) == 0,
+		RequestBytes:      requestBytes,
+		ResponseBytes:     len(rawResp),
+		ResponseTruncated: truncated,
+		RawResponse:       body,
+	}
+	if err != nil {
+		entry.Error = err.Error()
+	}
+	s.debug.record(entry)
+}
+
+func debugToolNames(tools []wireToolDef) []string {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, t.Function.Name)
+	}
+	return out
 }
 
 // windowMessages returns a recency-trimmed copy of the transcript to send to

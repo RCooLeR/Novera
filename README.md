@@ -123,6 +123,24 @@ The generated bindings live in `frontend/bindings/` and are committed so the
 frontend remains type-safe without requiring every contributor to regenerate
 them before editing UI code.
 
+## CI and Release
+
+GitHub Actions runs CI on `master` and pull requests across Windows, macOS, and
+Linux. Each runner installs the pinned Go, Node, Task, and Wails versions, then
+runs backend tests, frontend checks, and a production build.
+
+Tagged releases use `.github/workflows/release.yml`:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds native artifacts on each OS, uploads them to the
+workflow, then runs GoReleaser to create the GitHub release from those prebuilt
+assets. This keeps Wails platform packaging native while GoReleaser owns release
+notes and GitHub artifact publication.
+
 ## Project Layout
 
 ```text

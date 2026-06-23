@@ -1,0 +1,32 @@
+version: 2
+
+project_name: Novera
+
+# Wails desktop builds are produced on native OS runners in
+# .github/workflows/release.yml, then handed to GoReleaser as extra files. This
+# keeps platform-specific packaging in the Wails/Task pipeline while GoReleaser
+# owns GitHub release creation, notes, and artifact upload.
+builds:
+  - skip: true
+
+checksum:
+  disable: true
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: RCooLeR
+    name: Novera
+  draft: false
+  prerelease: auto
+  make_latest: true
+  mode: replace
+  extra_files:
+    - glob: ./dist/release/*

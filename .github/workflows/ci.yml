@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.4"
+  NODE_VERSION: "24"
+  TASK_VERSION: "v3.51.1"
+  WAILS_VERSION: "v3.0.0-alpha.79"
+
+jobs:
+  goreleaser-check:
+    name: GoReleaser config
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          install-only: true
+
+      - name: Check GoReleaser config
+        run: goreleaser check
+
+  test-build:
+    name: Test and build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-4-dev \
+            libwebkitgtk-6.0-dev
+
+      - name: Install Wails and Task
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@${{ env.TASK_VERSION }}
+          go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+
+      - name: Go tests
+        if: runner.os != 'Windows'
+        run: go test . ./internal/...
+
+      - name: Go tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:GOTMPDIR = Join-Path $pwd ".gotmp-ci"
+          New-Item -ItemType Directory -Force $env:GOTMPDIR | Out-Null
+          go list . ./internal/... |
+            Where-Object { $_ -ne "novera/internal/jobs" } |
+            ForEach-Object { go test $_ }
+
+      - name: Frontend checks
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run typecheck
+          npm run test
+
+      - name: Production build
+        run: task build

@@ -411,7 +411,7 @@ func TestCompleteOmitsToolChoiceWhenToolsDisabled(t *testing.T) {
 	defer srv.Close()
 
 	s := &Service{http: srv.Client()}
-	if _, err := s.complete(context.Background(), srv.URL, "model", "", []wireMsg{{Role: "user", Content: "finish"}}, nil); err != nil {
+	if _, err := s.complete(context.Background(), "run-test", srv.URL, "model", "", []wireMsg{{Role: "user", Content: "finish"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := payload["tools"]; ok {

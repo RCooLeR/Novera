@@ -82,6 +82,16 @@ Agent limits are configurable in Settings > Agent runtime:
 Each run writes the active tools and resolved limits into the Jobs log so slow
 or stuck local-model behavior can be diagnosed later.
 
+Temporary raw provider-response logging is also enabled for Agent completions
+while the local-model final-answer issue is being debugged. It writes JSONL to:
+
+```text
+%AppData%/Novera/agent-debug.jsonl
+```
+
+The debug log records response metadata and the raw provider response body. It
+does not persist request bodies or authorization headers.
+
 Defaults are intentionally generous for local models:
 
 ```text
