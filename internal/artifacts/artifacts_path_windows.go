@@ -2,7 +2,18 @@
 
 package artifacts
 
-import "golang.org/x/sys/windows"
+import (
+	"path/filepath"
+
+	"golang.org/x/sys/windows"
+)
+
+func canonicalRegistryRoot(path string) (string, error) {
+	// Workspace.Open already canonicalizes Windows roots. Avoid EvalSymlinks
+	// here because opening ordinary private directories can be denied under
+	// race-instrumented processes even when no reparse point is present.
+	return filepath.Clean(path), nil
+}
 
 // registryPathLinkStatus checks Windows reparse metadata directly. Calling
 // filepath.EvalSymlinks on an ordinary private metadata directory can fail with

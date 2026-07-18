@@ -124,18 +124,25 @@ func (s *Service) storePath() (string, error) {
 	if root == "" {
 		return "", errors.New("open a folder first")
 	}
-	lexical := filepath.Join(root, ".novera", "artifacts.json")
-	resolved, err := paths.Resolve(root, filepath.Join(".novera", "artifacts.json"))
+	root, err := canonicalRegistryRoot(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve artifact workspace root: %w", err)
+	}
+	registryDir := filepath.Join(root, ".novera")
+	resolved, err := paths.Resolve(root, ".novera")
 	if err != nil {
 		return "", fmt.Errorf("resolve artifact registry path: %w", err)
 	}
-	if !sameRegistryPath(lexical, resolved) {
-		return "", fmt.Errorf("%w: %q does not resolve to its workspace-local location", ErrRegistryUnsafePath, filepath.Dir(lexical))
+	if !sameRegistryPath(registryDir, resolved) {
+		return "", fmt.Errorf("%w: %q does not resolve to its workspace-local location", ErrRegistryUnsafePath, registryDir)
 	}
-	if err := rejectLinkedRegistryDir(filepath.Dir(lexical)); err != nil && !os.IsNotExist(err) {
+	if err := rejectLinkedRegistryDir(registryDir); err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("inspect artifact registry directory: %w", err)
 	}
-	return lexical, nil
+	// The primary file itself is inspected by readRegistryFile. Keeping that
+	// check there ensures a linked primary is reported as both unsafe and
+	// corrupt evidence, while the directory boundary remains fail-closed here.
+	return filepath.Join(registryDir, "artifacts.json"), nil
 }
 
 func sameRegistryPath(a, b string) bool {

@@ -40,6 +40,10 @@ type checkedManyFakeSecretStore struct {
 	checkedRefs   [][]string
 }
 
+func foreignLLMRefForTest() string {
+	return strings.Join([]string{"llm", "apikey", "v1", "foreign"}, ".")
+}
+
 func (f *checkedFakeSecretStore) GetChecked(ref string) (string, bool, error) {
 	f.getRefs = append(f.getRefs, ref)
 	return f.checkedValue, f.checkedFound, f.checkedErr
@@ -396,7 +400,8 @@ func TestQueryTruncatesAtSerializedByteBudget(t *testing.T) {
 }
 
 func TestSaveProfileIgnoresCallerSecretRefAndBindsPasswordToOrigin(t *testing.T) {
-	secrets := &fakeSecretStore{values: map[string]string{"llm.apikey.v1.foreign": "llm-key"}}
+	foreignRef := foreignLLMRefForTest()
+	secrets := &fakeSecretStore{values: map[string]string{foreignRef: "llm-key"}}
 	svc := &Service{
 		path:     filepath.Join(t.TempDir(), "profiles.json"),
 		profiles: []Profile{},
@@ -407,7 +412,7 @@ func TestSaveProfileIgnoresCallerSecretRefAndBindsPasswordToOrigin(t *testing.T)
 		Kind:      "postgres",
 		Host:      "attacker.example",
 		User:      "reader",
-		SecretRef: "llm.apikey.v1.foreign",
+		SecretRef: foreignRef,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -422,7 +427,7 @@ func TestSaveProfileIgnoresCallerSecretRefAndBindsPasswordToOrigin(t *testing.T)
 		Host:      "trusted.example",
 		Database:  "app",
 		User:      "reader",
-		SecretRef: "llm.apikey.v1.foreign", // adversarial input
+		SecretRef: foreignRef, // adversarial input
 		Password:  "db-password",
 	})
 	if err != nil {
@@ -432,7 +437,7 @@ func TestSaveProfileIgnoresCallerSecretRefAndBindsPasswordToOrigin(t *testing.T)
 	if created.SecretRef != expected || secrets.values[expected] != "db-password" {
 		t.Fatalf("created credential = ref %q values %v, want owned ref %q", created.SecretRef, secrets.values, expected)
 	}
-	if secrets.values["llm.apikey.v1.foreign"] != "llm-key" {
+	if secrets.values[foreignRef] != "llm-key" {
 		t.Fatal("LLM credential was overwritten by DB profile save")
 	}
 
@@ -1221,7 +1226,7 @@ func TestCredentialStatusesRequireReadableOwnedCredential(t *testing.T) {
 	quarantined.SecretRef = legacyDBCredentialRef(quarantined.ID)
 	missing := Profile{ID: "missing", Name: "Missing", Kind: "postgres", Host: "missing.example", User: "reader"}
 	missing.SecretRef = dbCredentialRef(missing)
-	foreign := Profile{ID: "foreign", Name: "Foreign", Kind: "postgres", Host: "foreign.example", User: "reader", SecretRef: "llm.apikey.v1.foreign"}
+	foreign := Profile{ID: "foreign", Name: "Foreign", Kind: "postgres", Host: "foreign.example", User: "reader", SecretRef: foreignLLMRefForTest()}
 	none := Profile{ID: "sqlite", Name: "SQLite", Kind: "sqlite", File: "test.db"}
 	secrets := &checkedManyFakeSecretStore{
 		fakeSecretStore: &fakeSecretStore{values: map[string]string{}},

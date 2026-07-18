@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+env:
+  GO_VERSION: "1.26.4"
+  GOTOOLCHAIN: local
+
 concurrency:
   group: security-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -28,18 +32,41 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language:
-          - go
-          - javascript-typescript
+        include:
+          - language: go
+            build_mode: autobuild
+          - language: javascript-typescript
+            build_mode: none
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install Go analysis prerequisites
+        if: matrix.language == 'go'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-4-dev \
+            libwebkitgtk-6.0-dev
+          mkdir -p frontend/dist
+          printf '<!doctype html><title>CodeQL placeholder</title>\n' > frontend/dist/index.html
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@eec0bff2f6c15bf3f1e8a0152f94d17664a06a06 # v4
         with:
           languages: ${{ matrix.language }}
-          build-mode: none
+          build-mode: ${{ matrix.build_mode }}
 
       - name: Analyze
         uses: github/codeql-action/analyze@eec0bff2f6c15bf3f1e8a0152f94d17664a06a06 # v4

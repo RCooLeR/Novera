@@ -1,0 +1,5 @@
+# Keep source and metadata deterministic across developer machines and CI.
+* text=auto eol=lf
+
+# Encoding and line-ending fixtures are byte-exact test assets.
+internal/bigfile/replace/testdata/encodings/*.txt binary

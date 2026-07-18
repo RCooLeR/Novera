@@ -1,5 +1,6 @@
 .task
 .gotmp
+/.gotmp-ci
 .claude
 .idea
 .tmp-test-files

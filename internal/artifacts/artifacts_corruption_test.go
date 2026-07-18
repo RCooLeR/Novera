@@ -16,6 +16,15 @@ func artifactRegistryPath(root string) string {
 	return filepath.Join(root, ".novera", "artifacts.json")
 }
 
+func sameArtifactEvidencePath(a, b string) bool {
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	if errA == nil && errB == nil {
+		return sameRegistryPath(resolvedA, resolvedB)
+	}
+	return sameRegistryPath(a, b)
+}
+
 func writeArtifactRegistryEvidence(t *testing.T, root string, evidence []byte) string {
 	t.Helper()
 	path := artifactRegistryPath(root)
@@ -64,7 +73,7 @@ func TestCorruptRegistryFailsClosedAndPreservesExactEvidence(t *testing.T) {
 				t.Fatalf("ListArtifacts error = %v, want ErrRegistryCorrupt", err)
 			}
 			var corrupt *RegistryCorruptionError
-			if !errors.As(err, &corrupt) || corrupt.Path != path {
+			if !errors.As(err, &corrupt) || !sameArtifactEvidencePath(corrupt.Path, path) {
 				t.Fatalf("corruption error = %#v, want path %q", corrupt, path)
 			}
 			if !strings.Contains(err.Error(), "mutations are blocked") || !strings.Contains(err.Error(), "restore deliberately") {
@@ -200,7 +209,7 @@ func TestMissingPrimaryWithRecoveryCopyRequiresDeliberateRestore(t *testing.T) {
 	s := New(fakeWS{root: root})
 	_, err := s.ListArtifacts()
 	var corrupt *RegistryCorruptionError
-	if !errors.As(err, &corrupt) || corrupt.LastKnownGoodPath != primary+registryLastGoodSuffix {
+	if !errors.As(err, &corrupt) || !sameArtifactEvidencePath(corrupt.LastKnownGoodPath, primary+registryLastGoodSuffix) {
 		t.Fatalf("error = %#v, want verified recovery path", corrupt)
 	}
 	if _, err := s.CreateArtifact(Artifact{Path: "new.txt"}); !errors.Is(err, ErrRegistryCorrupt) {
