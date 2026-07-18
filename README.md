@@ -46,7 +46,7 @@ xterm.js, virtualized grids, and generated Wails bindings.
 
 ## Stack
 
-- Go 1.26.4
+- Go 1.26.5
 - Wails v3.0.0-alpha.79
 - React 18 + TypeScript + Vite
 - Monaco editor
@@ -56,7 +56,7 @@ xterm.js, virtualized grids, and generated Wails bindings.
 
 ## Prerequisites
 
-- Go 1.26.4
+- Go 1.26.5
 - Node 24.x
 - Wails v3 CLI:
 

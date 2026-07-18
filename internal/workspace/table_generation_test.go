@@ -52,6 +52,7 @@ func TestStaleTableBrowseCannotReplaceCurrentWorkspaceCursor(t *testing.T) {
 	rootB := tableGenerationWorkspace(t, "table.csv", "id,name\n2,Grace\n3,Linus\n")
 
 	s := New()
+	t.Cleanup(s.Close)
 	if _, err := s.Open(rootA); err != nil {
 		t.Fatal(err)
 	}

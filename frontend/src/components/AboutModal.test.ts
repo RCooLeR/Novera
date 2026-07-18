@@ -11,7 +11,7 @@ describe("buildIdentityText", () => {
         buildDate: "2026-07-17T10:00:00Z",
         channel: "stable",
         dirty: false,
-        goVersion: "go1.26.4",
+        goVersion: "go1.26.5",
         wailsVersion: "v3.0.0-alpha.79",
       }),
     ).toBe("Novera 1.2.3 · stable · commit abc123 · built 2026-07-17T10:00:00Z");
@@ -26,7 +26,7 @@ describe("buildIdentityText", () => {
         buildDate: "unknown",
         channel: "development",
         dirty: true,
-        goVersion: "go1.26.4",
+        goVersion: "go1.26.5",
         wailsVersion: "v3.0.0-alpha.79",
       }),
     ).toContain("locally modified");
