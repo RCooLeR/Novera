@@ -18,6 +18,7 @@ function ago(ms: number): string {
 
 export default function ArtifactsView() {
   const artifacts = useStore((s) => s.artifacts);
+  const artifactsError = useStore((s) => s.artifactsError);
   const loadArtifacts = useStore((s) => s.loadArtifacts);
   const setArchived = useStore((s) => s.setArtifactArchived);
   const deleteArtifact = useStore((s) => s.deleteArtifact);
@@ -51,7 +52,11 @@ export default function ArtifactsView() {
         </button>
       </div>
 
-      {visible.length === 0 ? (
+      {artifactsError ? (
+        <div className="artifacts__empty" role="alert">
+          <AlertTriangle size={14} aria-hidden="true" /> {artifactsError}
+        </div>
+      ) : visible.length === 0 ? (
         <div className="artifacts__empty">
           {showArchived
             ? "No archived artifacts."

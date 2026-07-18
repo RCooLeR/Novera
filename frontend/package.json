@@ -3,14 +3,20 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "24.x",
+    "npm": ">=11 <12"
+  },
   "scripts": {
     "dev": "vite",
     "build:dev": "tsc && vite build --minify false --mode development",
-    "build": "tsc && vite build --mode production",
+    "build": "tsc && vite build --mode production && node scripts/check-production-csp.mjs && node scripts/check-production-entry.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:csp": "node scripts/check-production-csp.mjs",
+    "check:entry": "node scripts/check-production-entry.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -29,12 +35,12 @@
     "@eslint/js": "^9.18.0",
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",
-    "@vitejs/plugin-react": "^4.2.1",
+    "@vitejs/plugin-react": "^6.0.3",
     "eslint": "^9.18.0",
     "globals": "^15.14.0",
     "typescript": "^5.2.2",
     "typescript-eslint": "^8.20.0",
-    "vite": "^5.0.8",
-    "vitest": "^2.1.8"
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
   }
 }

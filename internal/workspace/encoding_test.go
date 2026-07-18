@@ -1,6 +1,9 @@
 package workspace
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestDecodeText(t *testing.T) {
 	utf16le := func(s string) []byte {
@@ -55,5 +58,16 @@ func TestEncodeLatin1Lossy(t *testing.T) {
 	// A character outside latin-1 must fail loudly rather than corrupt the file.
 	if _, err := encodeText("a—b", encLatin1); err == nil {
 		t.Error("expected error encoding non-latin-1 char as latin-1, got nil")
+	}
+}
+
+func TestDetectPageEncodingHandlesPartialUTF8Head(t *testing.T) {
+	full := append(bytes.Repeat([]byte{'a'}, binarySniffBytes-2), []byte("€tail")...)
+	head := full[:binarySniffBytes] // ends after only two of the three UTF-8 bytes
+	if enc, binary := detectPageEncoding(head, false); enc != encUTF8 || binary {
+		t.Fatalf("partial UTF-8 head classified as enc=%q binary=%v", enc, binary)
+	}
+	if enc, binary := detectPageEncoding([]byte{'c', 'a', 'f', 0xE9}, true); enc != encLatin1 || binary {
+		t.Fatalf("complete Latin-1 file classified as enc=%q binary=%v", enc, binary)
 	}
 }

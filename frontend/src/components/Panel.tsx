@@ -1,9 +1,11 @@
 import { ListChecks, SquareTerminal, TriangleAlert, X } from "lucide-react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useStore } from "../state/store";
-import TerminalView from "./TerminalView";
 import ProblemsView from "./ProblemsView";
 import JobsView from "./JobsView";
 import Splitter from "./Splitter";
+
+const TerminalView = lazy(() => import("./TerminalView"));
 
 export default function Panel({ hidden = false }: { hidden?: boolean }) {
   const togglePanel = useStore((s) => s.togglePanel);
@@ -14,10 +16,25 @@ export default function Panel({ hidden = false }: { hidden?: boolean }) {
   const resizePanel = useStore((s) => s.resizePanel);
   const problemCount = diagnostics?.items.length ?? 0;
   const runningJobs = useStore((s) => s.jobs.filter((j) => j.status === "running").length);
+  const [terminalMounted, setTerminalMounted] = useState(panelTab === "terminal");
+
+  useEffect(() => {
+    if (panelTab === "terminal") {
+      setTerminalMounted(true);
+    }
+  }, [panelTab]);
 
   return (
     <div className="panel" style={{ height: panelHeight, ...(hidden ? { display: "none" } : {}) }}>
-      <Splitter axis="y" side="top" onResize={resizePanel} />
+      <Splitter
+        axis="y"
+        side="top"
+        value={panelHeight}
+        min={120}
+        max={640}
+        label="Resize bottom panel"
+        onResize={resizePanel}
+      />
       <div className="panel__header">
         <button
           className={`panel__tab ${panelTab === "terminal" ? "active" : ""}`}
@@ -45,10 +62,14 @@ export default function Panel({ hidden = false }: { hidden?: boolean }) {
         </button>
       </div>
       <div className="panel__body">
-        {/* Terminal stays mounted (keeps the shell alive) and is hidden when not active. */}
-        <div style={{ display: panelTab === "terminal" ? "block" : "none", height: "100%" }}>
-          <TerminalView />
-        </div>
+        {/* Load the terminal on first use, then keep it mounted so its PTY stays alive. */}
+        {terminalMounted && (
+          <div style={{ display: panelTab === "terminal" ? "block" : "none", height: "100%" }}>
+            <Suspense fallback={<div className="panel__empty" role="status">Loading terminal...</div>}>
+              <TerminalView />
+            </Suspense>
+          </div>
+        )}
         {panelTab === "problems" && <ProblemsView />}
         {panelTab === "jobs" && <JobsView />}
       </div>

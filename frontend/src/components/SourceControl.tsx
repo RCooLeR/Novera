@@ -90,29 +90,36 @@ function FileRow({ change, staged, indent }: { change: GitFileChange; staged: bo
   const stageFile = useStore((s) => s.stageFile);
   const unstageFile = useStore((s) => s.unstageFile);
   const gitBusy = useStore((s) => s.gitBusy);
+  const workspaceTransitioning = useStore((s) => s.workspaceTransitioning);
+  const controlsDisabled = gitBusy || workspaceTransitioning;
   return (
-    <div
-      className="sc__row"
+    <div className="sc__row"
       title={change.path}
       style={indent ? { paddingLeft: 8 + indent * 14 } : undefined}
-      onClick={() => void openDiff(change.path, change.oldPath, staged)}
     >
-      <span className="sc__name">{baseName(change.path)}</span>
-      {indent === 0 && <span className="sc__dir">{dirName(change.path)}</span>}
-      {indent > 0 && <span className="sc__dir" />}
-      <span className="sc__rowactions" onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className="sc__open"
+        onClick={() => void openDiff(change.path, change.oldPath, staged)}
+        aria-label={`Open ${staged ? "staged" : "unstaged"} ${change.summary} diff for ${change.path}`}
+      >
+        <span className="sc__name">{baseName(change.path)}</span>
+        {indent === 0 && <span className="sc__dir">{dirName(change.path)}</span>}
+        {indent > 0 && <span className="sc__dir" />}
+        <span className="sc__badge" style={{ color: summaryColor(change.summary) }} aria-hidden="true">
+          {badge(change.summary)}
+        </span>
+      </button>
+      <span className="sc__rowactions">
         {staged ? (
-          <button className="icon-btn" title="Unstage" disabled={gitBusy} onClick={() => void unstageFile(change.path)}>
+          <button className="icon-btn" title="Unstage" disabled={controlsDisabled} onClick={() => void unstageFile(change.path)}>
             <Minus size={14} />
           </button>
         ) : (
-          <button className="icon-btn" title="Stage" disabled={gitBusy} onClick={() => void stageFile(change.path)}>
+          <button className="icon-btn" title="Stage" disabled={controlsDisabled} onClick={() => void stageFile(change.path)}>
             <Plus size={14} />
           </button>
         )}
-      </span>
-      <span className="sc__badge" style={{ color: summaryColor(change.summary) }}>
-        {badge(change.summary)}
       </span>
     </div>
   );
@@ -152,9 +159,10 @@ export default function SourceControl() {
   const stageAll = useStore((s) => s.stageAll);
   const commit = useStore((s) => s.commit);
   const gitBusy = useStore((s) => s.gitBusy);
+  const workspaceTransitioning = useStore((s) => s.workspaceTransitioning);
   const [message, setMessage] = useState("");
   const [tree, setTree] = useState(false);
-  const [committing, setCommitting] = useState(false);
+  const controlsDisabled = gitBusy || workspaceTransitioning;
 
   useEffect(() => {
     if (!gitStatus) void loadGitStatus();
@@ -172,20 +180,15 @@ export default function SourceControl() {
 
   const doCommit = async () => {
     const full = message.trim();
-    if (!full || committing) return;
+    if (!full || controlsDisabled) return;
     // Git convention: first line is the subject, the remainder (after the first
     // newline) is the body — so the textarea's extra lines aren't discarded.
     const nl = full.indexOf("\n");
     const subject = (nl >= 0 ? full.slice(0, nl) : full).trim();
     const body = nl >= 0 ? full.slice(nl + 1).trim() : "";
     if (!subject) return;
-    setCommitting(true);
-    try {
-      const ok = await commit(subject, body);
-      if (ok) setMessage("");
-    } finally {
-      setCommitting(false);
-    }
+    const ok = await commit(subject, body);
+    if (ok) setMessage("");
   };
 
   return (
@@ -195,6 +198,7 @@ export default function SourceControl() {
           className="sc__msg"
           placeholder={`Message (commit on ${gitStatus.branch})`}
           value={message}
+          disabled={controlsDisabled}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => {
             if ((e.ctrlKey || e.metaKey) && e.key === "Enter") void doCommit();
@@ -203,10 +207,10 @@ export default function SourceControl() {
         <div className="sc__commitbar">
           <button
             className="btn btn--primary"
-            disabled={!message.trim() || staged.length === 0 || committing}
+            disabled={!message.trim() || staged.length === 0 || controlsDisabled}
             onClick={() => void doCommit()}
           >
-            <Check size={15} /> {committing ? "Committing…" : `Commit (${staged.length})`}
+            <Check size={15} /> {gitBusy ? "Working…" : `Commit (${staged.length})`}
           </button>
           <button
             className="icon-btn"
@@ -232,7 +236,7 @@ export default function SourceControl() {
         <span>Changes</span>
         <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
           {unstaged.length > 0 && (
-            <button className="icon-btn" title="Stage all" disabled={gitBusy} onClick={() => void stageAll()}>
+            <button className="icon-btn" title="Stage all" disabled={controlsDisabled} onClick={() => void stageAll()}>
               <ListPlus size={14} />
             </button>
           )}

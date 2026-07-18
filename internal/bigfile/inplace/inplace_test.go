@@ -1,6 +1,9 @@
 package inplace
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -90,6 +93,28 @@ func TestApplyRejectsOutOfRange(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsOffsetOverflow(t *testing.T) {
+	path := writeFile(t, "short")
+	err := Apply(path, []Patch{{Offset: maxInt64, Old: []byte("x"), New: []byte("y")}}, path+".qrp")
+	if !errors.Is(err, ErrOutOfRange) {
+		t.Fatalf("want ErrOutOfRange, got %v", err)
+	}
+	if got := read(t, path); got != "short" {
+		t.Fatalf("file must be unchanged, got %q", got)
+	}
+}
+
+func TestApplyRejectsSourceAsSidecar(t *testing.T) {
+	path := writeFile(t, "hello world")
+	err := Apply(path, []Patch{{Offset: 6, Old: []byte("world"), New: []byte("WORLD")}}, path)
+	if !errors.Is(err, ErrRecoveryPathAlias) {
+		t.Fatalf("Apply error = %v, want ErrRecoveryPathAlias", err)
+	}
+	if got := read(t, path); got != "hello world" {
+		t.Fatalf("source changed to %q", got)
+	}
+}
+
 func TestApplyRejectsOverlap(t *testing.T) {
 	path := writeFile(t, "abcdefgh")
 	patches := []Patch{
@@ -98,6 +123,30 @@ func TestApplyRejectsOverlap(t *testing.T) {
 	}
 	if err := Apply(path, patches, path+".qrp"); err != ErrOverlap {
 		t.Fatalf("want ErrOverlap, got %v", err)
+	}
+}
+
+func TestApplyPreservesExistingRecoverySidecar(t *testing.T) {
+	path := writeFile(t, "hello world")
+	sidecar := path + ".qrp"
+	evidence := []byte("existing recovery evidence")
+	if err := os.WriteFile(sidecar, evidence, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Apply(path, []Patch{{Offset: 6, Old: []byte("world"), New: []byte("WORLD")}}, sidecar)
+	if !errors.Is(err, ErrRecoveryPending) {
+		t.Fatalf("Apply error = %v, want ErrRecoveryPending", err)
+	}
+	if got := read(t, path); got != "hello world" {
+		t.Fatalf("file must be unchanged, got %q", got)
+	}
+	gotEvidence, err := os.ReadFile(sidecar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotEvidence) != string(evidence) {
+		t.Fatalf("sidecar was modified: got %q, want %q", gotEvidence, evidence)
 	}
 }
 
@@ -161,24 +210,182 @@ func TestRecoverNoSidecarIsNoop(t *testing.T) {
 	}
 }
 
-func TestRecoverCorruptSidecarDeletes(t *testing.T) {
+func TestRecoverRejectsSourceAsSidecarWithoutDeletingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source-and-sidecar")
+	evidence := encodeRecoverySidecar(t, 1, sidecarHeaderBytes, 0, nil, nil)
+	if err := os.WriteFile(path, evidence, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rolledBack, err := Recover(path, path)
+	if rolledBack || !errors.Is(err, ErrRecoveryPathAlias) {
+		t.Fatalf("Recover = (%v, %v), want false and ErrRecoveryPathAlias", rolledBack, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("aliased source was deleted: %v", err)
+	}
+	if !bytes.Equal(got, evidence) {
+		t.Fatal("aliased source was modified")
+	}
+}
+
+func TestRecoverRejectsHardLinkAlias(t *testing.T) {
+	dir := t.TempDir()
+	sidecar := filepath.Join(dir, "journal.qrp")
+	source := filepath.Join(dir, "source.bin")
+	evidence := encodeRecoverySidecar(t, 1, sidecarHeaderBytes, 0, nil, nil)
+	if err := os.WriteFile(sidecar, evidence, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(sidecar, source); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+
+	rolledBack, err := Recover(source, sidecar)
+	if rolledBack || !errors.Is(err, ErrRecoveryPathAlias) {
+		t.Fatalf("Recover = (%v, %v), want false and ErrRecoveryPathAlias", rolledBack, err)
+	}
+	for _, path := range []string{source, sidecar} {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(got, evidence) {
+			t.Fatalf("alias %q changed or disappeared: bytes=%q err=%v", path, got, readErr)
+		}
+	}
+}
+
+func TestRecoverRejectsSymbolicLinkAlias(t *testing.T) {
+	dir := t.TempDir()
+	sidecar := filepath.Join(dir, "journal.qrp")
+	source := filepath.Join(dir, "source.bin")
+	evidence := encodeRecoverySidecar(t, 1, sidecarHeaderBytes, 0, nil, nil)
+	if err := os.WriteFile(sidecar, evidence, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sidecar, source); err != nil {
+		t.Skipf("symbolic links unavailable: %v", err)
+	}
+
+	rolledBack, err := Recover(source, sidecar)
+	if rolledBack || !errors.Is(err, ErrRecoveryPathAlias) {
+		t.Fatalf("Recover = (%v, %v), want false and ErrRecoveryPathAlias", rolledBack, err)
+	}
+	got, readErr := os.ReadFile(sidecar)
+	if readErr != nil || !bytes.Equal(got, evidence) {
+		t.Fatalf("sidecar changed or disappeared: bytes=%q err=%v", got, readErr)
+	}
+}
+
+func TestRecoverCorruptSidecarPreservesEvidence(t *testing.T) {
 	path := writeFile(t, "data")
 	sidecar := path + ".qrp"
-	if err := os.WriteFile(sidecar, []byte("not a real sidecar"), 0o600); err != nil {
+	evidence := []byte("not a real sidecar")
+	if err := os.WriteFile(sidecar, evidence, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rolledBack, err := Recover(path, sidecar)
-	if err != nil {
-		t.Fatalf("Recover: %v", err)
+	if !errors.Is(err, ErrInvalidSidecar) {
+		t.Fatalf("Recover error = %v, want ErrInvalidSidecar", err)
 	}
 	if rolledBack {
 		t.Fatal("corrupt sidecar must not roll back")
 	}
-	if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
-		t.Fatal("corrupt sidecar should be removed")
+	gotEvidence, readErr := os.ReadFile(sidecar)
+	if readErr != nil {
+		t.Fatalf("corrupt sidecar must be preserved: %v", readErr)
+	}
+	if !bytes.Equal(gotEvidence, evidence) {
+		t.Fatalf("sidecar changed: got %q, want %q", gotEvidence, evidence)
 	}
 	if got := read(t, path); got != "data" {
 		t.Fatalf("file must be untouched, got %q", got)
+	}
+}
+
+func TestRecoverRejectsMaliciousSidecarsBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name       string
+		fileSize   int64
+		flag       byte
+		count      int64
+		entries    []encodedRecoveryEntry
+		trailing   []byte
+		wantTooBig bool
+	}{
+		{name: "invalid committed flag", fileSize: 8, flag: 2},
+		{name: "negative file size", fileSize: -1},
+		{name: "entry count limit", fileSize: 8, count: maxRecoveryEntries + 1, wantTooBig: true},
+		{name: "negative offset", fileSize: 8, count: 1, entries: []encodedRecoveryEntry{{offset: -1, length: 1, data: []byte("x")}}},
+		{name: "range overflow", fileSize: int64(^uint64(0) >> 1), count: 1, entries: []encodedRecoveryEntry{{offset: int64(^uint64(0) >> 1), length: 1, data: []byte("x")}}},
+		{name: "out of range", fileSize: 8, count: 1, entries: []encodedRecoveryEntry{{offset: 7, length: 2, data: []byte("xx")}}},
+		{name: "overlap", fileSize: 8, count: 2, entries: []encodedRecoveryEntry{{offset: 1, length: 3, data: []byte("abc")}, {offset: 2, length: 1, data: []byte("d")}}},
+		{name: "unsorted", fileSize: 8, count: 2, entries: []encodedRecoveryEntry{{offset: 5, length: 1, data: []byte("a")}, {offset: 1, length: 1, data: []byte("b")}}},
+		{name: "truncated payload", fileSize: 8, count: 1, entries: []encodedRecoveryEntry{{offset: 1, length: 3, data: []byte("a")}}},
+		{name: "trailing bytes", fileSize: 8, trailing: []byte("unexpected")},
+		{name: "rollback byte limit", fileSize: int64(^uint64(0) >> 1), count: 1, entries: []encodedRecoveryEntry{{offset: 0, length: maxRecoveryRollback + 1}}, wantTooBig: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeFile(t, "original")
+			sidecar := path + ".qrp"
+			evidence := encodeRecoverySidecar(t, tc.flag, tc.fileSize, tc.count, tc.entries, tc.trailing)
+			if err := os.WriteFile(sidecar, evidence, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			rolledBack, err := Recover(path, sidecar)
+			if rolledBack {
+				t.Fatal("malicious sidecar must not roll back")
+			}
+			if tc.wantTooBig {
+				if !errors.Is(err, ErrRecoveryTooLarge) {
+					t.Fatalf("Recover error = %v, want ErrRecoveryTooLarge", err)
+				}
+			} else if !errors.Is(err, ErrInvalidSidecar) {
+				t.Fatalf("Recover error = %v, want ErrInvalidSidecar", err)
+			}
+			if got := read(t, path); got != "original" {
+				t.Fatalf("source changed to %q", got)
+			}
+			gotEvidence, readErr := os.ReadFile(sidecar)
+			if readErr != nil {
+				t.Fatalf("sidecar must be preserved: %v", readErr)
+			}
+			if !bytes.Equal(gotEvidence, evidence) {
+				t.Fatal("sidecar evidence changed")
+			}
+		})
+	}
+}
+
+func TestRecoverRejectsChangedSourceSizeAndPreservesSidecar(t *testing.T) {
+	path := writeFile(t, "hello world")
+	sidecar := path + ".qrp"
+	if err := writeSidecar(sidecar, 11, []Patch{{Offset: 6, Old: []byte("world"), New: []byte("WORLD")}}); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := os.ReadFile(sidecar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("different-size"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rolledBack, err := Recover(path, sidecar)
+	if rolledBack || !errors.Is(err, ErrRecoverySourceMismatch) {
+		t.Fatalf("Recover = (%v, %v), want false and ErrRecoverySourceMismatch", rolledBack, err)
+	}
+	if got := read(t, path); got != "different-size" {
+		t.Fatalf("source changed to %q", got)
+	}
+	gotEvidence, err := os.ReadFile(sidecar)
+	if err != nil {
+		t.Fatalf("sidecar must be preserved: %v", err)
+	}
+	if !bytes.Equal(gotEvidence, evidence) {
+		t.Fatal("sidecar evidence changed")
 	}
 }
 
@@ -196,4 +403,32 @@ func TestApplyThenReopenCleanState(t *testing.T) {
 	if got := read(t, path); got != "aaaa BBBB" {
 		t.Fatalf("content = %q", got)
 	}
+}
+
+type encodedRecoveryEntry struct {
+	offset int64
+	length int64
+	data   []byte
+}
+
+func encodeRecoverySidecar(t *testing.T, flag byte, fileSize, count int64, entries []encodedRecoveryEntry, trailing []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	buf.Write(sidecarMagic[:])
+	buf.WriteByte(flag)
+	for _, value := range []int64{fileSize, count} {
+		if err := binary.Write(&buf, binary.LittleEndian, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, entry := range entries {
+		for _, value := range []int64{entry.offset, entry.length} {
+			if err := binary.Write(&buf, binary.LittleEndian, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		buf.Write(entry.data)
+	}
+	buf.Write(trailing)
+	return buf.Bytes()
 }

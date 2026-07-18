@@ -15,13 +15,50 @@ import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Cr
 import * as $models from "./models.js";
 
 /**
+ * DeleteLLMAPIKey detaches then removes only the current provider-owned key.
+ */
+export function DeleteLLMAPIKey(): $CancellablePromise<void> {
+    return $Call.ByID(3613693460);
+}
+
+/**
+ * GetLLMAPIKeyStatus reports whether the current credential is verified,
+ * quarantined legacy evidence, absent, or temporarily unverifiable.
+ */
+export function GetLLMAPIKeyStatus(): $CancellablePromise<$models.LLMAPIKeyStatus> {
+    return $Call.ByID(2395146497).then(($result: any) => {
+        return $$createType0($result);
+    });
+}
+
+/**
+ * HasLLMAPIKey is retained for compatibility and reports true only for a
+ * backend-verified current origin-bound key.
+ */
+export function HasLLMAPIKey(): $CancellablePromise<boolean> {
+    return $Call.ByID(197256875);
+}
+
+/**
  * Load returns the persisted settings, falling back to defaults for any missing
- * fields or if no file exists yet.
+ * fields or if no file exists yet. Legacy credentials remain quarantined; the
+ * only legacy metadata repair recognizes an already-completed explicit
+ * replacement whose settings-file publication was interrupted.
  */
 export function Load(): $CancellablePromise<$models.Settings> {
     return $Call.ByID(2509701163).then(($result: any) => {
-        return $$createType0($result);
+        return $$createType1($result);
     });
+}
+
+/**
+ * LoadError returns the latched, actionable persistence diagnostic, if any.
+ * Load itself remains a best-effort read for startup compatibility, while this
+ * separate bound method lets the renderer distinguish defaults from a corrupt
+ * or unsafe primary file.
+ */
+export function LoadError(): $CancellablePromise<string> {
+    return $Call.ByID(4200777811);
 }
 
 /**
@@ -30,7 +67,7 @@ export function Load(): $CancellablePromise<$models.Settings> {
  */
 export function RememberWorkspace(path: string): $CancellablePromise<$models.Settings> {
     return $Call.ByID(2975979585, path).then(($result: any) => {
-        return $$createType0($result);
+        return $$createType1($result);
     });
 }
 
@@ -41,5 +78,15 @@ export function Save($in: $models.Settings): $CancellablePromise<void> {
     return $Call.ByID(2754879942, $in);
 }
 
+/**
+ * SetLLMAPIKey stores an API key under the backend-owned ref for the currently
+ * persisted provider/origin and attaches that ref to settings. The renderer
+ * supplies only the new value; it cannot select or reattach an existing ref.
+ */
+export function SetLLMAPIKey(value: string): $CancellablePromise<void> {
+    return $Call.ByID(1125480403, value);
+}
+
 // Private type creation functions
-const $$createType0 = $models.Settings.createFrom;
+const $$createType0 = $models.LLMAPIKeyStatus.createFrom;
+const $$createType1 = $models.Settings.createFrom;

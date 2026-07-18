@@ -6,6 +6,7 @@ package workspace
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/csv"
 	"encoding/hex"
@@ -51,8 +52,19 @@ const (
 	binarySniffBytes = 8000
 )
 
-// ErrStale indicates the on-disk file changed since the editor last read it.
-var ErrStale = errors.New("file changed on disk since it was last read")
+var (
+	// ErrStale indicates the on-disk file changed since the editor last read it.
+	ErrStale = errors.New("file changed on disk since it was last read")
+	// ErrWorkspaceChanged indicates a queued operation no longer belongs to the
+	// active workspace incarnation and was rejected before resolving its path.
+	ErrWorkspaceChanged = errors.New("workspace changed while the operation was pending")
+	// ErrRawTooLarge indicates that an internal byte-faithful read was refused
+	// before allocation because it exceeds the caller's snapshot budget.
+	ErrRawTooLarge = errors.New("file exceeds raw read limit")
+	// ErrRawNotRegular indicates that an internal byte-faithful read targeted a
+	// directory, device, pipe, or another non-regular object.
+	ErrRawNotRegular = errors.New("path is not a regular file")
+)
 
 // Info describes the currently open workspace.
 type Info struct {
@@ -99,11 +111,22 @@ type SelfWriteNotifier interface{ Suppress(abs string) }
 
 // Service is the bound Wails service.
 type Service struct {
-	mu        sync.RWMutex
-	root      string
-	selfWrite SelfWriteNotifier  // optional; set once at startup
-	jobs      *jobs.Service      // optional; tracks long data-tool ops
-	arts      *artifacts.Service // optional; registers data-tool outputs as artifacts
+	mu             sync.RWMutex
+	root           string
+	rootGeneration uint64
+	// Open and Close mutate the one process-global workspace root. Serializing
+	// them prevents concurrent bridge calls from interleaving validation and
+	// mutation; the renderer additionally orders them by user intent.
+	transitionMu sync.Mutex
+	selfWrite    SelfWriteNotifier  // optional; set once at startup
+	jobs         *jobs.Service      // optional; tracks long data-tool ops
+	arts         *artifacts.Service // optional; registers data-tool outputs as artifacts
+
+	// Serialize editor writes so two renderer saves cannot both validate the
+	// same revision and then race their atomic renames. External processes can
+	// still change the file, so the optimistic revision remains a best-effort
+	// cross-process check.
+	editorWriteMu sync.Mutex
 
 	tableMu    sync.Mutex
 	tableCache *tableResult  // most-recent filtered/sorted table result, served paged
@@ -134,10 +157,11 @@ func (s *Service) dropTableIndex() { s.tableIdx = nil }
 // paging a large file doesn't re-open + re-skip from the start each time
 // (borrowed from Quarry's window-continuation approach).
 type browseCursor struct {
-	key    string // rel|fileSig|delimiter
-	offset int    // data rows already consumed past the header
-	header []string
-	it     *tableIter
+	key     string // rel|fileSig|delimiter
+	offset  int    // data rows already consumed past the header
+	header  []string
+	it      *tableIter
+	pending []string // one parsed row held when the prior page hit its byte budget
 }
 
 // dropBrowseCursor closes and clears the browse cursor. Caller must hold tableMu.
@@ -165,21 +189,38 @@ func WireJobsAndArtifacts(s *Service, j *jobs.Service, a *artifacts.Service) {
 	s.arts = a
 }
 
-// runTracked runs a long data-tool op as a job visible in the Jobs panel. The op
-// is synchronous within the bound call; streaming ops aren't cancel-wired yet, so
-// the job carries no cancel hook.
-func (s *Service) runTracked(kind, title string, fn func() error) error {
+// runTracked runs a long data-tool operation with a job-owned cancellation
+// context. Producers must poll the context before acquisition and publication.
+func (s *Service) runTracked(kind, title string, fn func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	if s.jobs == nil {
-		return fn()
+		return fn(ctx)
 	}
-	id := s.jobs.Start(kind, title, nil)
-	err := fn()
+	id := jobs.Start(s.jobs, kind, title, cancel)
+	err := fn(ctx)
 	if err != nil {
-		s.jobs.Finish(id, jobs.StatusFailed, err.Error())
+		status := jobs.StatusFailed
+		if errors.Is(err, context.Canceled) {
+			status = jobs.StatusCanceled
+		}
+		jobs.Finish(s.jobs, id, status, err.Error())
 	} else {
-		s.jobs.Finish(id, jobs.StatusSuccess, "")
+		jobs.Finish(s.jobs, id, jobs.StatusSuccess, "")
 	}
 	return err
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
 }
 
 // registerArtifact best-effort records an output file as an artifact with
@@ -205,8 +246,24 @@ func (s *Service) Root() string {
 	return s.root
 }
 
+func (s *Service) workspaceSnapshot() (root string, generation uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.root, s.rootGeneration
+}
+
+func (s *Service) validateWorkspaceSnapshot(root string, generation uint64) error {
+	currentRoot, currentGeneration := s.workspaceSnapshot()
+	if currentGeneration != generation || currentRoot != root {
+		return ErrWorkspaceChanged
+	}
+	return nil
+}
+
 // Open sets the active workspace to dir after validating it is a directory.
 func (s *Service) Open(dir string) (Info, error) {
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
 	if dir == "" {
 		return Info{}, errors.New("no directory provided")
 	}
@@ -230,6 +287,7 @@ func (s *Service) Open(dir string) (Info, error) {
 	}
 	s.mu.Lock()
 	s.root = abs
+	s.rootGeneration++
 	s.mu.Unlock()
 	s.tableMu.Lock()
 	s.tableCache = nil // don't carry a prior workspace's table result across opens
@@ -241,8 +299,11 @@ func (s *Service) Open(dir string) (Info, error) {
 
 // Close clears the active workspace.
 func (s *Service) Close() {
+	s.transitionMu.Lock()
+	defer s.transitionMu.Unlock()
 	s.mu.Lock()
 	s.root = ""
+	s.rootGeneration++
 	s.mu.Unlock()
 	s.tableMu.Lock()
 	s.tableCache = nil
@@ -263,7 +324,7 @@ func (s *Service) Current() Info {
 // ListDir returns the immediate children of rel ("" or "." for the root),
 // directories first then files, each sorted case-insensitively.
 func (s *Service) ListDir(rel string) ([]Entry, error) {
-	root := s.Root()
+	root, generation := s.workspaceSnapshot()
 	abs, err := paths.Resolve(root, rel)
 	if err != nil {
 		return nil, err
@@ -299,6 +360,9 @@ func (s *Service) ListDir(rel string) ([]Entry, error) {
 		}
 		return lessFold(entries[i].Name, entries[j].Name)
 	})
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		return nil, err
+	}
 	return entries, nil
 }
 
@@ -598,6 +662,15 @@ const (
 	// tableResultCap bounds how many rows a filtered/sorted result holds in memory
 	// (a sorted 2 GB file can't be fully materialised); beyond it, Capped is set.
 	tableResultCap = 500_000
+	// tableCellMaxBytes rejects a single decoded cell before it can be retained
+	// in a cache or amplified across the renderer bridge.
+	tableCellMaxBytes = 1 << 20 // 1 MiB
+	// tableResultMaxBytes bounds the approximate retained string/slice payload of
+	// one filtered or sorted cache entry independently of its row count.
+	tableResultMaxBytes = 64 << 20 // 64 MiB
+	// tablePageMaxBytes bounds one TablePage bridge payload. Paging can return
+	// fewer than the requested row count when the byte budget is reached.
+	tablePageMaxBytes = 16 << 20 // 16 MiB
 	// maxXlsxBytes guards the on-disk size of an XLSX (a zip, so a decompression
 	// bomb risk). CSV/TSV are streamed and have no size cap.
 	maxXlsxBytes = 50 << 20 // 50 MiB
@@ -706,9 +779,9 @@ func (s *Service) PreviewCsvToSql(rel, tableName string, includeCreate bool) (st
 // workspace-relative output path.
 func (s *Service) ConvertCsvToSql(rel, outRel, tableName string, includeCreate bool) (datatools.SQLConvertSummary, error) {
 	var sum datatools.SQLConvertSummary
-	err := s.runTracked("csv→sql", "CSV→SQL "+outRel, func() error {
+	err := s.runTracked("csv→sql", "CSV→SQL "+outRel, func(ctx context.Context) error {
 		var e error
-		sum, e = s.convertCsvToSqlImpl(rel, outRel, tableName, includeCreate)
+		sum, e = s.convertCsvToSqlImpl(ctx, rel, outRel, tableName, includeCreate)
 		return e
 	})
 	if err == nil {
@@ -717,12 +790,8 @@ func (s *Service) ConvertCsvToSql(rel, outRel, tableName string, includeCreate b
 	return sum, err
 }
 
-func (s *Service) convertCsvToSqlImpl(rel, outRel, tableName string, includeCreate bool) (datatools.SQLConvertSummary, error) {
+func (s *Service) convertCsvToSqlImpl(ctx context.Context, rel, outRel, tableName string, includeCreate bool) (datatools.SQLConvertSummary, error) {
 	abs, comma, names, types, err := s.prepCsvConvert(rel)
-	if err != nil {
-		return datatools.SQLConvertSummary{}, err
-	}
-	outAbs, err := s.prepOutput(outRel)
 	if err != nil {
 		return datatools.SQLConvertSummary{}, err
 	}
@@ -731,14 +800,18 @@ func (s *Service) convertCsvToSqlImpl(rel, outRel, tableName string, includeCrea
 		return datatools.SQLConvertSummary{}, err
 	}
 	defer in.Close()
-	out, err := os.Create(outAbs)
+	out, err := s.newTransformOutput(abs, in, outRel)
 	if err != nil {
 		return datatools.SQLConvertSummary{}, err
 	}
+	defer out.abort()
 	opts := datatools.SQLConvertOptions{TableName: tableName, Comma: comma, Columns: names, ColumnTypes: types, IncludeCreate: includeCreate, BatchSize: 500}
-	sum, cerr := datatools.ConvertCSVToSQL(in, out, opts)
-	if closeErr := out.Close(); cerr == nil {
-		cerr = closeErr
+	sum, cerr := datatools.ConvertCSVToSQL(contextReader{ctx: ctx, r: in}, out, opts)
+	if cerr == nil {
+		cerr = ctx.Err()
+	}
+	if cerr == nil {
+		cerr = out.commit()
 	}
 	return sum, cerr
 }
@@ -746,9 +819,9 @@ func (s *Service) convertCsvToSqlImpl(rel, outRel, tableName string, includeCrea
 // ExtractDumpTable copies one table's statements out of a SQL dump into outRel.
 func (s *Service) ExtractDumpTable(rel, table, outRel string) (DumpExtractResult, error) {
 	var res DumpExtractResult
-	err := s.runTracked("dump-extract", "Extract "+table+" → "+outRel, func() error {
+	err := s.runTracked("dump-extract", "Extract "+table+" → "+outRel, func(ctx context.Context) error {
 		var e error
-		res, e = s.extractDumpTableImpl(rel, table, outRel)
+		res, e = s.extractDumpTableImpl(ctx, rel, table, outRel)
 		return e
 	})
 	if err == nil {
@@ -757,36 +830,32 @@ func (s *Service) ExtractDumpTable(rel, table, outRel string) (DumpExtractResult
 	return res, err
 }
 
-func (s *Service) extractDumpTableImpl(rel, table, outRel string) (DumpExtractResult, error) {
+func (s *Service) extractDumpTableImpl(ctx context.Context, rel, table, outRel string) (DumpExtractResult, error) {
 	abs, err := paths.Resolve(s.Root(), rel)
 	if err != nil {
 		return DumpExtractResult{}, err
 	}
-	sum, err := s.AnalyzeSQLDump(rel)
+	in, err := os.Open(abs)
 	if err != nil {
 		return DumpExtractResult{}, err
 	}
-	st, err := os.Stat(abs)
+	defer in.Close()
+	out, err := s.newTransformOutput(abs, in, outRel)
 	if err != nil {
 		return DumpExtractResult{}, err
 	}
-	var rng *datatools.DumpTableRange
-	for _, r := range datatools.PlanDumpRanges(sum, st.Size()) {
-		if r.Name == table {
-			rr := r
-			rng = &rr
-			break
-		}
+	defer out.abort()
+	n, found, err := datatools.ExtractSQLTableContext(ctx, in, table, out)
+	if err != nil {
+		return DumpExtractResult{}, err
 	}
-	if rng == nil {
+	if !found {
 		return DumpExtractResult{}, fmt.Errorf("table %q not found in the dump", table)
 	}
-	outAbs, err := s.prepOutput(outRel)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return DumpExtractResult{}, err
 	}
-	n, err := copyByteRange(abs, outAbs, rng.Start, rng.End)
-	if err != nil {
+	if err := out.commit(); err != nil {
 		return DumpExtractResult{}, err
 	}
 	return DumpExtractResult{Outputs: []string{outRel}, Tables: 1, Bytes: n}, nil
@@ -795,9 +864,9 @@ func (s *Service) extractDumpTableImpl(rel, table, outRel string) (DumpExtractRe
 // SplitDump writes each table in a SQL dump to outDirRel/<table>.sql.
 func (s *Service) SplitDump(rel, outDirRel string) (DumpExtractResult, error) {
 	var res DumpExtractResult
-	err := s.runTracked("dump-split", "Split dump "+rel, func() error {
+	err := s.runTracked("dump-split", "Split dump "+rel, func(ctx context.Context) error {
 		var e error
-		res, e = s.splitDumpImpl(rel, outDirRel)
+		res, e = s.splitDumpImpl(ctx, rel, outDirRel)
 		return e
 	})
 	// Register each per-table output (lineage = the source dump). Even on a
@@ -808,29 +877,46 @@ func (s *Service) SplitDump(rel, outDirRel string) (DumpExtractResult, error) {
 	return res, err
 }
 
-func (s *Service) splitDumpImpl(rel, outDirRel string) (DumpExtractResult, error) {
+func (s *Service) splitDumpImpl(ctx context.Context, rel, outDirRel string) (DumpExtractResult, error) {
 	abs, err := paths.Resolve(s.Root(), rel)
 	if err != nil {
 		return DumpExtractResult{}, err
 	}
-	sum, err := s.AnalyzeSQLDump(rel)
+	in, err := os.Open(abs)
 	if err != nil {
 		return DumpExtractResult{}, err
 	}
-	st, err := os.Stat(abs)
+	defer in.Close()
+	sum, err := datatools.AnalyzeSQLDumpContext(ctx, in, 0)
 	if err != nil {
 		return DumpExtractResult{}, err
 	}
 	res := DumpExtractResult{Outputs: []string{}}
-	for _, r := range datatools.PlanDumpRanges(sum, st.Size()) {
-		outRel := outDirRel + "/" + sanitizeFileName(r.Name) + ".sql"
-		outAbs, err := s.prepOutput(outRel)
+	for _, table := range sum.Tables {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		if _, err := in.Seek(0, io.SeekStart); err != nil {
+			return res, err
+		}
+		outRel := outDirRel + "/" + sanitizeFileName(table.Name) + ".sql"
+		out, err := s.newTransformOutput(abs, in, outRel)
 		if err != nil {
 			return res, err
 		}
-		n, err := copyByteRange(abs, outAbs, r.Start, r.End)
-		if err != nil {
-			return res, err
+		n, found, extractErr := datatools.ExtractSQLTableContext(ctx, in, table.Name, out)
+		if extractErr == nil && !found {
+			extractErr = fmt.Errorf("table %q disappeared during dump split", table.Name)
+		}
+		if extractErr == nil {
+			extractErr = ctx.Err()
+		}
+		if extractErr == nil {
+			extractErr = out.commit()
+		}
+		out.abort()
+		if extractErr != nil {
+			return res, extractErr
 		}
 		res.Bytes += n
 		res.Tables++
@@ -843,9 +929,9 @@ func (s *Service) splitDumpImpl(rel, outDirRel string) (DumpExtractResult, error
 // rewrite ENGINE/CHARSET, drop AUTO_INCREMENT, rename a database) into outRel.
 func (s *Service) TransformDump(rel, outRel string, t datatools.DumpTransform) (datatools.DumpTransformSummary, error) {
 	var sum datatools.DumpTransformSummary
-	err := s.runTracked("dump-clean", "Clean dump → "+outRel, func() error {
+	err := s.runTracked("dump-clean", "Clean dump → "+outRel, func(ctx context.Context) error {
 		var e error
-		sum, e = s.transformDumpImpl(rel, outRel, t)
+		sum, e = s.transformDumpImpl(ctx, rel, outRel, t)
 		return e
 	})
 	if err == nil {
@@ -854,12 +940,8 @@ func (s *Service) TransformDump(rel, outRel string, t datatools.DumpTransform) (
 	return sum, err
 }
 
-func (s *Service) transformDumpImpl(rel, outRel string, t datatools.DumpTransform) (datatools.DumpTransformSummary, error) {
+func (s *Service) transformDumpImpl(ctx context.Context, rel, outRel string, t datatools.DumpTransform) (datatools.DumpTransformSummary, error) {
 	abs, err := paths.Resolve(s.Root(), rel)
-	if err != nil {
-		return datatools.DumpTransformSummary{}, err
-	}
-	outAbs, err := s.prepOutput(outRel)
 	if err != nil {
 		return datatools.DumpTransformSummary{}, err
 	}
@@ -868,13 +950,17 @@ func (s *Service) transformDumpImpl(rel, outRel string, t datatools.DumpTransfor
 		return datatools.DumpTransformSummary{}, err
 	}
 	defer in.Close()
-	out, err := os.Create(outAbs)
+	out, err := s.newTransformOutput(abs, in, outRel)
 	if err != nil {
 		return datatools.DumpTransformSummary{}, err
 	}
-	sum, terr := datatools.TransformDump(in, out, t)
-	if closeErr := out.Close(); terr == nil {
-		terr = closeErr
+	defer out.abort()
+	sum, terr := datatools.TransformDumpContext(ctx, in, out, t)
+	if terr == nil {
+		terr = ctx.Err()
+	}
+	if terr == nil {
+		terr = out.commit()
 	}
 	return sum, terr
 }
@@ -908,22 +994,19 @@ func (s *Service) ProjectCsv(rel, outRel string, columns []string) (int64, error
 	if err != nil {
 		return 0, err
 	}
-	outAbs, err := s.prepOutput(outRel)
-	if err != nil {
-		return 0, err
-	}
 	in, err := os.Open(abs)
 	if err != nil {
 		return 0, err
 	}
 	defer in.Close()
-	out, err := os.Create(outAbs)
+	out, err := s.newTransformOutput(abs, in, outRel)
 	if err != nil {
 		return 0, err
 	}
+	defer out.abort()
 	n, cerr := datatools.ProjectCSV(in, out, comma, columns)
-	if closeErr := out.Close(); cerr == nil {
-		cerr = closeErr
+	if cerr == nil {
+		cerr = out.commit()
 	}
 	return n, cerr
 }
@@ -934,22 +1017,19 @@ func (s *Service) AddCsvColumn(rel, outRel, name, value string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	outAbs, err := s.prepOutput(outRel)
-	if err != nil {
-		return 0, err
-	}
 	in, err := os.Open(abs)
 	if err != nil {
 		return 0, err
 	}
 	defer in.Close()
-	out, err := os.Create(outAbs)
+	out, err := s.newTransformOutput(abs, in, outRel)
 	if err != nil {
 		return 0, err
 	}
+	defer out.abort()
 	n, cerr := datatools.AddCSVColumn(in, out, comma, name, value)
-	if closeErr := out.Close(); cerr == nil {
-		cerr = closeErr
+	if cerr == nil {
+		cerr = out.commit()
 	}
 	return n, cerr
 }
@@ -957,9 +1037,9 @@ func (s *Service) AddCsvColumn(rel, outRel, name, value string) (int64, error) {
 // DumpTableToCsv extracts a table's pg_dump COPY block into a CSV file at outRel.
 func (s *Service) DumpTableToCsv(rel, table, outRel string) (int64, error) {
 	var n int64
-	err := s.runTracked("dump→csv", "Extract "+table+" → "+outRel, func() error {
+	err := s.runTracked("dump→csv", "Extract "+table+" → "+outRel, func(ctx context.Context) error {
 		var e error
-		n, e = s.dumpTableToCsvImpl(rel, table, outRel)
+		n, e = s.dumpTableToCsvImpl(ctx, rel, table, outRel)
 		return e
 	})
 	if err == nil {
@@ -968,12 +1048,8 @@ func (s *Service) DumpTableToCsv(rel, table, outRel string) (int64, error) {
 	return n, err
 }
 
-func (s *Service) dumpTableToCsvImpl(rel, table, outRel string) (int64, error) {
+func (s *Service) dumpTableToCsvImpl(ctx context.Context, rel, table, outRel string) (int64, error) {
 	abs, err := paths.Resolve(s.Root(), rel)
-	if err != nil {
-		return 0, err
-	}
-	outAbs, err := s.prepOutput(outRel)
 	if err != nil {
 		return 0, err
 	}
@@ -982,25 +1058,30 @@ func (s *Service) dumpTableToCsvImpl(rel, table, outRel string) (int64, error) {
 		return 0, err
 	}
 	defer in.Close()
-	out, err := os.Create(outAbs)
+	out, err := s.newTransformOutput(abs, in, outRel)
 	if err != nil {
 		return 0, err
 	}
-	rows, found, derr := datatools.DumpTableToCSV(in, table, out)
-	if closeErr := out.Close(); derr == nil {
-		derr = closeErr
-	}
+	defer out.abort()
+	rows, found, derr := datatools.DumpTableToCSVContext(ctx, in, table, out)
 	if derr != nil {
 		return rows, derr
 	}
 	if !found {
 		return 0, fmt.Errorf("no COPY data block found for table %q (this works on pg_dump COPY dumps)", table)
 	}
+	if err := ctx.Err(); err != nil {
+		return rows, err
+	}
+	if err := out.commit(); err != nil {
+		return rows, err
+	}
 	return rows, nil
 }
 
-// prepOutput resolves a workspace-relative output path, verifies containment, and
-// ensures its parent directory exists.
+// prepOutput resolves a workspace-relative output path, verifies containment,
+// and ensures its parent directory exists. Watcher suppression happens only
+// when the staged output is committed, not while an operation can still fail.
 func (s *Service) prepOutput(outRel string) (string, error) {
 	outAbs, err := paths.Resolve(s.Root(), outRel)
 	if err != nil {
@@ -1012,33 +1093,7 @@ func (s *Service) prepOutput(outRel string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(outAbs), 0o755); err != nil {
 		return "", err
 	}
-	if s.selfWrite != nil {
-		s.selfWrite.Suppress(outAbs)
-	}
 	return outAbs, nil
-}
-
-func copyByteRange(srcAbs, dstAbs string, start, end int64) (int64, error) {
-	in, err := os.Open(srcAbs)
-	if err != nil {
-		return 0, err
-	}
-	defer in.Close()
-	if _, err := in.Seek(start, io.SeekStart); err != nil {
-		return 0, err
-	}
-	out, err := os.Create(dstAbs)
-	if err != nil {
-		return 0, err
-	}
-	n, cerr := io.CopyN(out, in, end-start)
-	if cerr == io.EOF {
-		cerr = nil
-	}
-	if closeErr := out.Close(); cerr == nil {
-		cerr = closeErr
-	}
-	return n, cerr
 }
 
 func sanitizeFileName(s string) string {
@@ -1087,19 +1142,20 @@ type TablePage struct {
 	Offset    int        `json:"offset"`
 	HasMore   bool       `json:"hasMore"`   // more rows after this window (current filter/sort)
 	TotalRows int        `json:"totalRows"` // -1 when unknown (browse mode); else matched count
-	Capped    bool       `json:"capped"`    // the filtered/sorted set hit tableResultCap
+	Capped    bool       `json:"capped"`    // the filtered/sorted set hit its row or byte budget
 	Delimiter string     `json:"delimiter"` // delimiter actually used (comma|semicolon|tab|pipe); "" for XLSX
 	Message   string     `json:"message"`
 }
 
 // tableResult is a cached, fully-realised filtered/sorted result, served paged.
 type tableResult struct {
-	key     string
-	sheet   string
-	delim   string
-	columns []string
-	rows    [][]string
-	capped  bool
+	key       string
+	sheet     string
+	delim     string
+	columns   []string
+	rows      [][]string
+	capped    bool
+	capReason string
 }
 
 // QueryTable returns a window of a CSV/TSV/XLSX file for the analytics grid. The
@@ -1107,7 +1163,7 @@ type tableResult struct {
 // disk; a filter or sort is applied across the entire file (the realised result
 // is cached so paging through it doesn't rescan).
 func (s *Service) QueryTable(rel string, q TableQuery) (TablePage, error) {
-	root := s.Root()
+	root, generation := s.workspaceSnapshot()
 	abs, err := paths.Resolve(root, rel)
 	if err != nil {
 		return TablePage{}, err
@@ -1124,20 +1180,27 @@ func (s *Service) QueryTable(rel string, q TableQuery) (TablePage, error) {
 	if ext := strings.ToLower(filepath.Ext(rel)); ext == ".xlsx" || ext == ".xlsm" {
 		if st, e := os.Stat(abs); e == nil && st.Size() > maxXlsxBytes {
 			out.Message = "Workbook is too large to preview."
+			if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+				return TablePage{}, err
+			}
 			return out, nil
 		}
 	}
 
 	if strings.TrimSpace(q.Filter) == "" && q.SortCol < 0 {
-		return s.tableBrowse(abs, rel, q.Delimiter, q.Offset, limit, out)
+		return s.tableBrowse(root, generation, abs, rel, q.Delimiter, q.Offset, limit, out)
 	}
 
 	// Filtering/sorting is a different access mode — release any browse cursor.
 	s.tableMu.Lock()
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		s.tableMu.Unlock()
+		return TablePage{}, err
+	}
 	s.dropBrowseCursor()
 	s.tableMu.Unlock()
 
-	res, err := s.tableResultFor(abs, rel, q)
+	res, err := s.tableResultFor(root, generation, abs, rel, q)
 	if err != nil {
 		return TablePage{}, err
 	}
@@ -1155,21 +1218,50 @@ func (s *Service) QueryTable(rel string, q TableQuery) (TablePage, error) {
 	if end > total {
 		end = total
 	}
-	out.Rows = res.rows[start:end]
-	out.HasMore = end < total
+	pageBytes, err := tableRowBytes(out.Columns)
+	if err != nil {
+		return TablePage{}, err
+	}
+	if pageBytes > tablePageMaxBytes {
+		return TablePage{}, errors.New("table header exceeds the page byte budget")
+	}
+	for i := start; i < end; i++ {
+		rowBytes, err := tableRowBytes(res.rows[i])
+		if err != nil {
+			return TablePage{}, err
+		}
+		if pageBytes+rowBytes > tablePageMaxBytes {
+			if len(out.Rows) == 0 {
+				return TablePage{}, fmt.Errorf("table row %d cannot fit beside the header within the page byte budget", i+1)
+			}
+			break
+		}
+		out.Rows = append(out.Rows, res.rows[i])
+		pageBytes += rowBytes
+	}
+	out.HasMore = start+len(out.Rows) < total
+	if res.capped {
+		out.Message = "Filtered/sorted results were capped by the " + res.capReason + ". Narrow the filter to inspect omitted rows."
+	}
 	if total == 0 {
 		out.Message = "No rows match the filter."
+	}
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		return TablePage{}, err
 	}
 	return out, nil
 }
 
 // tableBrowse streams just the [offset, offset+limit) window off disk (plus a
 // one-row peek for HasMore); TotalRows stays -1 since we never scan the whole file.
-func (s *Service) tableBrowse(abs, rel, delim string, offset, limit int, out TablePage) (TablePage, error) {
-	key := rel + "|" + fileSig(abs) + "|" + delim
+func (s *Service) tableBrowse(root string, generation uint64, abs, rel, delim string, offset, limit int, out TablePage) (TablePage, error) {
+	key := fmt.Sprintf("%d|%s|%s|%s", generation, abs, fileSig(abs), delim)
 
 	s.tableMu.Lock()
 	defer s.tableMu.Unlock()
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		return TablePage{}, err
+	}
 
 	cur := s.browseCur
 	if cur == nil || cur.key != key || cur.offset != offset {
@@ -1212,6 +1304,9 @@ func (s *Service) tableBrowse(abs, rel, delim string, offset, limit int, out Tab
 				out.Delimiter = it.delim
 				out.Columns = clampCols(header)
 				it.close()
+				if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+					return TablePage{}, err
+				}
 				return out, nil
 			}
 		}
@@ -1224,19 +1319,52 @@ func (s *Service) tableBrowse(abs, rel, delim string, offset, limit int, out Tab
 	out.Delimiter = it.delim
 	out.Columns = clampCols(cur.header)
 	ncols := len(out.Columns)
+	pageBytes, err := tableRowBytes(out.Columns)
+	if err != nil {
+		s.dropBrowseCursor()
+		return TablePage{}, err
+	}
+	if pageBytes > tablePageMaxBytes {
+		s.dropBrowseCursor()
+		return TablePage{}, errors.New("table header exceeds the page byte budget")
+	}
 	for len(out.Rows) < limit {
-		rec, ok, e := it.next()
-		if e != nil {
-			s.dropBrowseCursor()
-			return TablePage{}, e
+		var row []string
+		if cur.pending != nil {
+			row = cur.pending
+			cur.pending = nil
+		} else {
+			rec, ok, e := it.next()
+			if e != nil {
+				s.dropBrowseCursor()
+				return TablePage{}, e
+			}
+			if !ok {
+				break
+			}
+			row = normalizeRow(rec, ncols)
 		}
-		if !ok {
+		rowBytes, err := tableRowBytes(row)
+		if err != nil {
+			s.dropBrowseCursor()
+			return TablePage{}, err
+		}
+		if pageBytes+rowBytes > tablePageMaxBytes {
+			if len(out.Rows) == 0 {
+				s.dropBrowseCursor()
+				return TablePage{}, fmt.Errorf("table row %d cannot fit beside the header within the page byte budget", offset+1)
+			}
+			cur.pending = row
+			out.HasMore = true
 			break
 		}
-		out.Rows = append(out.Rows, normalizeRow(rec, ncols))
+		out.Rows = append(out.Rows, row)
+		pageBytes += rowBytes
 	}
 	cur.offset += len(out.Rows)
-	if len(out.Rows) == limit {
+	if out.HasMore {
+		// The byte budget left one parsed row pending for the next sequential page.
+	} else if len(out.Rows) == limit {
 		// A full page — assume more rows follow (the next page confirms). Avoids a
 		// peek that would desync the resumable cursor position.
 		out.HasMore = true
@@ -1245,6 +1373,12 @@ func (s *Service) tableBrowse(abs, rel, delim string, offset, limit int, out Tab
 	}
 	if offset == 0 && len(out.Rows) == 0 && ncols == 0 {
 		out.Message = "Empty file."
+	}
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		if s.browseCur == cur {
+			s.dropBrowseCursor()
+		}
+		return TablePage{}, err
 	}
 	return out, nil
 }
@@ -1269,14 +1403,22 @@ type TableInfoResult struct {
 // called in the background after a file opens: browsing works immediately and
 // the true total / fast jumps light up once this returns.
 func (s *Service) TableInfo(rel, delimiter string) (TableInfoResult, error) {
-	root := s.Root()
+	root, generation := s.workspaceSnapshot()
+	return s.tableInfoAtSnapshot(root, generation, rel, delimiter)
+}
+
+func (s *Service) tableInfoAtSnapshot(root string, generation uint64, rel, delimiter string) (TableInfoResult, error) {
 	abs, err := paths.Resolve(root, rel)
 	if err != nil {
 		return TableInfoResult{}, err
 	}
-	key := rel + "|" + fileSig(abs) + "|" + delimiter
+	key := fmt.Sprintf("%d|%s|%s|%s", generation, abs, fileSig(abs), delimiter)
 
 	s.tableMu.Lock()
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		s.tableMu.Unlock()
+		return TableInfoResult{}, err
+	}
 	if s.tableIdx != nil && s.tableIdx.key == key {
 		idx := s.tableIdx
 		s.tableMu.Unlock()
@@ -1288,13 +1430,23 @@ func (s *Service) TableInfo(rel, delimiter string) (TableInfoResult, error) {
 	if err != nil {
 		return TableInfoResult{}, err
 	}
-	idx := &tableIndex{key: key, header: clampCols(header), delim: it.delim, sheet: it.sheet, step: indexStep}
+	boundedHeader := clampCols(header)
+	headerBytes, err := tableRowBytes(boundedHeader)
+	if err != nil {
+		it.close()
+		return TableInfoResult{}, err
+	}
+	if headerBytes > tablePageMaxBytes {
+		it.close()
+		return TableInfoResult{}, errors.New("table header exceeds the page byte budget")
+	}
+	idx := &tableIndex{key: key, header: boundedHeader, delim: it.delim, sheet: it.sheet, step: indexStep}
 
 	ext := strings.ToLower(filepath.Ext(rel))
 	if ext == ".csv" || ext == ".tsv" {
 		it.close() // header captured; the index scan re-reads via a byte scanner
 		idx.comma, _ = resolveDelimiter(it.delim, ext, nil)
-		rows, offsets, serr := scanCSVRows(abs)
+		rows, offsets, serr := scanCSVRows(abs, idx.comma)
 		if serr != nil {
 			return TableInfoResult{}, serr
 		}
@@ -1317,90 +1469,57 @@ func (s *Service) TableInfo(rel, delimiter string) (TableInfoResult, error) {
 		idx.rows = n
 	}
 
-	s.tableMu.Lock()
-	s.tableIdx = idx
-	s.tableMu.Unlock()
+	if err := s.installTableIndex(root, generation, idx); err != nil {
+		return TableInfoResult{}, err
+	}
 	return TableInfoResult{Rows: idx.rows, Indexed: len(idx.offsets) > 0}, nil
 }
 
-// scanCSVRows counts data rows (records minus the header) and records the byte
-// offset of every indexStep-th data row. It splits records with a small
-// quote-aware state machine (a newline outside quotes ends a record), so a
-// newline embedded in a quoted field doesn't create a false boundary.
-func scanCSVRows(abs string) (rows int64, offsets []int64, err error) {
+func (s *Service) installTableIndex(root string, generation uint64, idx *tableIndex) error {
+	s.tableMu.Lock()
+	defer s.tableMu.Unlock()
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		return err
+	}
+	s.tableIdx = idx
+	return nil
+}
+
+// scanCSVRows counts data rows and records the byte offset of every
+// indexStep-th row using the exact encoding/csv parser configuration used by
+// browsing. InputOffset therefore cannot disagree with LazyQuotes semantics.
+func scanCSVRows(abs string, comma rune) (rows int64, offsets []int64, err error) {
 	f, err := os.Open(abs)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer f.Close()
-	br := bufio.NewReaderSize(f, 256<<10)
-
-	const (
-		stNormal = iota
-		stQuoted
-		stQuoteMaybe // saw a '"' while quoted; could be end-quote or an escaped ""
-	)
-	state := stNormal
-	var pos int64     // absolute byte position
-	var records int64 // completed records (terminated by a newline)
-	var pending bool  // bytes seen since the last record boundary
-	buf := make([]byte, 256<<10)
-	for {
-		n, rerr := br.Read(buf)
-		for i := 0; i < n; i++ {
-			b := buf[i]
-			if b != '\n' || state == stQuoted {
-				pending = true
-			}
-			switch state {
-			case stNormal:
-				if b == '"' {
-					state = stQuoted
-				} else if b == '\n' {
-					records++
-					// The record that starts after this newline is data row
-					// (records-1) when records>=1 (record 0 is the header).
-					if dataRow := records - 1; dataRow >= 0 && dataRow%indexStep == 0 {
-						offsets = append(offsets, pos+1)
-					}
-					pending = false
-				}
-			case stQuoted:
-				if b == '"' {
-					state = stQuoteMaybe
-				}
-			case stQuoteMaybe:
-				switch b {
-				case '"':
-					state = stQuoted // escaped "" inside the quoted field
-				case '\n':
-					records++
-					if dataRow := records - 1; dataRow >= 0 && dataRow%indexStep == 0 {
-						offsets = append(offsets, pos+1)
-					}
-					pending = false
-					state = stNormal
-				default:
-					state = stNormal
-				}
-			}
-			pos++
+	r := csv.NewReader(bufio.NewReaderSize(f, 256<<10))
+	r.Comma = comma
+	r.FieldsPerRecord = -1
+	r.LazyQuotes = true
+	r.ReuseRecord = true
+	if _, err := r.Read(); err != nil {
+		if err == io.EOF {
+			return 0, nil, nil
 		}
+		return 0, nil, err
+	}
+	for {
+		rowOffset := r.InputOffset()
+		_, rerr := r.Read()
 		if rerr == io.EOF {
 			break
 		}
 		if rerr != nil {
 			return 0, nil, rerr
 		}
+		if rows%indexStep == 0 {
+			offsets = append(offsets, rowOffset)
+		}
+		rows++
 	}
-	totalRecords := records
-	if pending {
-		totalRecords++ // last record had no trailing newline
-	}
-	if totalRecords <= 1 {
-		return 0, offsets, nil // header only (or empty)
-	}
-	return totalRecords - 1, offsets, nil
+	return rows, offsets, nil
 }
 
 // openCSVIterAt opens a CSV/TSV reader positioned at byteOffset (a record start),
@@ -1434,10 +1553,14 @@ func openCSVIterAt(abs string, comma rune, byteOffset int64) (*tableIter, error)
 
 // tableResultFor returns the whole-file filtered/sorted result for q, from cache
 // when the file (mtime+size) and query are unchanged, else by streaming the file.
-func (s *Service) tableResultFor(abs, rel string, q TableQuery) (*tableResult, error) {
-	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s", rel, fileSig(abs), q.Filter, q.SortCol, q.SortDir, q.Delimiter)
+func (s *Service) tableResultFor(root string, generation uint64, abs, rel string, q TableQuery) (*tableResult, error) {
+	key := fmt.Sprintf("%d|%s|%s|%s|%d|%d|%s", generation, abs, fileSig(abs), q.Filter, q.SortCol, q.SortDir, q.Delimiter)
 
 	s.tableMu.Lock()
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		s.tableMu.Unlock()
+		return nil, err
+	}
 	if s.tableCache != nil && s.tableCache.key == key {
 		res := s.tableCache
 		s.tableMu.Unlock()
@@ -1452,9 +1575,15 @@ func (s *Service) tableResultFor(abs, rel string, q TableQuery) (*tableResult, e
 	defer it.close()
 	cols := clampCols(header)
 	ncols := len(cols)
+	headerBytes, err := tableRowBytes(cols)
+	if err != nil {
+		return nil, err
+	}
 	filter := strings.ToLower(strings.TrimSpace(q.Filter))
 	rows := [][]string{}
 	capped := false
+	capReason := ""
+	retainedBytes := headerBytes
 	for {
 		rec, ok, e := it.next()
 		if e != nil {
@@ -1463,12 +1592,27 @@ func (s *Service) tableResultFor(abs, rel string, q TableQuery) (*tableResult, e
 		if !ok {
 			break
 		}
+		if err := validateTableCells(rec, ncols); err != nil {
+			return nil, err
+		}
 		if filter != "" && !rowMatches(rec, ncols, filter) {
 			continue
 		}
-		rows = append(rows, normalizeRow(rec, ncols))
+		row := normalizeRow(rec, ncols)
+		rowBytes, err := tableRowBytes(row)
+		if err != nil {
+			return nil, err
+		}
+		if retainedBytes+rowBytes > tableResultMaxBytes {
+			capped = true
+			capReason = "retained-byte budget"
+			break
+		}
+		rows = append(rows, row)
+		retainedBytes += rowBytes
 		if len(rows) >= tableResultCap {
 			capped = true
+			capReason = "row-count budget"
 			break
 		}
 	}
@@ -1480,11 +1624,21 @@ func (s *Service) tableResultFor(abs, rel string, q TableQuery) (*tableResult, e
 		col := q.SortCol
 		sort.SliceStable(rows, func(i, j int) bool { return compareCells(rows[i][col], rows[j][col])*dir < 0 })
 	}
-	res := &tableResult{key: key, sheet: it.sheet, delim: it.delim, columns: cols, rows: rows, capped: capped}
-	s.tableMu.Lock()
-	s.tableCache = res
-	s.tableMu.Unlock()
+	res := &tableResult{key: key, sheet: it.sheet, delim: it.delim, columns: cols, rows: rows, capped: capped, capReason: capReason}
+	if err := s.installTableResult(root, generation, res); err != nil {
+		return nil, err
+	}
 	return res, nil
+}
+
+func (s *Service) installTableResult(root string, generation uint64, res *tableResult) error {
+	s.tableMu.Lock()
+	defer s.tableMu.Unlock()
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		return err
+	}
+	s.tableCache = res
+	return nil
 }
 
 // tableIter streams the records of a tabular file (header consumed separately).
@@ -1637,6 +1791,35 @@ func normalizeRow(rec []string, ncols int) []string {
 	return cells
 }
 
+func validateTableCells(rec []string, ncols int) error {
+	if ncols > len(rec) {
+		ncols = len(rec)
+	}
+	for i := 0; i < ncols; i++ {
+		if len(rec[i]) > tableCellMaxBytes {
+			return fmt.Errorf("table cell %d is %d bytes; limit is %d", i+1, len(rec[i]), tableCellMaxBytes)
+		}
+	}
+	return nil
+}
+
+// tableRowBytes conservatively estimates retained/serialized row bytes. The
+// fixed per-string allowance accounts for slice/string headers in addition to
+// UTF-8 payload bytes; overflow fails closed.
+func tableRowBytes(row []string) (int, error) {
+	total := len(row) * 16
+	for i, cell := range row {
+		if len(cell) > tableCellMaxBytes {
+			return 0, fmt.Errorf("table cell %d is %d bytes; limit is %d", i+1, len(cell), tableCellMaxBytes)
+		}
+		if total > tableResultMaxBytes-len(cell) {
+			return 0, errors.New("table row byte accounting overflow")
+		}
+		total += len(cell)
+	}
+	return total, nil
+}
+
 func rowMatches(rec []string, ncols int, lowerFilter string) bool {
 	for i := 0; i < ncols && i < len(rec); i++ {
 		if strings.Contains(strings.ToLower(rec[i]), lowerFilter) {
@@ -1680,25 +1863,26 @@ func tableNumber(s string) (float64, bool) {
 const maxChunkBytes = 2 << 20 // 2 MiB
 
 // FileChunk is one byte-range page of a file, for the read-only viewer that
-// handles files too large for the editor. Only the requested window is read
-// into memory — never the whole file.
+// handles files too large for the editor. Text windows may expand by at most a
+// few bytes to complete a rune/surrogate pair; the whole file is never read.
 type FileChunk struct {
-	Path   string `json:"path"`
-	Offset int64  `json:"offset"` // byte offset of this page
-	Length int    `json:"length"` // bytes actually returned
-	Total  int64  `json:"total"`  // total file size in bytes
-	EOF    bool   `json:"eof"`    // this page reaches the end of the file
-	Binary bool   `json:"binary"` // the file looks binary (sniffed from its head)
-	Text   string `json:"text"`   // UTF-8 text page (empty when Binary)
-	Hex    string `json:"hex"`    // canonical hex dump (only when Binary)
+	Path     string `json:"path"`
+	Offset   int64  `json:"offset"`   // actual decoder-aligned byte offset of this page
+	Length   int    `json:"length"`   // source bytes actually returned/decoded
+	Total    int64  `json:"total"`    // total file size in bytes
+	EOF      bool   `json:"eof"`      // this page reaches the end of the file
+	Binary   bool   `json:"binary"`   // the file looks binary (sniffed from its head)
+	Encoding string `json:"encoding"` // detected source encoding; empty when binary
+	Text     string `json:"text"`     // decoded UTF-8 text page (empty when Binary)
+	Hex      string `json:"hex"`      // canonical hex dump (only when Binary)
 }
 
-// ReadFileRange returns a single byte-range page of a file using ReadAt, so a
-// multi-GB file can be inspected without loading it whole. Binary-ness is
-// sniffed from the file head (not the page) so mid-file text pages aren't
-// misclassified; binary files are returned as a hex dump.
+// ReadFileRange returns one bounded, encoding-aware byte-range page using
+// ReadAt, so a multi-GB file can be inspected without loading it whole. Source
+// encoding is detected from the head; text boundaries are decoder-aligned and
+// binary files retain exact requested offsets as a hex dump.
 func (s *Service) ReadFileRange(rel string, offset int64, length int) (FileChunk, error) {
-	root := s.Root()
+	root, generation := s.workspaceSnapshot()
 	abs, err := paths.Resolve(root, rel)
 	if err != nil {
 		return FileChunk{}, err
@@ -1723,38 +1907,163 @@ func (s *Service) ReadFileRange(rel string, offset int64, length int) (FileChunk
 		offset = total
 	}
 
-	// Sniff binary-ness from the file head, independent of the requested page.
+	// Detect source encoding from the head, independent of the requested page.
 	head := make([]byte, binarySniffBytes)
 	hn, _ := f.ReadAt(head, 0)
-	binary := isBinary(head[:hn])
+	encoding, binary := detectPageEncoding(head[:hn], int64(hn) == total)
 
-	buf := make([]byte, length)
-	n, readErr := f.ReadAt(buf, offset)
+	readOffset := offset
+	readEnd := total
+	if total-offset > int64(length) {
+		readEnd = offset + int64(length)
+	}
+	if !binary && offset < total {
+		switch encoding {
+		case encUTF8, encUTF8BOM:
+			readOffset, readEnd, err = alignUTF8Page(f, readOffset, readEnd, total, encoding == encUTF8BOM)
+		case encUTF16LE, encUTF16BE:
+			readOffset, readEnd, err = alignUTF16Page(f, readOffset, readEnd, total, encoding)
+		}
+		if err != nil {
+			return FileChunk{}, err
+		}
+	}
+
+	readLength := readEnd - readOffset
+	if readLength < 0 || readLength > int64(maxChunkBytes+8) {
+		return FileChunk{}, errors.New("decoder-aligned page exceeds the bounded overlap allowance")
+	}
+	buf := make([]byte, int(readLength))
+	n, readErr := f.ReadAt(buf, readOffset)
 	if readErr != nil && readErr != io.EOF {
 		return FileChunk{}, readErr
 	}
 	buf = buf[:n]
 
 	out := FileChunk{
-		Path:   rel,
-		Offset: offset,
-		Length: n,
-		Total:  total,
-		EOF:    offset+int64(n) >= total,
-		Binary: binary,
+		Path:     rel,
+		Offset:   readOffset,
+		Length:   n,
+		Total:    total,
+		EOF:      readOffset+int64(n) >= total,
+		Binary:   binary,
+		Encoding: encoding,
 	}
 	if binary {
 		out.Hex = hex.Dump(buf)
 	} else {
-		out.Text = string(buf)
+		out.Text, err = decodeTextPage(buf, encoding, readOffset)
+		if err != nil {
+			return FileChunk{}, err
+		}
+	}
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		return FileChunk{}, err
 	}
 	return out, nil
+}
+
+func alignUTF8Page(f *os.File, start, end, total int64, hasBOM bool) (int64, int64, error) {
+	base := int64(0)
+	if hasBOM {
+		base = int64(len(bomUTF8))
+		if start < base {
+			start = 0
+		}
+	}
+	for start > base {
+		b, err := readByteAt(f, start)
+		if err != nil {
+			return 0, 0, err
+		}
+		if b&0xC0 != 0x80 {
+			break
+		}
+		start--
+	}
+	for end < total {
+		b, err := readByteAt(f, end)
+		if err != nil {
+			return 0, 0, err
+		}
+		if b&0xC0 != 0x80 {
+			break
+		}
+		end++
+	}
+	return start, end, nil
+}
+
+func alignUTF16Page(f *os.File, start, end, total int64, encoding string) (int64, int64, error) {
+	base := int64(0)
+	if total >= 2 {
+		var prefix [2]byte
+		if _, err := f.ReadAt(prefix[:], 0); err != nil {
+			return 0, 0, err
+		}
+		if encoding == encUTF16LE && bytes.Equal(prefix[:], bomUTF16LE) ||
+			encoding == encUTF16BE && bytes.Equal(prefix[:], bomUTF16BE) {
+			base = 2
+		}
+	}
+	if start < base {
+		start = 0
+	} else {
+		start = base + (start-base)/2*2
+	}
+	if end < base {
+		end = base
+	} else if (end-base)%2 != 0 {
+		end++
+	}
+	if end > total {
+		end = total
+	}
+	bigEndian := encoding == encUTF16BE
+	if start >= base+2 && start+2 <= total {
+		u, err := readUTF16UnitAt(f, start, bigEndian)
+		if err != nil {
+			return 0, 0, err
+		}
+		if u >= 0xDC00 && u <= 0xDFFF {
+			start -= 2
+		}
+	}
+	if end >= base+2 && end < total {
+		u, err := readUTF16UnitAt(f, end-2, bigEndian)
+		if err != nil {
+			return 0, 0, err
+		}
+		if u >= 0xD800 && u <= 0xDBFF && end+2 <= total {
+			end += 2
+		}
+	}
+	return start, end, nil
+}
+
+func readByteAt(f *os.File, offset int64) (byte, error) {
+	var b [1]byte
+	if _, err := f.ReadAt(b[:], offset); err != nil {
+		return 0, err
+	}
+	return b[0], nil
+}
+
+func readUTF16UnitAt(f *os.File, offset int64, bigEndian bool) (uint16, error) {
+	var b [2]byte
+	if _, err := f.ReadAt(b[:], offset); err != nil {
+		return 0, err
+	}
+	if bigEndian {
+		return uint16(b[0])<<8 | uint16(b[1]), nil
+	}
+	return uint16(b[1])<<8 | uint16(b[0]), nil
 }
 
 // ReadFile returns file content for the editor. Binary or oversized files are
 // flagged and returned with empty content so the UI can render a placeholder.
 func (s *Service) ReadFile(rel string) (FileContent, error) {
-	root := s.Root()
+	root, generation := s.workspaceSnapshot()
 	abs, err := paths.Resolve(root, rel)
 	if err != nil {
 		return FileContent{}, err
@@ -1770,6 +2079,9 @@ func (s *Service) ReadFile(rel string) (FileContent, error) {
 		// whole (potentially huge) file just to hash it — oversized files are
 		// never editable through the editor, so a cheap stat token suffices.
 		out.Revision = revisionOfStat(st)
+		if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+			return FileContent{}, err
+		}
 		return out, nil
 	}
 	data, err := os.ReadFile(abs)
@@ -1783,10 +2095,16 @@ func (s *Service) ReadFile(rel string) (FileContent, error) {
 	text, enc, ok := decodeText(data)
 	if !ok {
 		out.Binary = true
+		if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+			return FileContent{}, err
+		}
 		return out, nil
 	}
 	out.Content = text
 	out.Encoding = enc
+	if err := s.validateWorkspaceSnapshot(root, generation); err != nil {
+		return FileContent{}, err
+	}
 	return out, nil
 }
 
@@ -1796,7 +2114,18 @@ func (s *Service) ReadFile(rel string) (FileContent, error) {
 // utf-8-bom, utf-16le, utf-16be, latin-1; empty = utf-8) selects the on-disk
 // encoding so a non-UTF-8 file round-trips. Returns the new revision.
 func (s *Service) WriteFile(rel, content, expectedRevision, encoding string) (WriteResult, error) {
-	root := s.Root()
+	root, generation := s.workspaceSnapshot()
+	return s.writeFileInWorkspace(root, generation, rel, content, expectedRevision, encoding)
+}
+
+func (s *Service) writeFileInWorkspace(root string, generation uint64, rel, content, expectedRevision, encoding string) (WriteResult, error) {
+	s.editorWriteMu.Lock()
+	defer s.editorWriteMu.Unlock()
+
+	currentRoot, currentGeneration := s.workspaceSnapshot()
+	if currentGeneration != generation || currentRoot != root {
+		return WriteResult{}, ErrWorkspaceChanged
+	}
 	abs, err := paths.Resolve(root, rel)
 	if err != nil {
 		return WriteResult{}, err
@@ -1805,13 +2134,18 @@ func (s *Service) WriteFile(rel, content, expectedRevision, encoding string) (Wr
 		return WriteResult{}, err
 	}
 	if _, statErr := os.Stat(abs); statErr == nil {
-		// File exists: optimistic-concurrency check (advisory — the read here and
-		// the rename in writeAtomic are not one atomic operation).
-		if expectedRevision != "" {
-			current := revisionOfFile(abs)
-			if current != expectedRevision {
-				return WriteResult{}, ErrStale
-			}
+		// File exists: optimistic-concurrency check. editorWriteMu makes the
+		// check-and-rename sequence exclusive among this service's callers.
+		// An empty revision means the caller observed an absent path and is
+		// attempting a create. It is never permission to overwrite a file that
+		// appeared in the meantime; explicit conflict resolution must first read
+		// that file and submit its exact current revision.
+		if expectedRevision == "" {
+			return WriteResult{}, ErrStale
+		}
+		current := revisionOfFile(abs)
+		if current != expectedRevision {
+			return WriteResult{}, ErrStale
 		}
 	} else if expectedRevision != "" {
 		// The editor expected a specific existing version but the file is gone
@@ -1839,10 +2173,10 @@ func (s *Service) WriteFile(rel, content, expectedRevision, encoding string) (Wr
 	return WriteResult{Path: rel, Revision: revisionOfBytes(data)}, nil
 }
 
-// ReadRaw returns a file's exact bytes (existed=false, nil data if absent). The
-// rollback journal uses it to snapshot/restore content byte-faithfully —
-// including binary and the original encoding — bypassing the editor's text decode.
-func (s *Service) ReadRaw(rel string) (data []byte, existed bool, err error) {
+// ReadRaw returns a file's exact bytes (existed=false, nil data if absent). It
+// is a package function rather than a Service method so this internal primitive
+// cannot be Wails-bound to renderer JavaScript.
+func ReadRaw(s *Service, rel string) (data []byte, existed bool, err error) {
 	abs, err := paths.Resolve(s.Root(), rel)
 	if err != nil {
 		return nil, false, err
@@ -1857,10 +2191,49 @@ func (s *Service) ReadRaw(rel string) (data []byte, existed bool, err error) {
 	return b, true, nil
 }
 
+// ReadRawBounded returns exact bytes only when the target is a regular file no
+// larger than maxBytes. It stats before allocating and still reads through a
+// max+1 limiter so concurrent growth cannot bypass the cap.
+func ReadRawBounded(s *Service, rel string, maxBytes int64) (data []byte, existed bool, err error) {
+	if maxBytes < 0 {
+		return nil, false, errors.New("raw read limit must be non-negative")
+	}
+	abs, err := paths.Resolve(s.Root(), rel)
+	if err != nil {
+		return nil, false, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, true, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, true, fmt.Errorf("%w: %s", ErrRawNotRegular, rel)
+	}
+	if info.Size() > maxBytes {
+		return nil, true, fmt.Errorf("%w: %s is %d bytes (limit %d)", ErrRawTooLarge, rel, info.Size(), maxBytes)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, true, err
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, true, fmt.Errorf("%w: %s grew while being read (limit %d)", ErrRawTooLarge, rel, maxBytes)
+	}
+	return b, true, nil
+}
+
 // WriteRaw writes exact bytes atomically (path-contained, watcher-suppressed),
-// without the editor's encoding/optimistic-revision handling. Used by the
-// rollback restore and by append/copy where the payload is raw bytes.
-func (s *Service) WriteRaw(rel string, data []byte) error {
+// without the editor's encoding/optimistic-revision handling. It is package
+// scoped from the bridge's perspective and callable only by trusted Go code.
+func WriteRaw(s *Service, rel string, data []byte) error {
 	root := s.Root()
 	abs, err := paths.Resolve(root, rel)
 	if err != nil {

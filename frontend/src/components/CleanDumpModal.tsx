@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Wand2, X } from "lucide-react";
 import { useStore } from "../state/store";
+import { useDialogFocus } from "../lib/useDialogFocus";
 
 // Form for the "Clean SQL dump" tool: pick cleanup presets + an output path.
 export default function CleanDumpModal() {
@@ -17,6 +18,8 @@ export default function CleanDumpModal() {
   const [fromDatabase, setFromDatabase] = useState("");
   const [toDatabase, setToDatabase] = useState("");
   const [out, setOut] = useState("");
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useDialogFocus(!!target, cancel, closeRef);
 
   useEffect(() => {
     if (!target) return;
@@ -30,14 +33,6 @@ export default function CleanDumpModal() {
     setCollation("");
     setFromDatabase("");
     setToDatabase("");
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        cancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
   }, [target, cancel]);
 
   if (!target) return null;
@@ -57,10 +52,10 @@ export default function CleanDumpModal() {
 
   return (
     <div className="modal-overlay" onMouseDown={cancel}>
-      <div className="modal toolsmodal" role="dialog" aria-modal="true" aria-label="Clean SQL dump" onMouseDown={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className="modal toolsmodal" role="dialog" aria-modal="true" aria-label="Clean SQL dump" onMouseDown={(e) => e.stopPropagation()}>
         <div className="toolsmodal__head">
           <span className="modal__title">Clean SQL dump · {name}</span>
-          <button className="icon-btn" title="Close" aria-label="Close" onClick={cancel}>
+          <button ref={closeRef} className="icon-btn" title="Close" aria-label="Close" onClick={cancel}>
             <X size={15} aria-hidden focusable={false} />
           </button>
         </div>

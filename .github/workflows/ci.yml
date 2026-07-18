@@ -9,8 +9,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   GO_VERSION: "1.26.4"
+  GOTOOLCHAIN: local
   NODE_VERSION: "24"
   TASK_VERSION: "v3.51.1"
   WAILS_VERSION: "v3.0.0-alpha.79"
@@ -19,12 +24,13 @@ jobs:
   goreleaser-check:
     name: GoReleaser config
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Install GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           distribution: goreleaser
           version: "~> v2"
@@ -36,6 +42,7 @@ jobs:
   test-build:
     name: Test and build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -46,16 +53,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -78,6 +85,23 @@ jobs:
           go install github.com/go-task/task/v3/cmd/task@${{ env.TASK_VERSION }}
           go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
 
+      - name: Verify Go module files
+        run: |
+          go mod verify
+          go mod tidy -diff
+
+      # Build renderer assets before compiling the root package: main.go embeds
+      # frontend/dist, which does not exist in a clean checkout.
+      - name: Frontend checks and embeddable production assets
+        working-directory: frontend
+        run: |
+          npm ci
+          npm audit --audit-level=moderate
+          npm run typecheck
+          npm run lint
+          npm run test
+          npm run build
+
       - name: Go tests
         if: runner.os != 'Windows'
         run: go test . ./internal/...
@@ -88,16 +112,98 @@ jobs:
         run: |
           $env:GOTMPDIR = Join-Path $pwd ".gotmp-ci"
           New-Item -ItemType Directory -Force $env:GOTMPDIR | Out-Null
-          go list . ./internal/... |
-            Where-Object { $_ -ne "novera/internal/jobs" } |
-            ForEach-Object { go test $_ }
+          go test . ./internal/...
 
-      - name: Frontend checks
-        working-directory: frontend
-        run: |
-          npm ci
-          npm run typecheck
-          npm run test
+      - name: Go vet
+        run: go vet . ./internal/...
 
       - name: Production build
         run: task build
+
+      - name: Assert build did not mutate tracked source
+        run: git diff --exit-code -- go.mod go.sum frontend/bindings
+
+  go-vulnerability-check:
+    name: Go vulnerability scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Scan reachable Go vulnerabilities
+        run: govulncheck . ./internal/...
+
+  clean-export:
+    name: Clean-export source build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout full source history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Export only tracked source
+        run: |
+          mkdir -p "$RUNNER_TEMP/novera-export"
+          git archive --format=tar "$GITHUB_SHA" | tar -xf - -C "$RUNNER_TEMP/novera-export"
+          test ! -d "$RUNNER_TEMP/novera-export/.git"
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-4-dev \
+            libwebkitgtk-6.0-dev
+
+      - name: Install pinned Wails and Task
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@${{ env.TASK_VERSION }}
+          go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+
+      - name: Validate and build from clean export
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/novera-export"
+          go mod verify
+          go mod tidy -diff
+          (
+            cd frontend
+            npm ci
+            npm audit --audit-level=moderate
+            npm run typecheck
+            npm run lint
+            npm run test
+            npm run build
+          )
+          go test . ./internal/...
+          go vet . ./internal/...
+          task build
+          test -x bin/Novera

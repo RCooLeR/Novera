@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, CircleSlash, Loader2, Square, Trash2, XCircle } from "lucide-react";
 import { useStore } from "../state/store";
 import { Jobs } from "../lib/services";
-import type { Job } from "../lib/services";
+import { durationAt, visibleJobLog } from "./jobsViewState";
+import type { JobLogState } from "./jobsViewState";
 
 function StatusIcon({ status }: { status: string }) {
   switch (status) {
@@ -19,22 +20,14 @@ function StatusIcon({ status }: { status: string }) {
   }
 }
 
-function duration(j: Job): string {
-  const end = j.endedAt || Date.now();
-  const ms = Math.max(0, end - j.startedAt);
-  if (ms < 1000) return `${ms}ms`;
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m ${s % 60}s`;
-}
-
 export default function JobsView() {
   const jobs = useStore((s) => s.jobs);
   const loadJobs = useStore((s) => s.loadJobs);
   const cancelJob = useStore((s) => s.cancelJob);
   const clearFinishedJobs = useStore((s) => s.clearFinishedJobs);
   const [openId, setOpenId] = useState<string | null>(null);
-  const [log, setLog] = useState<string[]>([]);
+  const [logState, setLogState] = useState<JobLogState>({ jobId: "", lines: [], loading: false, error: "" });
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     void loadJobs();
@@ -43,19 +36,46 @@ export default function JobsView() {
   // Load the selected job's log; refresh it whenever the jobs list changes (so a
   // running job's log keeps growing in the open panel).
   useEffect(() => {
-    if (!openId) return;
+    if (!openId) {
+      setLogState({ jobId: "", lines: [], loading: false, error: "" });
+      return;
+    }
     let alive = true;
+    setLogState((current) => ({
+      jobId: openId,
+      lines: current.jobId === openId ? current.lines : [],
+      loading: true,
+      error: "",
+    }));
     void Jobs.GetJob(openId)
       .then((j) => {
-        if (alive) setLog(j.log ?? []);
+        if (alive) setLogState({ jobId: openId, lines: j.log ?? [], loading: false, error: "" });
       })
-      .catch(() => {});
+      .catch((error) => {
+        if (alive) {
+          setLogState({
+            jobId: openId,
+            lines: [],
+            loading: false,
+            error: `Could not load job log: ${String(error)}`,
+          });
+        }
+      });
     return () => {
       alive = false;
     };
   }, [openId, jobs]);
 
+  const hasRunning = jobs.some((j) => j.status === "running");
+  useEffect(() => {
+    if (!hasRunning) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasRunning]);
+
   const hasFinished = jobs.some((j) => j.status !== "running");
+  const selectedLog = openId ? visibleJobLog(openId, logState) : null;
 
   return (
     <div className="jobs">
@@ -82,20 +102,27 @@ export default function JobsView() {
                 <StatusIcon status={j.status} />
                 <span className="jobs__kind">{j.kind}</span>
                 <span className="jobs__title">{j.title || "(untitled)"}</span>
-                <span className="jobs__dur">{duration(j)}</span>
+                <span className="jobs__dur">{durationAt(j, now)}</span>
               </button>
               {j.status === "running" && (
                 <button className="icon-btn jobs__cancel" title="Cancel job" onClick={() => void cancelJob(j.id)}>
                   <Square size={12} />
                 </button>
               )}
-              {openId === j.id && (
-                <div className="jobs__detail">
+              {openId === j.id && selectedLog && (
+                <div className="jobs__detail" aria-busy={selectedLog.loading}>
                   {j.error && <div className="jobs__error">{j.error}</div>}
-                  {log.length === 0 ? (
+                  {selectedLog.error && (
+                    <div className="jobs__error" role="alert">
+                      {selectedLog.error}
+                    </div>
+                  )}
+                  {selectedLog.loading && selectedLog.lines.length === 0 ? (
+                    <div className="jobs__logempty">Loading log...</div>
+                  ) : selectedLog.lines.length === 0 ? (
                     <div className="jobs__logempty">No log output.</div>
                   ) : (
-                    <pre className="jobs__log">{log.join("\n")}</pre>
+                    <pre className="jobs__log">{selectedLog.lines.join("\n")}</pre>
                   )}
                 </div>
               )}

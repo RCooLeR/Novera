@@ -1,6 +1,6 @@
 package editwindow
 
-// Range is a byte range that can be loaded into Quarry's bounded editable
+// Range is a byte range that can be loaded into Novera's bounded editable
 // window without treating the entire source file as an in-memory document.
 type Range struct {
 	Start int64

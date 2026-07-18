@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
+import { useDialogFocus } from "../lib/useDialogFocus";
 
 // A small accessible confirmation dialog: role=dialog + aria-modal, autofocuses
 // the primary action, closes on Escape, traps Tab within itself, and cancels on
@@ -20,34 +21,9 @@ export default function ConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const dialogRef = useRef<HTMLDivElement | null>(null);
   const confirmRef = useRef<HTMLButtonElement | null>(null);
-
-  useEffect(() => {
-    confirmRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-        return;
-      }
-      if (e.key === "Tab") {
-        const focusable = dialogRef.current?.querySelectorAll<HTMLElement>("button");
-        if (!focusable || focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useDialogFocus(true, onCancel, danger ? cancelRef : confirmRef);
 
   return (
     <div className="modal-overlay" onMouseDown={onCancel}>
@@ -65,7 +41,7 @@ export default function ConfirmModal({
           <button ref={confirmRef} className={`btn ${danger ? "btn--danger" : "btn--primary"}`} onClick={onConfirm}>
             {confirmLabel}
           </button>
-          <button className="btn" onClick={onCancel}>
+          <button ref={cancelRef} className="btn" onClick={onCancel}>
             {cancelLabel}
           </button>
         </div>

@@ -1,19 +1,23 @@
 package replace
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"novera/internal/bigfile/logger"
+	"novera/internal/persistfile"
 )
 
-// RecoveryState describes a manifest-backed replace artifact that Quarry can inspect.
+// RecoveryState describes a manifest-backed replace artifact that Novera can inspect.
 type RecoveryState struct {
 	ManifestPath string
 	Manifest     Manifest
@@ -25,18 +29,75 @@ type RecoveryState struct {
 }
 
 const minRecoveryManifestRetention = 24 * time.Hour
+const maxRecoveryManifestBytes = 1 << 20
 
 // LoadManifest reads a replace manifest from disk.
 func LoadManifest(path string) (Manifest, error) {
-	data, err := os.ReadFile(path)
+	data, err := persistfile.Read(path, maxRecoveryManifestBytes)
 	if err != nil {
 		return Manifest{}, err
 	}
 	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&manifest); err != nil {
+		return Manifest{}, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return Manifest{}, errors.New("recovery manifest contains multiple JSON values")
+		}
+		return Manifest{}, err
+	}
+	if err := validateRecoveryManifestPaths(path, manifest); err != nil {
 		return Manifest{}, err
 	}
 	return manifest, nil
+}
+
+func validateRecoveryManifestPaths(manifestPath string, manifest Manifest) error {
+	if strings.TrimSpace(manifestPath) == "" {
+		return errors.New("recovery manifest path is required")
+	}
+	if strings.TrimSpace(manifest.Source) == "" {
+		return errors.New("recovery manifest source path is required")
+	}
+	if manifest.Operation == "plain-replace-in-place" {
+		legacy := manifest.Source + ".quarry.inplace.manifest.json"
+		prefix := filepath.Clean(manifest.Source) + ".quarry.inplace."
+		cleanManifest := filepath.Clean(manifestPath)
+		if !sameRecoveryPath(cleanManifest, legacy) &&
+			!(strings.HasPrefix(cleanManifest, prefix) && strings.HasSuffix(cleanManifest, ".manifest.json")) {
+			return errors.New("in-place recovery manifest path is not bound to its source")
+		}
+		if manifest.Output != "" && !sameRecoveryPath(manifest.Output, manifest.Source) {
+			return errors.New("in-place recovery output is not its source")
+		}
+		return nil
+	}
+
+	const suffix = ".quarry.manifest.json"
+	if !strings.HasSuffix(manifestPath, suffix) {
+		return errors.New("replace recovery manifest has an invalid filename")
+	}
+	expectedOutput := strings.TrimSuffix(manifestPath, suffix)
+	if strings.TrimSpace(manifest.Output) == "" || !sameRecoveryPath(manifest.Output, expectedOutput) {
+		return errors.New("replace recovery output path is not bound to the manifest filename")
+	}
+	if manifest.TempOutput != "" && !sameRecoveryPath(manifest.TempOutput, manifest.Output+".quarry.tmp") {
+		return errors.New("replace recovery temp path is not bound to its output")
+	}
+	return nil
+}
+
+func sameRecoveryPath(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // InspectRecoveryManifest loads a manifest and reports which related files still exist.
@@ -152,10 +213,14 @@ func FindRecoveryStates(sourcePath string) ([]RecoveryState, error) {
 
 // DeleteRecoveryTemp removes a partial temp output while keeping the manifest for audit/history.
 func DeleteRecoveryTemp(state RecoveryState) error {
-	if state.Manifest.TempOutput == "" {
+	refreshed, err := InspectRecoveryManifest(state.ManifestPath)
+	if err != nil {
+		return err
+	}
+	if refreshed.Manifest.TempOutput == "" {
 		return errors.New("manifest has no temp output")
 	}
-	if err := removePath(state.Manifest.TempOutput); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removePath(refreshed.Manifest.TempOutput); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -293,7 +358,13 @@ func ResumeRecovery(state RecoveryState) (RecoveryState, error) {
 		if err := renamePath(manifest.TempOutput, manifest.Output); err != nil {
 			return recoveryFailure(refreshed.ManifestPath, manifest, err)
 		}
-		manifest.Phase = "output_written"
+		if err := writeManifestPhaseOrFail(refreshed.ManifestPath, &manifest, "output_written"); err != nil {
+			state, inspectErr := InspectRecoveryManifest(refreshed.ManifestPath)
+			if inspectErr != nil {
+				return RecoveryState{}, err
+			}
+			return state, err
+		}
 	case "output_written":
 		// Continue from already-promoted output.
 	case "swapped":
@@ -349,7 +420,13 @@ func ResumeRecovery(state RecoveryState) (RecoveryState, error) {
 
 		manifest.Backup = backupPath
 		manifest.Swapped = true
-		manifest.Phase = "swapped"
+		if err := writeManifestPhaseOrFail(refreshed.ManifestPath, &manifest, "swapped"); err != nil {
+			state, inspectErr := InspectRecoveryManifest(refreshed.ManifestPath)
+			if inspectErr != nil {
+				return RecoveryState{}, err
+			}
+			return state, err
+		}
 	}
 
 	now := time.Now().UTC()

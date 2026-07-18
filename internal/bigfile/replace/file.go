@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"novera/internal/bigfile/fileio"
@@ -195,7 +197,9 @@ func ReplacePlainFile(ctx context.Context, sourcePath string, outputPath string,
 		writeFailedManifest(summary.ManifestPath, &manifest, err)
 		return summary, err
 	}
-	manifest.Phase = "output_written"
+	if err := writeManifestPhaseOrFail(summary.ManifestPath, &manifest, "output_written"); err != nil {
+		return summary, err
+	}
 
 	if opts.SwapOriginal {
 		if err := verifySourceUnchanged(sourcePath, sourceState); err != nil {
@@ -214,9 +218,11 @@ func ReplacePlainFile(ctx context.Context, sourcePath string, outputPath string,
 		}
 		manifest.Backup = backupPath
 		manifest.Swapped = true
-		manifest.Phase = "swapped"
 		summary.BackupPath = backupPath
 		summary.Swapped = true
+		if err := writeManifestPhaseOrFail(summary.ManifestPath, &manifest, "swapped"); err != nil {
+			return summary, err
+		}
 	}
 
 	if err := writeCompletedManifestOrFail(summary.ManifestPath, &manifest, st.Size()); err != nil {
@@ -262,6 +268,18 @@ func writeReadyToFinalizeManifestOrFail(path string, manifest *Manifest) error {
 	return nil
 }
 
+func writeManifestPhaseOrFail(path string, manifest *Manifest, phase string) error {
+	if manifest == nil {
+		return errors.New("manifest is required")
+	}
+	manifest.Phase = phase
+	if err := writeManifest(path, *manifest, false); err != nil {
+		writeFailedManifest(path, manifest, err)
+		return err
+	}
+	return nil
+}
+
 func writeCompletedManifest(path string, manifest *Manifest, bytesProcessed int64) error {
 	if manifest == nil {
 		return errors.New("manifest is required")
@@ -289,16 +307,75 @@ func writeManifest(path string, manifest Manifest, exclusive bool) error {
 	}
 	data = append(data, '\n')
 
-	f, err := openManifestOut(path, exclusive)
+	dir := filepath.Dir(path)
+	seed, err := os.CreateTemp(dir, ".novera-recovery-*.tmp")
 	if err != nil {
 		return err
 	}
-	_, writeErr := f.Write(data)
+	tempPath := seed.Name()
+	if err := seed.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	if err := os.Remove(tempPath); err != nil {
+		return err
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	f, err := openManifestOut(tempPath, true)
+	if err != nil {
+		return err
+	}
+	n, writeErr := f.Write(data)
+	if writeErr == nil && n != len(data) {
+		writeErr = io.ErrShortWrite
+	}
+	if writeErr == nil {
+		if syncer, ok := f.(interface{ Sync() error }); ok {
+			writeErr = syncer.Sync()
+		} else {
+			writeErr = errors.New("manifest writer does not support sync")
+		}
+	}
 	closeErr := f.Close()
 	if writeErr != nil {
 		return writeErr
 	}
-	return closeErr
+	if closeErr != nil {
+		return closeErr
+	}
+
+	if exclusive {
+		if err := os.Link(tempPath, path); err != nil {
+			return err
+		}
+		if err := os.Remove(tempPath); err != nil {
+			return err
+		}
+	} else {
+		if err := os.Rename(tempPath, path); err != nil {
+			return err
+		}
+	}
+	cleanup = false
+	return syncManifestDirectory(path)
+}
+
+func syncManifestDirectory(path string) error {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil && runtime.GOOS != "windows" {
+		return err
+	}
+	return nil
 }
 
 func snapshotSource(info os.FileInfo) sourceSnapshot {

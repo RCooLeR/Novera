@@ -74,7 +74,7 @@ type FormatterMatch struct {
 	Formatter FormatterHook
 }
 
-// SymbolHook is a declarative local-symbol provider. It describes how Quarry
+// SymbolHook is a declarative local-symbol provider. It describes how Novera
 // can later populate outlines and autocomplete seeds from normal buffers or
 // explicit editable slices without parsing an unbounded huge file.
 type SymbolHook struct {

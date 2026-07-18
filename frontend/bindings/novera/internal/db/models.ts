@@ -38,6 +38,35 @@ export class Column {
 }
 
 /**
+ * DeleteProfileResult distinguishes a forward-committed deletion from an
+ * ordinary pre-publication failure without exposing credential material.
+ */
+export class DeleteProfileResult {
+    "deleted": boolean;
+    "finalizationWarning": string;
+
+    /** Creates a new DeleteProfileResult instance. */
+    constructor($$source: Partial<DeleteProfileResult> = {}) {
+        if (!("deleted" in $$source)) {
+            this["deleted"] = false;
+        }
+        if (!("finalizationWarning" in $$source)) {
+            this["finalizationWarning"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new DeleteProfileResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): DeleteProfileResult {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new DeleteProfileResult($$parsedSource as Partial<DeleteProfileResult>);
+    }
+}
+
+/**
  * Profile is a saved connection. Password is input-only (json omitempty) and is
  * never persisted or returned — it is moved into the secret store on save.
  */
@@ -63,6 +92,10 @@ export class Profile {
      * transport mode for postgres + mysql; empty = secure-by-default (see resolveTLS)
      */
     "sslMode": string;
+
+    /**
+     * output-only backend-owned profile/scope handle; caller input is ignored
+     */
     "secretRef": string;
 
     /**
@@ -116,6 +149,49 @@ export class Profile {
 }
 
 /**
+ * ProfileCredentialStatus is a fail-closed, non-secret description of whether
+ * the credential referenced by a profile can actually be used. The renderer
+ * must not infer this from SecretRef alone: a retained ref may be quarantined
+ * legacy evidence, missing, or unreadable while the encrypted store is ill.
+ */
+export class ProfileCredentialStatus {
+    "profileId": string;
+
+    /**
+     * non-secret correlation handle already present on Profile
+     */
+    "secretRef": string;
+
+    /**
+     * none | verified | quarantined | unavailable
+     */
+    "status": string;
+
+    /** Creates a new ProfileCredentialStatus instance. */
+    constructor($$source: Partial<ProfileCredentialStatus> = {}) {
+        if (!("profileId" in $$source)) {
+            this["profileId"] = "";
+        }
+        if (!("secretRef" in $$source)) {
+            this["secretRef"] = "";
+        }
+        if (!("status" in $$source)) {
+            this["status"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ProfileCredentialStatus instance from a string or object.
+     */
+    static createFrom($$source: any = {}): ProfileCredentialStatus {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ProfileCredentialStatus($$parsedSource as Partial<ProfileCredentialStatus>);
+    }
+}
+
+/**
  * QueryResult is a read-only query's columns + stringified rows. Nulls is a mask
  * parallel to Rows marking which cells were SQL NULL, so the UI can distinguish a
  * real NULL from the literal text "NULL" out-of-band (not by string compare).
@@ -126,6 +202,12 @@ export class QueryResult {
     "nulls": boolean[][];
     "rowCount": number;
     "truncated": boolean;
+
+    /**
+     * TruncationReason is "row_limit" or "byte_limit" when Truncated is true.
+     * Column-count and per-cell violations are errors instead of partial success.
+     */
+    "truncationReason": string;
     "elapsedMs": number;
 
     /** Creates a new QueryResult instance. */
@@ -144,6 +226,9 @@ export class QueryResult {
         }
         if (!("truncated" in $$source)) {
             this["truncated"] = false;
+        }
+        if (!("truncationReason" in $$source)) {
+            this["truncationReason"] = "";
         }
         if (!("elapsedMs" in $$source)) {
             this["elapsedMs"] = 0;
@@ -174,14 +259,53 @@ export class QueryResult {
 }
 
 /**
+ * SaveProfileResult preserves the backend-issued identity even when the
+ * profile replacement was published but directory finalization failed. A
+ * non-empty FinalizationWarning means the visible state is forward-committed,
+ * but durability is uncertain and further mutations are blocked.
+ */
+export class SaveProfileResult {
+    "profile": Profile;
+    "finalizationWarning": string;
+
+    /** Creates a new SaveProfileResult instance. */
+    constructor($$source: Partial<SaveProfileResult> = {}) {
+        if (!("profile" in $$source)) {
+            this["profile"] = (new Profile());
+        }
+        if (!("finalizationWarning" in $$source)) {
+            this["finalizationWarning"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SaveProfileResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): SaveProfileResult {
+        const $$createField0_0 = $$createType4;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("profile" in $$parsedSource) {
+            $$parsedSource["profile"] = $$createField0_0($$parsedSource["profile"]);
+        }
+        return new SaveProfileResult($$parsedSource as Partial<SaveProfileResult>);
+    }
+}
+
+/**
  * Table is a schema object listed for a connection.
  */
 export class Table {
+    "schema": string;
     "name": string;
     "type": string;
 
     /** Creates a new Table instance. */
     constructor($$source: Partial<Table> = {}) {
+        if (!("schema" in $$source)) {
+            this["schema"] = "";
+        }
         if (!("name" in $$source)) {
             this["name"] = "";
         }
@@ -234,3 +358,4 @@ const $$createType0 = $Create.Array($Create.Any);
 const $$createType1 = $Create.Array($$createType0);
 const $$createType2 = $Create.Array($Create.Any);
 const $$createType3 = $Create.Array($$createType2);
+const $$createType4 = Profile.createFrom;

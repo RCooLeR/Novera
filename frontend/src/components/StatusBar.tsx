@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CircleAlert, X } from "lucide-react";
+import { nextLinearIndex, type LinearNavigationKey } from "../lib/keyboardNavigation";
 import { useStore } from "../state/store";
 
 // Encodings the user can convert a file to from the status bar.
@@ -23,6 +24,8 @@ export default function StatusBar() {
   const dismissStatus = useStore((s) => s.dismissStatus);
   const convertEncoding = useStore((s) => s.convertEncoding);
   const [encMenu, setEncMenu] = useState(false);
+  const encTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const encItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const enc = tab?.encoding || "utf-8";
   const nonUtf8 = enc !== "utf-8";
@@ -37,8 +40,33 @@ export default function StatusBar() {
   const errors = diagnostics?.items.filter((d) => d.severity === "error").length ?? 0;
   const warnings = diagnostics?.items.filter((d) => d.severity !== "error").length ?? 0;
 
+  useEffect(() => {
+    if (!encMenu) return;
+    const current = Math.max(0, ENCODINGS.findIndex((item) => item.id === enc));
+    encItemRefs.current[current]?.focus();
+  }, [enc, encMenu]);
+
+  const closeEncodingMenu = (restoreFocus = false) => {
+    setEncMenu(false);
+    if (restoreFocus) requestAnimationFrame(() => encTriggerRef.current?.focus());
+  };
+
+  const navigateEncodingMenu = (index: number, key: LinearNavigationKey) => {
+    const next = nextLinearIndex(index, ENCODINGS.length, key);
+    encItemRefs.current[next]?.focus();
+  };
+
   return (
     <div className={status ? "statusbar" : "statusbar idle"} style={style}>
+      {status && (
+        <span
+          className="sr-only"
+          role={status.kind === "error" ? "alert" : "status"}
+          aria-live={status.kind === "error" ? "assertive" : "polite"}
+        >
+          {status.message}
+        </span>
+      )}
       {isOpen && gitStatus?.available && (
         <span className="statusbar__item" title="Current branch">
           ⎇ {gitStatus.branch}
@@ -62,6 +90,7 @@ export default function StatusBar() {
       {tab && !tab.binary && !tab.tooLarge && tab.kind === "file" && (
         <span className="statusbar__encwrap">
           <button
+            ref={encTriggerRef}
             className="statusbar__item statusbar__btn"
             style={nonUtf8 ? { color: "var(--amber)", fontWeight: 600 } : undefined}
             title={
@@ -69,6 +98,8 @@ export default function StatusBar() {
                 ? `This file is ${encLabel(enc)} (not UTF-8). Click to save it in another encoding.`
                 : "File encoding — click to change"
             }
+            aria-haspopup="menu"
+            aria-expanded={encMenu}
             onClick={() => setEncMenu((o) => !o)}
           >
             {nonUtf8 && <AlertTriangle size={12} style={{ marginRight: 4 }} />}
@@ -76,15 +107,36 @@ export default function StatusBar() {
           </button>
           {encMenu && (
             <>
-              <div className="statusbar__encbackdrop" onClick={() => setEncMenu(false)} />
-              <div className="statusbar__encmenu">
-                <div className="statusbar__encmenu-title">Save with encoding</div>
-                {ENCODINGS.map((e) => (
+              <div className="statusbar__encbackdrop" aria-hidden="true" onClick={() => closeEncodingMenu()} />
+              <div
+                className="statusbar__encmenu"
+                role="menu"
+                aria-label="Save with encoding"
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" || event.key === "Tab") {
+                    if (event.key === "Escape") event.preventDefault();
+                    closeEncodingMenu(event.key === "Escape");
+                  }
+                }}
+              >
+                <div className="statusbar__encmenu-title" aria-hidden="true">Save with encoding</div>
+                {ENCODINGS.map((e, index) => (
                   <button
+                    ref={(element) => {
+                      encItemRefs.current[index] = element;
+                    }}
                     key={e.id}
                     className={`statusbar__encmenu-item ${e.id === enc ? "active" : ""}`}
+                    role="menuitemradio"
+                    aria-checked={e.id === enc}
+                    onKeyDown={(event) => {
+                      if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+                        event.preventDefault();
+                        navigateEncodingMenu(index, event.key as LinearNavigationKey);
+                      }
+                    }}
                     onClick={() => {
-                      setEncMenu(false);
+                      closeEncodingMenu(true);
                       if (e.id !== enc) void convertEncoding(tab.path, e.id);
                     }}
                   >

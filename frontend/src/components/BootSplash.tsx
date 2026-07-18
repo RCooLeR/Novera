@@ -49,6 +49,7 @@ type Orbiter = { rx: number; ry: number; speed: number; angle: number; color: RG
 type Particle = { a: number; r: number; wobble: number; phase: number; color: RGB };
 
 export default function BootSplash({ onDone, ready }: { onDone: () => void; ready: boolean }) {
+  const splashRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [prog, setProg] = useState(0.01);
   const [leaving, setLeaving] = useState(false);
@@ -69,6 +70,10 @@ export default function BootSplash({ onDone, ready }: { onDone: () => void; read
     setLeaving(true);
     window.setTimeout(finish, FADE_MS + 160); // fallback if transitionend doesn't fire
   };
+
+  useEffect(() => {
+    splashRef.current?.focus();
+  }, []);
 
   // ---- canvas FX (orbiters + particle plexus + scan beam), ported from app.js
   useEffect(() => {
@@ -96,6 +101,32 @@ export default function BootSplash({ onDone, ready }: { onDone: () => void; read
     let finishStart = 0; // timestamp when we began the CAP → 100% finish
     let finishFrom = 0; // progress value at the moment the finish started
     let completed = false;
+    let lastUiUpdate = 0;
+
+    const updateProgress = (now: number) => {
+      let progress: number;
+      if (finishStart === 0) {
+        progress = Math.min(CAP, easeOutCubic((now - start) / RAMP_MS));
+        if (readyRef.current && now - start >= MIN_MS) {
+          finishStart = now;
+          finishFrom = progress;
+        }
+      } else {
+        const t = Math.min(1, (now - finishStart) / FINISH_MS);
+        progress = finishFrom + (1 - finishFrom) * easeOutCubic(t);
+        if (t >= 1 && !completed) {
+          completed = true;
+          window.setTimeout(beginLeave, HOLD_MS);
+        }
+      }
+      // The HUD does not need frame-rate React updates. Canvas motion remains
+      // imperative while accessible text/progress updates at a calm cadence.
+      if (now - lastUiUpdate >= 100 || progress >= 1) {
+        lastUiUpdate = now;
+        setProg(progress);
+      }
+      return progress;
+    };
 
     const buildFx = () => {
       const scale = Math.min(w, h);
@@ -136,22 +167,7 @@ export default function BootSplash({ onDone, ready }: { onDone: () => void; read
 
     const draw = (now: number) => {
       // Ramp to CAP, hold until the app is ready, then ease to 100%.
-      let progress: number;
-      if (finishStart === 0) {
-        progress = Math.min(CAP, easeOutCubic((now - start) / RAMP_MS));
-        if (readyRef.current && now - start >= MIN_MS) {
-          finishStart = now;
-          finishFrom = progress;
-        }
-      } else {
-        const t = Math.min(1, (now - finishStart) / FINISH_MS);
-        progress = finishFrom + (1 - finishFrom) * easeOutCubic(t);
-        if (t >= 1 && !completed) {
-          completed = true;
-          window.setTimeout(beginLeave, HOLD_MS);
-        }
-      }
-      setProg(progress);
+      const progress = updateProgress(now);
 
       ctx.clearRect(0, 0, w, h);
       ctx.save();
@@ -239,6 +255,13 @@ export default function BootSplash({ onDone, ready }: { onDone: () => void; read
     };
 
     resize();
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      // The background image is the static reduced-motion frame. Keep startup
+      // progress working without running the canvas animation loop.
+      const interval = window.setInterval(() => updateProgress(performance.now()), 100);
+      updateProgress(performance.now());
+      return () => window.clearInterval(interval);
+    }
     window.addEventListener("resize", resize);
     raf = requestAnimationFrame(draw);
     return () => {
@@ -263,21 +286,22 @@ export default function BootSplash({ onDone, ready }: { onDone: () => void; read
 
   return (
     <div
+      ref={splashRef}
       className={`novera-loader${leaving ? " leaving" : ""}`}
-      role="progressbar"
+      role="dialog"
+      aria-modal="true"
       aria-label="Initializing Novera"
-      aria-valuenow={pct}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      title="Click to skip"
-      onClick={beginLeave}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === "Tab") event.preventDefault();
+      }}
       onTransitionEnd={(e) => {
         if (e.propertyName === "opacity" && leavingRef.current) finish();
       }}
     >
       <div className="bg" />
-      <canvas className="fx" ref={canvasRef} />
-      <div className="global-scan" />
+      <canvas className="fx" ref={canvasRef} aria-hidden="true" />
+      <div className="global-scan" aria-hidden="true" />
 
       <section className="hud">
         <div className="corner tl" />
@@ -321,7 +345,14 @@ export default function BootSplash({ onDone, ready }: { onDone: () => void; read
           </div>
         </aside>
 
-        <div className="bottom-loader">
+        <div
+          className="bottom-loader"
+          role="progressbar"
+          aria-label="Startup progress"
+          aria-valuenow={pct}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
           <div className="percent">{pct}%</div>
           <div className="state">{stateFor(prog)}</div>
           <div className="progress-bar">

@@ -4,6 +4,9 @@ import { BigFile, errMessage } from "../lib/services";
 import type { StagingState } from "../lib/services";
 import { highlighterFor } from "../lib/lineHighlight";
 import type { LineTokenizer, Seg } from "../lib/lineHighlight";
+import { SerialTaskQueue } from "../lib/serialTaskQueue";
+import { LatestRequest } from "../lib/latestRequest";
+import { useStore } from "../state/store";
 
 const editEnc = new TextEncoder();
 const byteLen = (s: string) => editEnc.encode(s).length; // UTF-8 byte length (StageEdit origLen)
@@ -11,7 +14,7 @@ const EDIT_WINDOW_BYTES = 256 * 1024; // editable window budget (textarea-friend
 
 /* ---------------------------------------------------------------------------
  * BigFileView — windowed viewer for files of ANY size, backed by the ported
- * Quarry streaming engine (internal/bigfile). The whole file never enters
+ * Novera's large-file streaming engine (internal/bigfile). The whole file never enters
  * memory: the backend serves bounded, line-aligned windows; this component
  * keeps a bounded ring of rows in the DOM and pages new windows in/out as the
  * user scrolls. Adds true line numbers, in-file search, go-to, a hex mode,
@@ -28,7 +31,7 @@ const PREV_LOOKBACK = 128 * 1024; // backward step when paging up (kept small: b
 
 type Mode = "text" | "hex";
 type Row = { gutter: string; off: number; text: string; segs?: Seg[] };
-type Loaded = { rows: Row[]; nextByte: number; atBof: boolean; atEof: boolean };
+type Loaded = { rows: Row[]; nextByte: number; atBof: boolean; atEof: boolean; approx: boolean };
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -37,7 +40,21 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export default function BigFileView({ abs, name, binaryHint }: { abs: string; name: string; binaryHint?: boolean }) {
+export default function BigFileView({
+	abs,
+	name,
+	tabPath,
+	binaryHint,
+	sourceVersion = 0,
+	staleOnDisk = false,
+}: {
+	abs: string;
+	name: string;
+	tabPath: string;
+	binaryHint?: boolean;
+	sourceVersion?: number;
+	staleOnDisk?: boolean;
+}) {
   const [fileId, setFileId] = useState("");
   const [size, setSize] = useState(0);
   const [encoding, setEncoding] = useState("");
@@ -65,11 +82,16 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
   const [editText, setEditText] = useState("");
   const [editStart, setEditStart] = useState(0);
   const [staging, setStaging] = useState<StagingState | null>(null);
-  const [saving, setSaving] = useState(false);
+	const [saving, setSaving] = useState(false);
+	const hasStagedEdits = (staging?.editCount ?? 0) > 0;
+	const setLargeFileState = useStore((state) => state.setLargeFileState);
+	const reloadTab = useStore((state) => state.reloadTab);
+	const closeRequested = useStore((state) => state.pendingTabClose === tabPath);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const tailNextRef = useRef(0); // byte to load forward from
   const loadingRef = useRef(false);
+  const loadingGenerationRef = useRef(0);
   const cursorRef = useRef(0); // search cursor (byte offset) — first search only
   const lastHitRef = useRef<{ start: number; end: number } | null>(null); // last match, for direction-aware stepping
   const modeRef = useRef<Mode>(mode); // current mode, read inside the follow-tail closure
@@ -78,6 +100,9 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
   const editOrigLenRef = useRef(0); // byte length of the currently-staged window text
   const editTextRef = useRef(""); // latest textarea value (for debounced staging)
   const stageTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+	const stageQueueRef = useRef(new SerialTaskQueue());
+  const viewRequestsRef = useRef(new LatestRequest());
+  const sourceVersionRef = useRef(sourceVersion);
   // Deferred scroll op applied after rows commit: keep position stable on
   // prepend/trim, or snap to top/bottom on reset.
   const scrollOpRef = useRef<{ kind: "delta" | "top" | "bottom"; value: number } | null>(null);
@@ -100,8 +125,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
 
   const loadText = useCallback(async (id: string, startByte: number): Promise<Loaded> => {
     const w = await BigFile.GetWindow(id, startByte, WINDOW_BYTES);
-    setApprox(w.approx);
-    return { rows: textRows(w), nextByte: w.nextByte, atBof: w.atBof, atEof: w.atEof };
+    return { rows: textRows(w), nextByte: w.nextByte, atBof: w.atBof, atEof: w.atEof, approx: w.approx };
   }, []);
 
   const loadTextPrev = useCallback(async (id: string, currentStart: number): Promise<Loaded> => {
@@ -113,6 +137,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
     const first = await BigFile.GetPrevWindow(id, currentStart, PREV_LOOKBACK);
     const out = textRows(first).filter((r) => r.off < currentStart);
     let cur = Number(first.nextByte);
+    let approximate = first.approx;
     // Termination is guaranteed by the no-progress break; the counter is only a
     // runaway backstop. It must exceed the worst-case window count for the
     // lookback (128 KiB of 1-byte lines ≈ 66 windows of 2000 lines) so it never
@@ -120,11 +145,12 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
     let guard = 0;
     while (cur < currentStart && guard++ < 512) {
       const w = await BigFile.GetWindow(id, cur, WINDOW_BYTES);
+      approximate ||= w.approx;
       for (const r of textRows(w)) if (r.off < currentStart) out.push(r);
       if (Number(w.nextByte) <= cur) break; // no forward progress — avoid a spin
       cur = Number(w.nextByte);
     }
-    return { rows: out, nextByte: currentStart, atBof: first.atBof, atEof: false };
+    return { rows: out, nextByte: currentStart, atBof: first.atBof, atEof: false, approx: approximate };
   }, []);
 
   const loadHex = useCallback(async (id: string, startByte: number): Promise<Loaded> => {
@@ -134,7 +160,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
       off: Number(l.offset),
       text: l.hex.padEnd(48, " ") + " |" + l.ascii + "|",
     }));
-    return { rows: out, nextByte: h.nextByte, atBof: h.atBof, atEof: h.atEof };
+    return { rows: out, nextByte: h.nextByte, atBof: h.atBof, atEof: h.atEof, approx: false };
   }, []);
 
   const loadHexPrev = useCallback(
@@ -149,7 +175,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
           off: Number(l.offset),
           text: l.hex.padEnd(48, " ") + " |" + l.ascii + "|",
         }));
-      return { rows: out, nextByte: currentStart, atBof: start <= 0, atEof: false };
+      return { rows: out, nextByte: currentStart, atBof: start <= 0, atEof: false, approx: false };
     },
     [],
   );
@@ -166,32 +192,70 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
   // Reset the buffer to a fresh window at startByte. scrollTo snaps the viewport.
   const reset = useCallback(
     async (id: string, startByte: number, scrollTo: "top" | "bottom" = "top", highlight: number | null = null) => {
+      const generation = viewRequestsRef.current.begin();
+      loadingGenerationRef.current = generation;
       loadingRef.current = true;
       try {
         const r = await loadAt(id, startByte);
+        if (!viewRequestsRef.current.isCurrent(generation)) return;
         tailNextRef.current = r.nextByte;
         setAtBof(r.atBof);
         setAtEof(r.atEof);
+        setApprox(r.approx);
         setHighlightOff(highlight);
         scrollOpRef.current = { kind: scrollTo, value: 0 };
         setRows(r.rows);
       } finally {
-        loadingRef.current = false;
+        if (loadingGenerationRef.current === generation) loadingRef.current = false;
       }
     },
     [loadAt],
   );
 
+  // Watcher-driven source changes keep this long-lived component/session
+  // mounted. Refresh the backend document explicitly, but never refresh across
+  // staged edits: the store marks that case stale until the user resolves it.
+  useEffect(() => {
+    if (sourceVersionRef.current === sourceVersion) return;
+    sourceVersionRef.current = sourceVersion;
+    if (!fid || staleOnDisk || hasStagedEdits) return;
+    const generation = viewRequestsRef.current.begin();
+    setFollow(false);
+    void (async () => {
+      try {
+        await BigFile.RefreshFile(fid);
+        const total = Number(await BigFile.FileSize(fid));
+        if (!viewRequestsRef.current.isCurrent(generation)) return;
+        setSize(total);
+        setNote("Reloaded after an external file change.");
+        await reset(fid, 0, "top", null);
+      } catch (refreshError) {
+        if (viewRequestsRef.current.isCurrent(generation)) setNote(errMessage(refreshError));
+      }
+    })();
+  }, [fid, hasStagedEdits, reset, sourceVersion, staleOnDisk]);
+
+  useEffect(() => {
+    if (!staleOnDisk) return;
+    setFollow(false);
+    setNote("This file changed on disk. Save a copy or discard staged edits before reloading.");
+  }, [staleOnDisk]);
+
   // ---- open / close the file in the engine ----
   useEffect(() => {
     let alive = true;
     let openedId = "";
+    const generation = viewRequestsRef.current.begin();
+    loadingGenerationRef.current = generation;
     setError("");
     setRows([]);
-    BigFile.OpenFile(abs)
+		BigFile.OpenFile(abs)
       .then((m) => {
-        if (!alive) return;
         openedId = m.fileId;
+        if (!alive || !viewRequestsRef.current.isCurrent(generation)) {
+          void BigFile.CloseFile(m.fileId);
+          return;
+        }
         setFileId(m.fileId);
         setSize(Number(m.size));
         setEncoding(m.encoding || "binary");
@@ -205,23 +269,37 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
         loadingRef.current = true;
         const first = initialMode === "hex" ? loadHex(m.fileId, 0) : loadText(m.fileId, 0);
         return first.then((r) => {
-          if (!alive) return;
+          if (!alive || !viewRequestsRef.current.isCurrent(generation)) return;
           tailNextRef.current = r.nextByte;
           setAtBof(r.atBof);
           setAtEof(r.atEof);
+          setApprox(r.approx);
           scrollOpRef.current = { kind: "top", value: 0 };
           setRows(r.rows);
-          loadingRef.current = false;
+          if (loadingGenerationRef.current === generation) loadingRef.current = false;
         });
       })
       .catch((e) => {
-        if (alive) setError(errMessage(e));
+        if (alive && viewRequestsRef.current.isCurrent(generation)) setError(errMessage(e));
+      })
+      .finally(() => {
+        if (alive && loadingGenerationRef.current === generation) loadingRef.current = false;
       });
-    return () => {
-      alive = false;
-      if (openedId) void BigFile.CloseFile(openedId);
-    };
-  }, [abs, loadHex, loadText]);
+		return () => {
+			alive = false;
+      viewRequestsRef.current.invalidate();
+			setLargeFileState(tabPath, { sessionId: "" });
+			if (openedId) void BigFile.CloseFile(openedId);
+		};
+	}, [abs, loadHex, loadText, setLargeFileState, tabPath]);
+
+	useEffect(() => {
+		setLargeFileState(tabPath, {
+			sessionId: fid,
+			dirty: hasStagedEdits,
+			inPlaceEligible: !!staging?.inPlaceEligible,
+		});
+	}, [fid, hasStagedEdits, setLargeFileState, staging?.inPlaceEligible, tabPath]);
 
   // Apply the deferred scroll op once rows have committed (fixed row height
   // makes prepend/trim compensation exact).
@@ -237,14 +315,18 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
 
   const appendNext = useCallback(async () => {
     if (loadingRef.current || atEof || !fid) return;
+    const generation = viewRequestsRef.current.begin();
+    loadingGenerationRef.current = generation;
     loadingRef.current = true;
     try {
       const r = await loadAt(fid, tailNextRef.current);
+      if (!viewRequestsRef.current.isCurrent(generation)) return;
       if (r.rows.length === 0) {
         setAtEof(true);
         return;
       }
       tailNextRef.current = r.nextByte;
+      setApprox(r.approx);
       setAtEof(r.atEof);
       setRows((prev) => {
         let next = [...prev, ...r.rows];
@@ -257,23 +339,27 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
         return next;
       });
     } catch (e) {
-      setNote(errMessage(e));
+      if (viewRequestsRef.current.isCurrent(generation)) setNote(errMessage(e));
     } finally {
-      loadingRef.current = false;
+      if (loadingGenerationRef.current === generation) loadingRef.current = false;
     }
   }, [atEof, fid, loadAt]);
 
   const prependPrev = useCallback(async () => {
     if (loadingRef.current || atBof || !fid || rows.length === 0) return;
+    const generation = viewRequestsRef.current.begin();
+    loadingGenerationRef.current = generation;
     loadingRef.current = true;
     try {
       const anchor = rows[0].off;
       const r = await loadPrevAt(fid, anchor);
+      if (!viewRequestsRef.current.isCurrent(generation)) return;
       if (r.rows.length === 0) {
         setAtBof(true);
         return;
       }
       setAtBof(r.atBof);
+      setApprox(r.approx);
       setRows((prev) => {
         let next = [...r.rows, ...prev];
         const adjust = r.rows.length * ROW_H;
@@ -287,9 +373,9 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
         return next;
       });
     } catch (e) {
-      setNote(errMessage(e));
+      if (viewRequestsRef.current.isCurrent(generation)) setNote(errMessage(e));
     } finally {
-      loadingRef.current = false;
+      if (loadingGenerationRef.current === generation) loadingRef.current = false;
     }
   }, [atBof, fid, rows, loadPrevAt]);
 
@@ -304,6 +390,8 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
   const runFind = useCallback(
     async (backward: boolean) => {
       if (!fid || !query.trim()) return;
+      const generation = viewRequestsRef.current.begin();
+      setFollow(false);
       setNote("Searching…");
       try {
         // Seed from the last hit's edge so a direction flip steps to the
@@ -314,6 +402,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
         const hit = backward
           ? await BigFile.FindPrev(fid, query, from, regex, caseSensitive, false)
           : await BigFile.FindNext(fid, query, from, regex, caseSensitive, false);
+        if (!viewRequestsRef.current.isCurrent(generation)) return;
         if (hit.unsupported) {
           setNote(hit.message || "Search not supported for this file.");
           return;
@@ -333,7 +422,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
         if (mode === "hex") await reset(fid, off - (off % 16), "top", off);
         else await reset(fid, off, "top", off);
       } catch (e) {
-        setNote(errMessage(e));
+        if (viewRequestsRef.current.isCurrent(generation)) setNote(errMessage(e));
       }
     },
     [fid, query, regex, caseSensitive, mode, reset],
@@ -344,6 +433,8 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
     if (!fid) return;
     const v = gotoVal.trim();
     if (!v) return;
+    const generation = viewRequestsRef.current.begin();
+    setFollow(false);
     try {
       let byte = 0;
       if (/^0x[0-9a-f]+$/i.test(v)) byte = parseInt(v, 16);
@@ -353,13 +444,14 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
         if (!Number.isFinite(line)) return;
         byte = Number(await BigFile.ResolveLine(fid, line));
       }
+      if (!viewRequestsRef.current.isCurrent(generation)) return;
       if (mode === "hex") byte -= byte % 16;
       cursorRef.current = Math.max(0, byte); // search continues from where we jumped
       lastHitRef.current = null;
-      await reset(fid, Math.max(0, byte), "top", null);
       setNote("");
+      await reset(fid, Math.max(0, byte), "top", null);
     } catch (e) {
-      setNote(errMessage(e));
+      if (viewRequestsRef.current.isCurrent(generation)) setNote(errMessage(e));
     }
   }, [fid, gotoVal, size, mode, reset]);
 
@@ -367,20 +459,29 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
     async (m: Mode) => {
       if (m === mode || !fid) return;
       const anchor = rows[0]?.off ?? 0;
+      const generation = viewRequestsRef.current.begin();
+      loadingGenerationRef.current = generation;
+      loadingRef.current = true;
+      setFollow(false);
       setMode(m);
-      // reset() reads `mode` via loadAt; defer to next tick so the new mode is used.
-      setTimeout(() => {
-        loadingRef.current = true;
-        const p = m === "hex" ? loadHex(fid, anchor - (anchor % 16)) : loadText(fid, anchor);
-        void p.then((r) => {
-          tailNextRef.current = r.nextByte;
-          setAtBof(r.atBof);
-          setAtEof(r.atEof);
-          scrollOpRef.current = { kind: "top", value: 0 };
-          setRows(r.rows);
-          loadingRef.current = false;
-        });
-      }, 0);
+      try {
+        const r = m === "hex" ? await loadHex(fid, anchor - (anchor % 16)) : await loadText(fid, anchor);
+        if (!viewRequestsRef.current.isCurrent(generation)) return;
+        tailNextRef.current = r.nextByte;
+        setAtBof(r.atBof);
+        setAtEof(r.atEof);
+        setApprox(r.approx);
+        setHighlightOff(null);
+        scrollOpRef.current = { kind: "top", value: 0 };
+        setRows(r.rows);
+      } catch (error) {
+        if (viewRequestsRef.current.isCurrent(generation)) {
+          setMode(mode);
+          setNote(errMessage(error));
+        }
+      } finally {
+        if (loadingGenerationRef.current === generation) loadingRef.current = false;
+      }
     },
     [mode, fid, rows, loadHex, loadText],
   );
@@ -411,63 +512,88 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
   // Stage the current textarea against the window it was loaded from. After
   // staging, the edited view of [editStart, editStart+byteLen(text)) equals the
   // text, so origLen for the next stage becomes that byte length.
-  const stageNow = useCallback(async () => {
-    if (!fid) return;
-    const txt = editTextRef.current;
-    try {
-      const st = await BigFile.StageEdit(fid, editStart, editOrigLenRef.current, txt);
-      editOrigLenRef.current = byteLen(txt);
-      setStaging(st);
-    } catch (e) {
-      setNote(errMessage(e));
-    }
-  }, [fid, editStart]);
+	const stageNow = useCallback((): Promise<boolean> => {
+		if (!fid) return Promise.resolve(false);
+		const txt = editTextRef.current;
+		const start = editStart;
+		let outcome = false;
+		return stageQueueRef.current.run(async () => {
+			try {
+				// Read origLen only when this mutation reaches the head of the queue.
+				// A preceding stage may have changed the edited window's byte length.
+				const st = await BigFile.StageEdit(fid, start, editOrigLenRef.current, txt);
+				editOrigLenRef.current = byteLen(txt);
+				setStaging(st);
+				setLargeFileState(tabPath, { dirty: st.editCount > 0, inPlaceEligible: st.inPlaceEligible });
+				outcome = true;
+			} catch (error) {
+				setNote(errMessage(error));
+			}
+			return outcome;
+		});
+	}, [editStart, fid, setLargeFileState, tabPath]);
 
-  const onEditChange = useCallback(
-    (v: string) => {
-      setEditText(v);
-      editTextRef.current = v;
-      clearTimeout(stageTimerRef.current);
-      stageTimerRef.current = setTimeout(() => void stageNow(), 700);
-    },
-    [stageNow],
-  );
+	const onEditChange = useCallback(
+		(v: string) => {
+			setEditText(v);
+			editTextRef.current = v;
+			setLargeFileState(tabPath, { dirty: true });
+			clearTimeout(stageTimerRef.current);
+			stageTimerRef.current = setTimeout(() => void stageNow(), 700);
+		},
+		[setLargeFileState, stageNow, tabPath],
+	);
 
   const enterEdit = useCallback(() => {
     if (!editable || !fid) return;
+		setFollow(false);
     setEditMode(true);
     void loadEditWindow(editMode ? editStart : (rows[0]?.off ?? 0));
   }, [editable, fid, editMode, editStart, loadEditWindow, rows]);
 
   const exitEdit = useCallback(async () => {
     clearTimeout(stageTimerRef.current);
-    await stageNow();
-    setEditMode(false);
+		setSaving(true);
+		try {
+			if (await stageNow()) setEditMode(false);
+		} finally {
+			setSaving(false);
+		}
   }, [stageNow]);
 
   const doDiscard = useCallback(async () => {
     if (!fid) return;
     clearTimeout(stageTimerRef.current);
+		setSaving(true);
     try {
+			await stageQueueRef.current.drain();
       const st = await BigFile.DiscardEdits(fid);
       setStaging(st);
+			setLargeFileState(tabPath, { dirty: false, inPlaceEligible: false });
       if (editMode) await loadEditWindow(editStart);
       else void reset(fid, rows[0]?.off ?? 0, "top", null);
       setNote("Discarded staged edits.");
     } catch (e) {
       setNote(errMessage(e));
+		} finally {
+			setSaving(false);
     }
-  }, [fid, editMode, editStart, loadEditWindow, reset, rows]);
+	}, [fid, editMode, editStart, loadEditWindow, reset, rows, setLargeFileState, tabPath]);
 
   const doSavePatch = useCallback(async () => {
     if (!fid) return;
+    if (staleOnDisk) {
+      setNote("Save in place is blocked because the source changed. Save a copy or discard and reload.");
+      return;
+    }
     clearTimeout(stageTimerRef.current);
-    await stageNow();
     setSaving(true);
     try {
+			if (!(await stageNow())) return;
       const r = await BigFile.SavePatch(fid);
       setNote(`Saved in place · ${Number(r.bytesWritten).toLocaleString()} bytes patched`);
       setStaging(null);
+			setLargeFileState(tabPath, { dirty: false, inPlaceEligible: false });
       setEditMode(false);
       void reset(fid, rows[0]?.off ?? 0, "top", null); // file reopened under same id
     } catch (e) {
@@ -475,14 +601,14 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
     } finally {
       setSaving(false);
     }
-  }, [fid, stageNow, reset, rows]);
+	}, [fid, staleOnDisk, stageNow, reset, rows, setLargeFileState, tabPath]);
 
   const doSaveCopy = useCallback(async () => {
     if (!fid) return;
     clearTimeout(stageTimerRef.current);
-    await stageNow();
     setSaving(true);
     try {
+			if (!(await stageNow())) return;
       const r = await BigFile.SaveCopyViaDialog(fid);
       if (r.mode) setNote(`Saved edited copy → ${r.outputPath}`);
     } catch (e) {
@@ -492,26 +618,39 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
     }
   }, [fid, stageNow]);
 
-  useEffect(() => () => clearTimeout(stageTimerRef.current), []);
+	useEffect(() => () => clearTimeout(stageTimerRef.current), []);
+	useEffect(() => {
+		if (closeRequested) clearTimeout(stageTimerRef.current);
+	}, [closeRequested]);
+
+	// Following performs a document refresh when the file grows. A staged edit
+	// owns the current document generation, so stop follow immediately and make
+	// the user explicitly save or discard before live refresh can resume.
+	useEffect(() => {
+		if (hasStagedEdits) setFollow(false);
+	}, [hasStagedEdits]);
 
   // ---- follow-tail ----
   useEffect(() => {
-    if (!follow || !fid) return;
+		if (!follow || !fid || hasStagedEdits) return;
     let cancelled = false;
     // Jump to the live tail. A single window is line-capped (and hex reads only
     // HEX_BYTES), so starting a fixed amount back can stop short of EOF — page
     // forward until atEof, keeping the last MAX_ROWS rows, then snap to bottom.
-    const jumpTail = async (total: number) => {
+    const jumpTail = async (total: number, generation: number) => {
       const hex = modeRef.current === "hex";
       const back = hex ? HEX_BYTES : 256 * 1024;
       let cur = Math.max(0, total - back);
       const acc: Row[] = [];
       let bof = cur <= 0;
       let reachedEof = false;
+      let approximate = false;
       let guard = 0;
       while (guard++ < 512) {
         const r = hex ? await loadHex(fid, cur) : await loadText(fid, cur);
+        if (cancelled || !viewRequestsRef.current.isCurrent(generation)) return;
         acc.push(...r.rows);
+        approximate ||= r.approx;
         tailNextRef.current = Number(r.nextByte);
         if (r.atEof) {
           reachedEof = true;
@@ -520,7 +659,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
         if (Number(r.nextByte) <= cur) break; // no progress
         cur = Number(r.nextByte);
       }
-      if (cancelled) return;
+      if (cancelled || !viewRequestsRef.current.isCurrent(generation)) return;
       let trimmed = acc;
       if (acc.length > MAX_ROWS) {
         trimmed = acc.slice(acc.length - MAX_ROWS);
@@ -528,14 +667,17 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
       }
       setAtBof(bof);
       setAtEof(reachedEof); // only claim EOF if we actually reached it
+      setApprox(approximate);
       scrollOpRef.current = { kind: "bottom", value: 0 };
       setRows(trimmed);
     };
     void (async () => {
+      const generation = viewRequestsRef.current.begin();
       try {
         const total = Number(await BigFile.FileSize(fid));
+        if (cancelled || !viewRequestsRef.current.isCurrent(generation)) return;
         setSize(total);
-        if (!cancelled) await jumpTail(total);
+        await jumpTail(total, generation);
       } catch {
         /* ignore */
       }
@@ -545,9 +687,11 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
         try {
           const total = Number(await BigFile.FileSize(fid));
           if (cancelled || total <= size) return;
+          const generation = viewRequestsRef.current.begin();
           await BigFile.RefreshFile(fid);
+          if (cancelled || !viewRequestsRef.current.isCurrent(generation)) return;
           setSize(total);
-          await jumpTail(total);
+          await jumpTail(total, generation);
         } catch {
           /* ignore */
         }
@@ -557,7 +701,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
       cancelled = true;
       clearInterval(t);
     };
-  }, [follow, fid, size, loadHex, loadText]);
+	}, [follow, fid, hasStagedEdits, size, loadHex, loadText]);
 
   if (error) return <div className="editor-placeholder">{error}</div>;
 
@@ -630,7 +774,12 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
           </button>
         )}
         {!editMode && (
-          <button className={`bfv__toggle${follow ? " on" : ""}`} title="Follow tail (live)" onClick={() => setFollow((v) => !v)}>
+					<button
+						className={`bfv__toggle${follow ? " on" : ""}`}
+						disabled={hasStagedEdits}
+						title={hasStagedEdits ? "Save or discard staged edits before following the live file" : "Follow tail (live)"}
+						onClick={() => setFollow((v) => !v)}
+					>
             <ArrowDownToLine size={14} />
           </button>
         )}
@@ -648,6 +797,21 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
 
       {note && <div className="bfv__note">{note}</div>}
 
+      {staleOnDisk && (
+        <div className="bfv__editbanner" role="alert">
+          <span>The source changed on disk. In-place save is blocked.</span>
+          <span className="bfv__spacer" />
+          <button
+            className="btn"
+            disabled={saving || hasStagedEdits}
+            title={hasStagedEdits ? "Save a copy or discard staged edits before reloading" : "Reload the latest disk version"}
+            onClick={() => void reloadTab(tabPath)}
+          >
+            Reload from disk
+          </button>
+        </div>
+      )}
+
       {!editMode && staging && staging.editCount > 0 && (
         <div className="bfv__editbanner">
           <span>
@@ -661,7 +825,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
             Resume
           </button>
           {staging.inPlaceEligible && (
-            <button className="btn" disabled={saving} onClick={() => void doSavePatch()}>
+            <button className="btn" disabled={saving || staleOnDisk} onClick={() => void doSavePatch()}>
               Save in place
             </button>
           )}
@@ -687,7 +851,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
             <span className="bfv__spacer" />
             <button
               className="btn"
-              disabled={saving || !staging?.inPlaceEligible || !staging?.editCount}
+              disabled={saving || staleOnDisk || !staging?.inPlaceEligible || !staging?.editCount}
               title={staging?.inPlaceEligible ? "Apply edits in place (crash-safe)" : "Length changed — use Save as copy"}
               onClick={() => void doSavePatch()}
             >
@@ -706,6 +870,7 @@ export default function BigFileView({ abs, name, binaryHint }: { abs: string; na
           <textarea
             className="bfv__edit"
             value={editText}
+				disabled={saving}
             spellCheck={false}
             wrap="off"
             onChange={(e) => onEditChange(e.target.value)}

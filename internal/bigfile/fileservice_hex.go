@@ -34,9 +34,8 @@ func (s *FileService) GetHexWindow(fileID string, startByte int64, maxBytes int)
 	if !ok {
 		return HexWindow{}, fmt.Errorf("unknown file id %q", fileID)
 	}
-	if maxBytes <= 0 {
-		maxBytes = hexWindowBytes
-	}
+	defer f.Release()
+	maxBytes = clampRequestInt(maxBytes, hexWindowBytes, maxHexWindowBytes)
 	size := f.Doc.Size()
 	if startByte < 0 {
 		startByte = 0
@@ -46,10 +45,7 @@ func (s *FileService) GetHexWindow(fileID string, startByte int64, maxBytes int)
 	}
 	startByte -= startByte % hexBytesPerLine // align to a row boundary
 
-	end := startByte + int64(maxBytes)
-	if end > size {
-		end = size
-	}
+	end := boundedReadEnd(startByte, size, maxBytes)
 	raw, err := f.Doc.ReadRange(startByte, end)
 	if err != nil {
 		return HexWindow{}, err

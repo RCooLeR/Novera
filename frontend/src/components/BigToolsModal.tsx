@@ -1,8 +1,12 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
+import { Events } from "@wailsio/runtime";
 import { BigFile, errMessage } from "../lib/services";
 import type { CsvProfileResult, SqlLintResult, TransformResult } from "../lib/services";
 import { useStore } from "../state/store";
+import { useDialogFocus } from "../lib/useDialogFocus";
+import { LatestRequest } from "../lib/latestRequest";
+import { parseBigFileJobEnd, parseBigFileJobProgress, parseBigFileJobStart } from "../lib/bridgeEvents";
 
 /* ---------------------------------------------------------------------------
  * BigToolsModal — the ported Quarry CSV/SQL toolset, surfaced for the active
@@ -21,6 +25,13 @@ const DELIMS = [
 const FILTER_OPS = ["contains", "eq", "ne", "gt", "lt", "empty", "nonempty"];
 const REDACT_MODES = ["null", "fixed", "hash", "email"];
 
+interface ActiveJob {
+  id: string;
+  title: string;
+  records: number;
+  note: string;
+}
+
 function baseName(p: string): string {
   return p.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? p;
 }
@@ -37,7 +48,10 @@ export default function BigToolsModal() {
 
   const [fileId, setFileId] = useState("");
   const [loading, setLoading] = useState(true);
+  const [schemaLoading, setSchemaLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
+  const [canceling, setCanceling] = useState(false);
   const [err, setErr] = useState("");
   const [result, setResult] = useState("");
 
@@ -84,6 +98,49 @@ export default function BigToolsModal() {
   // Harvest
   const [harvestPat, setHarvestPat] = useState("");
   const [harvestCi, setHarvestCi] = useState(true);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  const schemaRequests = useRef(new LatestRequest());
+  const loadedSchemaKey = useRef("");
+  const requestClose = useCallback(() => {
+    if (!busy) close();
+  }, [busy, close]);
+  const dialogRef = useDialogFocus(!!target, requestClose, closeRef);
+
+  useEffect(() => {
+    if (!target) return;
+    const rejectEvent = (message: string) => setErr(message);
+    const offStart = Events.On("bigfile:job-start", (event: { data: unknown }) => {
+      const job = parseBigFileJobStart(event.data);
+      if (!job) {
+        rejectEvent("Ignored malformed transform start event.");
+        return;
+      }
+      setActiveJob({ ...job, records: 0, note: "" });
+    });
+    const offProgress = Events.On("bigfile:job-progress", (event: { data: unknown }) => {
+      const progress = parseBigFileJobProgress(event.data);
+      if (!progress) {
+        rejectEvent("Ignored malformed transform progress event.");
+        return;
+      }
+      setActiveJob((current) =>
+        current?.id === progress.id ? { ...current, records: progress.records, note: progress.note } : current,
+      );
+    });
+    const offEnd = Events.On("bigfile:job-end", (event: { data: unknown }) => {
+      const ended = parseBigFileJobEnd(event.data);
+      if (!ended) {
+        rejectEvent("Ignored malformed transform completion event.");
+        return;
+      }
+      setActiveJob((current) => (current?.id === ended.id ? null : current));
+    });
+    return () => {
+      offStart();
+      offProgress();
+      offEnd();
+    };
+  }, [target]);
 
   useEffect(() => {
     if (!target) return;
@@ -91,13 +148,28 @@ export default function BigToolsModal() {
     const csv = /\.(csv|tsv)$/i.test(target.rel);
     let openedId = "";
     let alive = true;
+    schemaRequests.current.invalidate();
+    loadedSchemaKey.current = "";
     setLoading(true);
+    setSchemaLoading(false);
+    setFileId("");
     setErr("");
+    setResult("");
+    setColumns([]);
+    setTables([]);
+    setTable("");
+    setPresets([]);
+    setProfile(null);
+    setLint(null);
+    setKeep(new Set());
+    setRedact(new Set());
     BigFile.OpenFile(abs)
       .then(async (m) => {
         openedId = m.fileId;
-        if (!alive) return;
-        setFileId(m.fileId);
+        if (!alive) {
+          void BigFile.CloseFile(m.fileId);
+          return;
+        }
         if (csv) {
           const ins = await BigFile.CsvInspect(m.fileId);
           if (!alive) return;
@@ -107,30 +179,69 @@ export default function BigToolsModal() {
           const sch = await BigFile.CsvSchema(m.fileId, d, ins.hasHeader);
           if (!alive) return;
           const names = sch.columns.map((c) => c.name);
+          loadedSchemaKey.current = `${d}\0${ins.hasHeader}`;
           setColumns(names);
           setKeep(new Set(names.map((_, i) => i)));
+          setFileId(m.fileId);
         } else {
           const an = await BigFile.SqlAnalyze(m.fileId);
           if (!alive) return;
           const names = an.tables.map((t) => t.name);
           setTables(names);
-          if (names[0]) setTable(names[0]);
-          setPresets(await BigFile.SqlListPresets());
+          setTable(names[0] ?? "");
+          const nextPresets = await BigFile.SqlListPresets();
+          if (!alive) return;
+          setPresets(nextPresets);
+          setFileId(m.fileId);
         }
       })
       .catch((e) => alive && setErr(errMessage(e)))
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
+      schemaRequests.current.invalidate();
       if (openedId) void BigFile.CloseFile(openedId);
     };
   }, [target, root]);
+
+  useEffect(() => {
+    if (!target || !isCsv || !fileId || loading) return;
+    const key = `${delim}\0${hasHeader}`;
+    if (loadedSchemaKey.current === key) return;
+    const generation = schemaRequests.current.begin();
+    setSchemaLoading(true);
+    setErr("");
+    setResult("");
+    setProfile(null);
+    void BigFile.CsvSchema(fileId, delim, hasHeader)
+      .then((schema) => {
+        if (!schemaRequests.current.isCurrent(generation)) return;
+        const names = schema.columns.map((column) => column.name);
+        loadedSchemaKey.current = key;
+        setColumns(names);
+        setFCol(0);
+        setDedupeKey(-1);
+        setKeep(new Set(names.map((_, index) => index)));
+        setRedact(new Set());
+      })
+      .catch((schemaError) => {
+        if (schemaRequests.current.isCurrent(generation)) setErr(errMessage(schemaError));
+      })
+      .finally(() => {
+        if (schemaRequests.current.isCurrent(generation)) setSchemaLoading(false);
+      });
+  }, [delim, fileId, hasHeader, isCsv, loading, target]);
+
+  const unavailable = busy || loading || schemaLoading || !fileId;
 
   if (!target) return null;
 
   // Run a transform that returns a TransformResult (write-to-chosen-path).
   const run = async (label: string, fn: () => Promise<TransformResult>) => {
+    if (unavailable) return;
     setBusy(true);
+    setActiveJob(null);
+    setCanceling(false);
     setErr("");
     setResult("");
     try {
@@ -147,6 +258,20 @@ export default function BigToolsModal() {
       setErr(errMessage(e));
     } finally {
       setBusy(false);
+      setActiveJob(null);
+      setCanceling(false);
+    }
+  };
+
+  const cancelTransform = async () => {
+    if (!busy || !activeJob || canceling) return;
+    setCanceling(true);
+    try {
+      await BigFile.CancelJob();
+      setResult(`Cancelling ${activeJob.title}вЂ¦`);
+    } catch (cancelError) {
+      setErr(errMessage(cancelError));
+      setCanceling(false);
     }
   };
 
@@ -164,18 +289,25 @@ export default function BigToolsModal() {
   ));
 
   return (
-    <div className="modal-overlay" onClick={close}>
-      <div className="modal bigtools" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-overlay" onClick={requestClose}>
+      <div
+        ref={dialogRef}
+        className="modal bigtools"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Data tools for ${baseName(rel)}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="bigtools__head">
           <div className="modal__title">Data tools · {baseName(rel)}</div>
-          {loading && <Loader2 size={15} className="spin" />}
+          {(loading || schemaLoading) && <Loader2 size={15} className="spin" />}
         </div>
 
         {!loading && isCsv && (
           <div className="bigtools__ctx">
             <label>
               Delimiter
-              <select value={delim} onChange={(e) => setDelim(e.target.value)}>
+              <select value={delim} disabled={busy || schemaLoading} onChange={(e) => setDelim(e.target.value)}>
                 {DELIMS.map((d) => (
                   <option key={d.label} value={d.val}>
                     {d.label}
@@ -184,7 +316,7 @@ export default function BigToolsModal() {
               </select>
             </label>
             <label className="bigtools__check">
-              <input type="checkbox" checked={hasHeader} onChange={(e) => setHasHeader(e.target.checked)} /> Header row
+              <input type="checkbox" checked={hasHeader} disabled={busy || schemaLoading} onChange={(e) => setHasHeader(e.target.checked)} /> Header row
             </label>
             <span className="bigtools__dim">{columns.length} columns</span>
           </div>
@@ -211,7 +343,7 @@ export default function BigToolsModal() {
                   <label className="bigtools__check">
                     <input type="checkbox" checked={fNeg} onChange={(e) => setFNeg(e.target.checked)} /> negate
                   </label>
-                  <button className="btn" disabled={busy} onClick={() => void run("Filter", () => BigFile.CsvFilterViaDialog(fileId, delim, hasHeader, fCol, fOp, fVal, fNeg))}>
+                  <button className="btn" disabled={unavailable} onClick={() => void run("Filter", () => BigFile.CsvFilterViaDialog(fileId, delim, hasHeader, fCol, fOp, fVal, fNeg))}>
                     Run
                   </button>
                 </div>
@@ -224,7 +356,7 @@ export default function BigToolsModal() {
                     <option value={-1}>Whole row</option>
                     {colOptions}
                   </select>
-                  <button className="btn" disabled={busy} onClick={() => void run("Dedupe", () => BigFile.CsvDedupeViaDialog(fileId, delim, hasHeader, dedupeKey))}>
+                  <button className="btn" disabled={unavailable} onClick={() => void run("Dedupe", () => BigFile.CsvDedupeViaDialog(fileId, delim, hasHeader, dedupeKey))}>
                     Run
                   </button>
                 </div>
@@ -234,7 +366,7 @@ export default function BigToolsModal() {
                 <b>Sample (every Nth row)</b>
                 <div className="bigtools__row">
                   <input type="number" min={1} value={everyN} onChange={(e) => setEveryN(Math.max(1, +e.target.value))} style={{ width: 70 }} />
-                  <button className="btn" disabled={busy} onClick={() => void run("Sample", () => BigFile.CsvSampleViaDialog(fileId, delim, hasHeader, everyN))}>
+                  <button className="btn" disabled={unavailable} onClick={() => void run("Sample", () => BigFile.CsvSampleViaDialog(fileId, delim, hasHeader, everyN))}>
                     Run
                   </button>
                 </div>
@@ -249,7 +381,7 @@ export default function BigToolsModal() {
                     </label>
                   ))}
                 </div>
-                <button className="btn" disabled={busy} onClick={() => void run("Keep columns", () => BigFile.CsvProjectViaDialog(fileId, delim, [...keep].sort((a, b) => a - b)))}>
+                <button className="btn" disabled={unavailable} onClick={() => void run("Keep columns", () => BigFile.CsvProjectViaDialog(fileId, delim, [...keep].sort((a, b) => a - b)))}>
                   Write projected CSV
                 </button>
               </div>
@@ -274,7 +406,7 @@ export default function BigToolsModal() {
                   {redactMode === "fixed" && <input value={redactRepl} onChange={(e) => setRedactRepl(e.target.value)} placeholder="replacement" />}
                   <button
                     className="btn"
-                    disabled={busy || redact.size === 0}
+                    disabled={unavailable || redact.size === 0}
                     onClick={() =>
                       void run("Redact", () =>
                         BigFile.CsvRedactViaDialog(
@@ -299,7 +431,7 @@ export default function BigToolsModal() {
                   <label className="bigtools__check">
                     <input type="checkbox" checked={includeCreate} onChange={(e) => setIncludeCreate(e.target.checked)} /> CREATE TABLE
                   </label>
-                  <button className="btn" disabled={busy} onClick={() => void run("CSV→SQL", () => BigFile.CsvToSQLViaDialog(fileId, delim, sqlTable, hasHeader, includeCreate))}>
+                  <button className="btn" disabled={unavailable} onClick={() => void run("CSV→SQL", () => BigFile.CsvToSQLViaDialog(fileId, delim, sqlTable, hasHeader, includeCreate))}>
                     Run
                   </button>
                 </div>
@@ -317,13 +449,13 @@ export default function BigToolsModal() {
                   <input value={sheetName} onChange={(e) => setSheetName(e.target.value)} placeholder="sheet/table" style={{ width: 110 }} />
                 </div>
                 <div className="bigtools__row">
-                  <button className="btn" disabled={busy} onClick={() => void run("Export JSONL", () => BigFile.CsvExportJSONLViaDialog(fileId, delim, hasHeader, numberKeys))}>
+                  <button className="btn" disabled={unavailable} onClick={() => void run("Export JSONL", () => BigFile.CsvExportJSONLViaDialog(fileId, delim, hasHeader, numberKeys))}>
                     JSONL
                   </button>
-                  <button className="btn" disabled={busy} onClick={() => void run("Export SQLite", () => BigFile.CsvExportSQLiteViaDialog(fileId, delim, hasHeader, sheetName, typedCells))}>
+                  <button className="btn" disabled={unavailable} onClick={() => void run("Export SQLite", () => BigFile.CsvExportSQLiteViaDialog(fileId, delim, hasHeader, sheetName, typedCells))}>
                     SQLite
                   </button>
-                  <button className="btn" disabled={busy} onClick={() => void run("Export XLSX", () => BigFile.CsvExportXLSXViaDialog(fileId, delim, hasHeader, sheetName, typedCells))}>
+                  <button className="btn" disabled={unavailable} onClick={() => void run("Export XLSX", () => BigFile.CsvExportXLSXViaDialog(fileId, delim, hasHeader, sheetName, typedCells))}>
                     XLSX
                   </button>
                 </div>
@@ -333,7 +465,7 @@ export default function BigToolsModal() {
                 <b>Profile columns</b>
                 <button
                   className="btn"
-                  disabled={busy}
+                  disabled={unavailable}
                   onClick={async () => {
                     setBusy(true);
                     setErr("");
@@ -385,7 +517,7 @@ export default function BigToolsModal() {
                 <b>Lint dump</b>
                 <button
                   className="btn"
-                  disabled={busy}
+                  disabled={unavailable}
                   onClick={async () => {
                     setBusy(true);
                     setErr("");
@@ -422,13 +554,13 @@ export default function BigToolsModal() {
                       </option>
                     ))}
                   </select>
-                  <button className="btn" disabled={busy || !table} onClick={() => void run("Extract table", () => BigFile.SqlExtractTableViaDialog(fileId, table))}>
+                  <button className="btn" disabled={unavailable || !table} onClick={() => void run("Extract table", () => BigFile.SqlExtractTableViaDialog(fileId, table))}>
                     Whole
                   </button>
-                  <button className="btn" disabled={busy || !table} onClick={() => void run("Extract schema", () => BigFile.SqlExtractSchemaViaDialog(fileId, table))}>
+                  <button className="btn" disabled={unavailable || !table} onClick={() => void run("Extract schema", () => BigFile.SqlExtractSchemaViaDialog(fileId, table))}>
                     Schema
                   </button>
-                  <button className="btn" disabled={busy || !table} onClick={() => void run("Extract data", () => BigFile.SqlExtractDataViaDialog(fileId, table))}>
+                  <button className="btn" disabled={unavailable || !table} onClick={() => void run("Extract data", () => BigFile.SqlExtractDataViaDialog(fileId, table))}>
                     Data
                   </button>
                 </div>
@@ -436,7 +568,7 @@ export default function BigToolsModal() {
 
               <div className="bigtools__tool">
                 <b>Split by table</b>
-                <button className="btn" disabled={busy} onClick={() => void run("Split by table", () => BigFile.SqlSplitByTableViaDialog(fileId))}>
+                <button className="btn" disabled={unavailable} onClick={() => void run("Split by table", () => BigFile.SqlSplitByTableViaDialog(fileId))}>
                   Write one file per table
                 </button>
               </div>
@@ -451,7 +583,7 @@ export default function BigToolsModal() {
                   {reshapeMode === "multi" && (
                     <input type="number" min={1} value={batchSize} onChange={(e) => setBatchSize(Math.max(1, +e.target.value))} style={{ width: 80 }} />
                   )}
-                  <button className="btn" disabled={busy} onClick={() => void run("Reshape", () => BigFile.SqlReshapeInsertsViaDialog(fileId, reshapeMode, batchSize))}>
+                  <button className="btn" disabled={unavailable} onClick={() => void run("Reshape", () => BigFile.SqlReshapeInsertsViaDialog(fileId, reshapeMode, batchSize))}>
                     Run
                   </button>
                 </div>
@@ -461,7 +593,7 @@ export default function BigToolsModal() {
                 <b>Sample fixture</b>
                 <div className="bigtools__row">
                   <input type="number" min={1} value={fixtureRows} onChange={(e) => setFixtureRows(Math.max(1, +e.target.value))} style={{ width: 80 }} /> rows / table
-                  <button className="btn" disabled={busy} onClick={() => void run("Fixture", () => BigFile.SqlSampleFixtureViaDialog(fileId, fixtureRows))}>
+                  <button className="btn" disabled={unavailable} onClick={() => void run("Fixture", () => BigFile.SqlSampleFixtureViaDialog(fileId, fixtureRows))}>
                     Run
                   </button>
                 </div>
@@ -483,7 +615,7 @@ export default function BigToolsModal() {
                   <label className="bigtools__check">
                     <input type="checkbox" checked={reWhole} onChange={(e) => setReWhole(e.target.checked)} /> whole word
                   </label>
-                  <button className="btn" disabled={busy || !findStr} onClick={() => void run("Replace", () => BigFile.SqlReplaceViaDialog(fileId, findStr, replStr, reRegex, reCase, reWhole))}>
+                  <button className="btn" disabled={unavailable || !findStr} onClick={() => void run("Replace", () => BigFile.SqlReplaceViaDialog(fileId, findStr, replStr, reRegex, reCase, reWhole))}>
                     Run
                   </button>
                 </div>
@@ -510,7 +642,7 @@ export default function BigToolsModal() {
                         style={{ width: 90 }}
                       />
                     ))}
-                    <button className="btn" disabled={busy || !preset} onClick={() => void run("Preset", () => BigFile.SqlApplyPresetViaDialog(fileId, preset, presetArgs[0], presetArgs[1], presetArgs[2], presetArgs[3]))}>
+                    <button className="btn" disabled={unavailable || !preset} onClick={() => void run("Preset", () => BigFile.SqlApplyPresetViaDialog(fileId, preset, presetArgs[0], presetArgs[1], presetArgs[2], presetArgs[3]))}>
                       Run
                     </button>
                   </div>
@@ -526,7 +658,7 @@ export default function BigToolsModal() {
               <label className="bigtools__check">
                 <input type="checkbox" checked={harvestCi} onChange={(e) => setHarvestCi(e.target.checked)} /> ignore case
               </label>
-              <button className="btn" disabled={busy || !harvestPat} onClick={() => void run("Harvest", () => BigFile.HarvestMatchesViaDialog(fileId, harvestPat, harvestCi))}>
+              <button className="btn" disabled={unavailable || !harvestPat} onClick={() => void run("Harvest", () => BigFile.HarvestMatchesViaDialog(fileId, harvestPat, harvestCi))}>
                 Run
               </button>
             </div>
@@ -535,10 +667,22 @@ export default function BigToolsModal() {
 
         {err && <div className="bigtools__err">{err}</div>}
         {result && <div className="bigtools__ok">{result}</div>}
+        {busy && (
+          <div className="bigtools__ok" role="status" aria-live="polite">
+            {activeJob
+              ? `${activeJob.title} · ${activeJob.records.toLocaleString()} records${activeJob.note ? ` · ${activeJob.note}` : ""}`
+              : "Starting transform…"}
+          </div>
+        )}
 
         <div className="modal__actions">
           {busy && <Loader2 size={14} className="spin" />}
-          <button className="btn" onClick={close}>
+          {busy && activeJob && (
+            <button className="btn btn--danger" disabled={canceling} onClick={() => void cancelTransform()}>
+              {canceling ? "Cancelling…" : "Cancel transform"}
+            </button>
+          )}
+          <button ref={closeRef} className="btn" disabled={busy} onClick={requestClose}>
             Close
           </button>
         </div>

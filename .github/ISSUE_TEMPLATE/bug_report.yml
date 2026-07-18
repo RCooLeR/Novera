@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible Novera defect using synthetic data
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities or include credentials, private file contents, model transcripts, database data, or identifying local paths here. Use the private process in SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build identity
+      description: Version, commit, channel, and build date shown in About
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Experimental mobile target
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction with disposable data
+      description: Give minimal steps and a synthetic fixture, if needed.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Remove credentials, content, prompts, responses, and raw paths before pasting diagnostics.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I used data and systems I own or am authorized to test.
+          required: true
+        - label: This report does not contain a vulnerability or sensitive data.
+          required: true

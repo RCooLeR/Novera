@@ -15,6 +15,26 @@ import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Cr
 import * as $models from "./models.js";
 
 /**
+ * BuildTableQuery constructs the schema-browser preview query inside the
+ * backend, where the connection dialect is known. The renderer supplies
+ * identity as structured data and never interpolates identifiers into SQL.
+ */
+export function BuildTableQuery(id: string, schema: string, table: string, limit: number): $CancellablePromise<string> {
+    return $Call.ByID(2500588982, id, schema, table, limit);
+}
+
+/**
+ * CredentialStatuses returns only backend-verified availability states. A
+ * SecretRef is metadata, not proof that decryptable credential material is
+ * present. Legacy refs remain deliberately quarantined even when readable.
+ */
+export function CredentialStatuses(): $CancellablePromise<$models.ProfileCredentialStatus[]> {
+    return $Call.ByID(3307991105).then(($result: any) => {
+        return $$createType1($result);
+    });
+}
+
+/**
  * DeleteProfile removes a profile and its stored credential.
  */
 export function DeleteProfile(id: string): $CancellablePromise<void> {
@@ -22,13 +42,24 @@ export function DeleteProfile(id: string): $CancellablePromise<void> {
 }
 
 /**
- * ListColumns returns the columns of a table for the schema browser. The query
- * is service-issued (not user SQL); sqlite identifiers are validated, network
- * engines use bound parameters.
+ * DeleteProfileReconciled reports a published deletion as a structured
+ * forward commit with a durable warning. Pre-publication failures remain
+ * ordinary errors and do not remove renderer state.
  */
-export function ListColumns(id: string, table: string): $CancellablePromise<$models.Column[]> {
-    return $Call.ByID(294926913, id, table).then(($result: any) => {
-        return $$createType1($result);
+export function DeleteProfileReconciled(id: string): $CancellablePromise<$models.DeleteProfileResult> {
+    return $Call.ByID(2629625238, id).then(($result: any) => {
+        return $$createType2($result);
+    });
+}
+
+/**
+ * ListColumns returns the columns of a table for the schema browser. The query
+ * is service-issued (not user SQL), and schema/table identity is always passed
+ * as bound data rather than interpolated into SQL.
+ */
+export function ListColumns(id: string, schema: string, table: string): $CancellablePromise<$models.Column[]> {
+    return $Call.ByID(294926913, id, schema, table).then(($result: any) => {
+        return $$createType4($result);
     });
 }
 
@@ -37,7 +68,7 @@ export function ListColumns(id: string, table: string): $CancellablePromise<$mod
  */
 export function ListProfiles(): $CancellablePromise<$models.Profile[]> {
     return $Call.ByID(372126764).then(($result: any) => {
-        return $$createType3($result);
+        return $$createType6($result);
     });
 }
 
@@ -46,14 +77,14 @@ export function ListProfiles(): $CancellablePromise<$models.Profile[]> {
  */
 export function ListTables(id: string): $CancellablePromise<$models.Table[]> {
     return $Call.ByID(1247256711, id).then(($result: any) => {
-        return $$createType5($result);
+        return $$createType8($result);
     });
 }
 
 /**
- * LoadError returns a user-facing message if the saved profiles file was corrupt
- * on load (and was backed up), or "" otherwise. Bound to the UI so the silent
- * "my connections disappeared" case becomes visible.
+ * LoadError returns a user-facing message when saved profiles could not be
+ * safely loaded or finalized. Mutations stay blocked for this Service lifetime
+ * so the on-disk state cannot be overwritten after an uncertain load outcome.
  */
 export function LoadError(): $CancellablePromise<string> {
     return $Call.ByID(3544410456);
@@ -64,17 +95,31 @@ export function LoadError(): $CancellablePromise<string> {
  */
 export function Query(id: string, query: string, limit: number): $CancellablePromise<$models.QueryResult> {
     return $Call.ByID(1437416626, id, query, limit).then(($result: any) => {
-        return $$createType6($result);
+        return $$createType9($result);
     });
 }
 
 /**
- * SaveProfile creates or updates a profile. A non-empty Password is stored
- * (encrypted) in the secret store and cleared from the persisted profile.
+ * SaveProfile creates or updates a profile. Profile IDs and credential refs are
+ * backend owned: a caller may update an existing ID or create with an empty ID,
+ * but can never attach a supplied SecretRef. A non-empty Password is stored
+ * under the ref derived from this exact profile connection scope.
  */
 export function SaveProfile(p: $models.Profile): $CancellablePromise<$models.Profile> {
     return $Call.ByID(2324040180, p).then(($result: any) => {
-        return $$createType2($result);
+        return $$createType5($result);
+    });
+}
+
+/**
+ * SaveProfileReconciled converts only the post-publication finalization error
+ * into a structured success-with-warning. This lets the renderer retain the
+ * backend-issued ID and reload the visible forward-committed state without a
+ * duplicate create retry. Ordinary failures remain errors.
+ */
+export function SaveProfileReconciled(p: $models.Profile): $CancellablePromise<$models.SaveProfileResult> {
+    return $Call.ByID(477166292, p).then(($result: any) => {
+        return $$createType10($result);
     });
 }
 
@@ -83,16 +128,20 @@ export function SaveProfile(p: $models.Profile): $CancellablePromise<$models.Pro
  */
 export function TestProfile(id: string): $CancellablePromise<$models.TestResult> {
     return $Call.ByID(2774820891, id).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType11($result);
     });
 }
 
 // Private type creation functions
-const $$createType0 = $models.Column.createFrom;
+const $$createType0 = $models.ProfileCredentialStatus.createFrom;
 const $$createType1 = $Create.Array($$createType0);
-const $$createType2 = $models.Profile.createFrom;
-const $$createType3 = $Create.Array($$createType2);
-const $$createType4 = $models.Table.createFrom;
-const $$createType5 = $Create.Array($$createType4);
-const $$createType6 = $models.QueryResult.createFrom;
-const $$createType7 = $models.TestResult.createFrom;
+const $$createType2 = $models.DeleteProfileResult.createFrom;
+const $$createType3 = $models.Column.createFrom;
+const $$createType4 = $Create.Array($$createType3);
+const $$createType5 = $models.Profile.createFrom;
+const $$createType6 = $Create.Array($$createType5);
+const $$createType7 = $models.Table.createFrom;
+const $$createType8 = $Create.Array($$createType7);
+const $$createType9 = $models.QueryResult.createFrom;
+const $$createType10 = $models.SaveProfileResult.createFrom;
+const $$createType11 = $models.TestResult.createFrom;

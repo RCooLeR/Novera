@@ -52,7 +52,7 @@ func TestReplacePlainFileCompletedManifestFailurePreservesSourceAndOutput(t *tes
 	}
 
 	manifestErr := errors.New("completed manifest write failed")
-	restore := failReplaceManifestOpenOnCall(t, 3, manifestErr)
+	restore := failReplaceManifestOpenOnCall(t, 4, manifestErr)
 	defer restore()
 
 	summary, err := ReplacePlainFile(context.Background(), srcPath, outPath, []byte("hello"), []byte("bye"), FileOptions{ChunkSize: 5})
@@ -236,7 +236,7 @@ func TestReplaceTransformCompletedManifestFailurePreservesSourceAndOutput(t *tes
 			}
 
 			manifestErr := errors.New("completed manifest write failed")
-			restore := failReplaceManifestOpenOnCall(t, 3, manifestErr)
+			restore := failReplaceManifestOpenOnCall(t, 4, manifestErr)
 			defer restore()
 
 			summary, err := tt.run(context.Background(), srcPath, outPath)
@@ -271,6 +271,53 @@ func failReplaceManifestOpenOnCall(t *testing.T, failCall int, err error) func()
 	return func() {
 		openManifestOut = original
 	}
+}
+
+func TestManifestUpdateFailurePreservesPreviousJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "output.sql.quarry.manifest.json")
+	initial := Manifest{Operation: "plain-replace", Source: "source.sql", Output: "output.sql", Phase: "processing", Status: "running"}
+	if err := writeManifest(path, initial, true); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	original := openManifestOut
+	openManifestOut = func(path string, exclusive bool) (io.WriteCloser, error) {
+		out, err := original(path, exclusive)
+		if err != nil {
+			return nil, err
+		}
+		return &partialManifestWriter{WriteCloser: out}, nil
+	}
+	t.Cleanup(func() { openManifestOut = original })
+
+	updated := initial
+	updated.Phase = "ready_to_finalize"
+	if err := writeManifest(path, updated, false); err == nil {
+		t.Fatal("expected staged manifest write failure")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("primary manifest changed after failed staged write:\n%s", got)
+	}
+}
+
+type partialManifestWriter struct {
+	io.WriteCloser
+}
+
+func (w *partialManifestWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, errors.New("injected manifest write failure")
+	}
+	n, _ := w.WriteCloser.Write(p[:max(1, len(p)/2)])
+	return n, errors.New("injected manifest write failure")
 }
 
 func assertReplaceFileContent(t *testing.T, path string, want string) {

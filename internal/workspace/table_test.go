@@ -64,6 +64,32 @@ func TestQueryTableBrowsePaging(t *testing.T) {
 	}
 }
 
+func TestQueryTableRejectsFirstRowThatCannotFitBesideHeader(t *testing.T) {
+	root := t.TempDir()
+	headerCell := strings.Repeat("h", tableCellMaxBytes)
+	dataCell := strings.Repeat("r", tableCellMaxBytes)
+	header := strings.Repeat(headerCell+",", 14) + headerCell + "\n"
+	row := dataCell + "," + dataCell + "\n"
+	if err := os.WriteFile(filepath.Join(root, "wide.csv"), []byte(header+row), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	if _, err := s.Open(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	queries := []TableQuery{
+		{Limit: 10, SortCol: -1},
+		{Limit: 10, Filter: "r", SortCol: -1},
+	}
+	for _, q := range queries {
+		if _, err := s.QueryTable("wide.csv", q); err == nil || !strings.Contains(err.Error(), "cannot fit beside the header") {
+			t.Fatalf("QueryTable(%+v) error = %v, want unpageable-row refusal", q, err)
+		}
+	}
+}
+
 func TestQueryTableBrowseResume(t *testing.T) {
 	s := newSvc(t) // 5000 rows
 	// Page sequentially; the resume cursor must keep rows contiguous and correct.
@@ -161,6 +187,62 @@ func TestScanCSVRowsQuotedNewlines(t *testing.T) {
 	}
 	if len(p.Rows) != 3 || !strings.Contains(p.Rows[1][1], "line two") {
 		t.Fatalf("quoted-newline rows parsed wrong: %v", p.Rows)
+	}
+}
+
+func TestCSVIndexUsesLazyQuotesParserOffsets(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	b.WriteString("id,note\n")
+	for i := 0; i < 4500; i++ {
+		if i == 7 {
+			fmt.Fprintf(&b, "%d,abc\"def\n", i) // quote in an unquoted field: valid only with LazyQuotes
+		} else {
+			fmt.Fprintf(&b, "%d,row-%d\n", i, i)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "lazy.csv"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	if _, err := s.Open(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	info, err := s.TableInfo("lazy.csv", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Rows != 4500 || !info.Indexed {
+		t.Fatalf("TableInfo = %+v, want 4500 indexed rows", info)
+	}
+	p, err := s.QueryTable("lazy.csv", TableQuery{Offset: 3777, Limit: 4, SortCol: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Rows) != 4 || p.Rows[0][0] != "3777" || p.Rows[3][0] != "3780" {
+		t.Fatalf("indexed LazyQuotes seek returned wrong rows: %v", p.Rows)
+	}
+}
+
+func TestQueryTableRejectsOversizedCell(t *testing.T) {
+	root := t.TempDir()
+	body := "id,payload\n1," + strings.Repeat("x", tableCellMaxBytes+1) + "\n"
+	if err := os.WriteFile(filepath.Join(root, "wide.csv"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	if _, err := s.Open(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	for _, q := range []TableQuery{
+		{Limit: 10, SortCol: -1},
+		{Limit: 10, SortCol: 0, SortDir: 1},
+	} {
+		if _, err := s.QueryTable("wide.csv", q); err == nil || !strings.Contains(err.Error(), "table cell") {
+			t.Fatalf("QueryTable(%+v) error = %v, want cell byte-limit refusal", q, err)
+		}
 	}
 }
 

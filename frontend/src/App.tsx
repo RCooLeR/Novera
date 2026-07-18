@@ -1,16 +1,21 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Events } from "@wailsio/runtime";
-import { useStore } from "./state/store";
+import { isUnsavedResourceTab, useStore } from "./state/store";
 import BootSplash from "./components/BootSplash";
 import { runMenuAction } from "./lib/menuActions";
-import type { AppMenuAction } from "./lib/menuActions";
+import {
+  parseAgentEvent,
+  parseChangedPath,
+  parseErrorMessage,
+  parseLLMEvent,
+  parseMenuAction,
+} from "./lib/bridgeEvents";
 import TitleBar from "./components/TitleBar";
 import AssistantPanel from "./components/AssistantPanel";
 import ActivityBar from "./components/ActivityBar";
 import SideBar from "./components/SideBar";
-import EditorTabs from "./components/EditorTabs";
+import EditorTabs, { editorTabId } from "./components/EditorTabs";
 import Breadcrumb from "./components/Breadcrumb";
-import EditorPane from "./components/EditorPane";
 import StatusBar from "./components/StatusBar";
 import Welcome from "./components/Welcome";
 import Panel from "./components/Panel";
@@ -24,10 +29,23 @@ import AuditLogModal from "./components/AuditLogModal";
 import CleanDumpModal from "./components/CleanDumpModal";
 import BigToolsModal from "./components/BigToolsModal";
 import AboutModal from "./components/AboutModal";
+import { fitPanelLayout } from "./lib/layoutSizing";
+import { errMessage, Shell } from "./lib/services";
+
+// Monaco and its language workers are by far the largest renderer dependency.
+// Keep them out of the welcome-screen startup graph and load the editor pane
+// only after a workspace actually needs it.
+const EditorPane = lazy(() => import("./components/EditorPaneRouter"));
+
+// Preserve dirty-state report ordering even if the bridge executes service
+// calls concurrently. A late "dirty" report must not overwrite a newer clean
+// state (or vice versa) in the native close gate.
+let unsavedResourceReport = Promise.resolve();
 
 export default function App() {
   // One-shot boot splash, shown over the whole app until startup finishes.
   const [booted, setBooted] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const appReady = useStore((s) => s.appReady);
   const init = useStore((s) => s.init);
   const isOpen = useStore((s) => s.isOpen);
@@ -47,42 +65,81 @@ export default function App() {
   const failStream = useStore((s) => s.failStream);
   const handleAgentEvent = useStore((s) => s.handleAgentEvent);
   const reloadIfChanged = useStore((s) => s.reloadIfChanged);
+  const setStatus = useStore((s) => s.setStatus);
+  const activePath = useStore((s) => s.activePath);
+  const activeTabIndex = useStore((s) => s.tabs.findIndex((tab) => tab.path === s.activePath));
+  const requestCloseTab = useStore((s) => s.requestCloseTab);
+  const hasUnsavedResources = useStore((s) => s.tabs.some(isUnsavedResourceTab));
 
   useEffect(() => {
     void init();
   }, [init]);
+
+  useEffect(() => {
+    const updateViewportWidth = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", updateViewportWidth);
+    return () => window.removeEventListener("resize", updateViewportWidth);
+  }, []);
+
+  useEffect(() => {
+    unsavedResourceReport = unsavedResourceReport
+      .then(() => Shell.SetUnsavedResources(hasUnsavedResources))
+      .catch((error: unknown) => {
+        setStatus(`Could not update the native close guard: ${errMessage(error)}`, "error");
+      });
+  }, [hasUnsavedResources, setStatus]);
+
+  useEffect(() => {
+    if (!hasUnsavedResources) return;
+    const protectUnsavedResources = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", protectUnsavedResources);
+    return () => window.removeEventListener("beforeunload", protectUnsavedResources);
+  }, [hasUnsavedResources]);
 
   // Route streamed LLM tokens from Go events into the chat store.
   useEffect(() => {
     // Event payloads cross the Go↔JS bridge as `unknown`; validate field types at
     // runtime before use rather than blindly casting (a malformed/empty payload
     // would otherwise feed `undefined` into the store).
-    const pick = (e: { data: unknown }): Record<string, unknown> | null => {
-      const d = Array.isArray(e.data) ? e.data[0] : e.data;
-      return d && typeof d === "object" ? (d as Record<string, unknown>) : null;
+    const rejectChatEvent = (message: string) => {
+      setStatus(message, "error");
+      useStore.getState().cancelChat();
     };
-    const str = (v: unknown): string => (typeof v === "string" ? v : "");
     const offDelta = Events.On("llm:delta", (e: { data: unknown }) => {
-      const p = pick(e);
-      if (p && typeof p.id === "string") appendDelta(p.id, str(p.delta));
+      const payload = parseLLMEvent(e.data);
+      if (payload && payload.delta !== undefined) appendDelta(payload.id, payload.delta, payload.seq);
+      else rejectChatEvent("Stopped the assistant after receiving a malformed stream event.");
     });
     const offDone = Events.On("llm:done", (e: { data: unknown }) => {
-      const p = pick(e);
-      if (p && typeof p.id === "string") finishStream(p.id);
+      const payload = parseLLMEvent(e.data);
+      if (payload) finishStream(payload.id, payload.seq);
+      else rejectChatEvent("Stopped the assistant after receiving a malformed completion event.");
     });
     const offErr = Events.On("llm:error", (e: { data: unknown }) => {
-      const p = pick(e);
-      if (p && typeof p.id === "string") failStream(p.id, str(p.message));
+      const payload = parseLLMEvent(e.data);
+      if (payload && payload.message !== undefined) failStream(payload.id, payload.message || "Assistant error", payload.seq);
+      else rejectChatEvent("Stopped the assistant after receiving a malformed error event.");
     });
     const offAgent = Events.On("agent:event", (e: { data: unknown }) => {
-      const p = pick(e);
-      if (p && typeof p.runId === "string" && typeof p.type === "string") {
-        handleAgentEvent(p as unknown as Parameters<typeof handleAgentEvent>[0]);
+      const payload = parseAgentEvent(e.data);
+      if (payload) {
+        handleAgentEvent(payload);
+      } else {
+        rejectChatEvent("Stopped the agent after receiving a malformed event.");
       }
     });
     const offFs = Events.On("fs:changed", (e: { data: unknown }) => {
-      const p = (Array.isArray(e.data) ? e.data[0] : e.data) as { path?: string };
-      if (p?.path) void reloadIfChanged(p.path);
+      const path = parseChangedPath(e.data);
+      if (path) void reloadIfChanged(path);
+      else setStatus("Ignored a malformed filesystem change event.", "error");
+    });
+    const offFsError = Events.On("fs:watch-error", (e: { data: unknown }) => {
+      const message = parseErrorMessage(e.data);
+      if (message) setStatus(message, "error");
+      else setStatus("The filesystem watcher reported a malformed error event.", "error");
     });
     const offJobs = Events.On("jobs:changed", () => {
       void useStore.getState().loadJobs();
@@ -91,8 +148,12 @@ export default function App() {
       void useStore.getState().loadArtifacts();
     });
     const offMenu = Events.On("menu", (e: { data: unknown }) => {
-      const action = String(Array.isArray(e.data) ? e.data[0] : e.data);
-      runMenuAction(action as AppMenuAction);
+      const action = parseMenuAction(e.data);
+      if (action) runMenuAction(action);
+      else setStatus("Ignored an unknown application menu action.", "error");
+    });
+    const offCloseBlocked = Events.On("app:close-blocked", () => {
+      setStatus("Save or explicitly discard all unsaved changes before closing Novera.", "error");
     });
     return () => {
       offDelta();
@@ -100,14 +161,17 @@ export default function App() {
       offErr();
       offAgent();
       offFs();
+      offFsError();
       offJobs();
       offArtifacts();
       offMenu();
+      offCloseBlocked();
     };
-  }, [appendDelta, finishStream, failStream, handleAgentEvent, reloadIfChanged]);
+  }, [appendDelta, finishStream, failStream, handleAgentEvent, reloadIfChanged, setStatus]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!booted) return;
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
       // Don't hijack toggle/palette shortcuts while typing in a plain input or
@@ -132,6 +196,11 @@ export default function App() {
         void pickAndOpen();
         return;
       }
+      if (mod && key === "w" && activePath) {
+        e.preventDefault();
+        requestCloseTab(activePath);
+        return;
+      }
       if (inPlainField) return;
       if (mod && e.shiftKey && key === "p") {
         e.preventDefault();
@@ -149,10 +218,24 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [pickAndOpen, saveActive, toggleSidebar, togglePanel, openPalette]);
+  }, [activePath, booted, pickAndOpen, requestCloseTab, saveActive, toggleSidebar, togglePanel, openPalette]);
 
-  const showSidebar = isOpen && sidebarVisible;
-  const showAssistant = isOpen && assistantVisible;
+  const layout = fitPanelLayout(
+    viewportWidth,
+    isOpen && sidebarVisible,
+    isOpen && assistantVisible,
+    sidebarWidth,
+    assistantWidth,
+  );
+  const showSidebar = layout.showSidebar;
+  const showAssistant = layout.showAssistant;
+
+  useEffect(() => {
+    const fitted: { sidebarWidth?: number; assistantWidth?: number } = {};
+    if (showSidebar && layout.sidebarWidth !== sidebarWidth) fitted.sidebarWidth = layout.sidebarWidth;
+    if (showAssistant && layout.assistantWidth !== assistantWidth) fitted.assistantWidth = layout.assistantWidth;
+    if (Object.keys(fitted).length) useStore.setState(fitted);
+  }, [assistantWidth, layout.assistantWidth, layout.sidebarWidth, showAssistant, showSidebar, sidebarWidth]);
 
   return (
     <div className="app">
@@ -161,8 +244,8 @@ export default function App() {
       <div
         className="app-body"
         style={{
-          gridTemplateColumns: `var(--activitybar-w) ${showSidebar ? sidebarWidth + "px" : "0px"} 1fr ${
-            showAssistant ? assistantWidth + "px" : "0px"
+          gridTemplateColumns: `var(--activitybar-w) ${showSidebar ? layout.sidebarWidth + "px" : "0px"} 1fr ${
+            showAssistant ? layout.assistantWidth + "px" : "0px"
           }`,
         }}
       >
@@ -174,8 +257,15 @@ export default function App() {
               <div className="editor-area">
                 <EditorTabs />
                 <Breadcrumb />
-                <div className="editor-host">
-                  <EditorPane />
+                <div
+                  id="editor-tabpanel"
+                  className="editor-host"
+                  role="tabpanel"
+                  aria-labelledby={activeTabIndex >= 0 ? editorTabId(activeTabIndex) : undefined}
+                >
+                  <Suspense fallback={<div className="editor-placeholder" role="status">Loading editor…</div>}>
+                    <EditorPane />
+                  </Suspense>
                 </div>
               </div>
               {panelMounted && <Panel hidden={!panelVisible} />}

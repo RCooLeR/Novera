@@ -2,6 +2,7 @@ package replace
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +133,7 @@ func TestFindRecoveryStatesKeepsLegacyInPlaceManifest(t *testing.T) {
 
 func TestFindRecoveryStatesLogsMalformedManifestAndContinues(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv(settings.ConfigDirEnv, filepath.Join(dir, "quarry-home"))
+	t.Setenv(settings.ConfigDirEnv, filepath.Join(dir, "novera-bigfile-home"))
 	sourcePath := filepath.Join(dir, "source.sql")
 	if err := os.WriteFile(sourcePath, []byte("select 1;\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -163,7 +164,7 @@ func TestFindRecoveryStatesLogsMalformedManifestAndContinues(t *testing.T) {
 		t.Fatalf("states = %#v, want only valid manifest", states)
 	}
 
-	logPath := filepath.Join(dir, "quarry-home", "quarry.log")
+	logPath := filepath.Join(dir, "novera-bigfile-home", "novera-bigfile.log")
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
@@ -176,21 +177,55 @@ func TestFindRecoveryStatesLogsMalformedManifestAndContinues(t *testing.T) {
 
 func TestDeleteRecoveryTempRemovesPartialOutput(t *testing.T) {
 	dir := t.TempDir()
-	tempPath := filepath.Join(dir, "output.sql.quarry.tmp")
+	sourcePath := filepath.Join(dir, "source.sql")
+	outputPath := filepath.Join(dir, "output.sql")
+	tempPath := outputPath + ".quarry.tmp"
+	manifestPath := outputPath + ".quarry.manifest.json"
+	if err := os.WriteFile(sourcePath, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(tempPath, []byte("partial"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	state := RecoveryState{
-		Manifest: Manifest{
-			TempOutput: tempPath,
-		},
+	if err := writeManifest(manifestPath, Manifest{
+		Operation:  "plain-replace",
+		Source:     sourcePath,
+		Output:     outputPath,
+		TempOutput: tempPath,
+		Phase:      "processing",
+		Status:     "failed",
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	state, err := InspectRecoveryManifest(manifestPath)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := DeleteRecoveryTemp(state); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
 		t.Fatalf("temp path should be removed, stat err = %v", err)
+	}
+}
+
+func TestInspectRecoveryManifestRejectsUnboundOutputAndTempPaths(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "safe.sql.quarry.manifest.json")
+	victim := filepath.Join(dir, "victim.sql")
+	if err := os.WriteFile(victim, []byte("do not touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf(`{"operation":"plain-replace","source":%q,"output":%q,"tempOutput":%q,"status":"failed"}`,
+		filepath.Join(dir, "source.sql"), victim, victim)
+	if err := os.WriteFile(manifestPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectRecoveryManifest(manifestPath); err == nil || !strings.Contains(err.Error(), "not bound") {
+		t.Fatalf("inspect error = %v, want path-binding rejection", err)
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "do not touch" {
+		t.Fatalf("victim changed: %q, %v", got, err)
 	}
 }
 

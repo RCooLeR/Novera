@@ -2,15 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <!-- Content Security Policy: assets are bundled and served from the app
-         origin; LLM/DB traffic goes through the Go backend, not the webview.
-         This blocks remote script/style/image/connect loads (so a rendered
-         workspace file can't beacon out or pull remote code), while still
-         allowing Monaco's inline styles + blob workers. ws/wss are kept for the
-         Vite dev server's HMR socket. -->
+    <!-- Vite replaces this placeholder with separate development/production
+         policies. Production permits bundled scripts only; development alone
+         receives the inline/eval/websocket allowances required by HMR. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'"
+      content="__NOVERA_CSP__"
     />
     <link rel="icon" type="image/png" href="/novera-logo.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

@@ -8,8 +8,11 @@ export {
 
 export {
     Column,
+    DeleteProfileResult,
     Profile,
+    ProfileCredentialStatus,
     QueryResult,
+    SaveProfileResult,
     Table,
     TestResult
 } from "./models.js";

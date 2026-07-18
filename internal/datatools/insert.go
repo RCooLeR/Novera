@@ -5,6 +5,43 @@ import (
 	"strings"
 )
 
+type statementTerminator struct {
+	inString bool
+	escaped  bool
+}
+
+func (s *statementTerminator) Feed(text string) bool {
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if s.inString {
+			if s.escaped {
+				s.escaped = false
+				continue
+			}
+			if c == '\\' {
+				s.escaped = true
+				continue
+			}
+			if c == '\'' {
+				if i+1 < len(text) && text[i+1] == '\'' {
+					i++
+					continue
+				}
+				s.inString = false
+			}
+			continue
+		}
+		if c == '\'' {
+			s.inString = true
+			continue
+		}
+		if c == ';' {
+			return true
+		}
+	}
+	return false
+}
+
 // reInsertInto matches the head of a mysqldump-style INSERT, capturing the table
 // (1) and an optional column list (3). The VALUES tuples follow (parsed separately).
 var reInsertInto = regexp.MustCompile("(?i)^\\s*INSERT\\s+(?:IGNORE\\s+)?INTO\\s+`?([\\w.$]+)`?\\s*(\\(([^)]*)\\))?\\s+VALUES")

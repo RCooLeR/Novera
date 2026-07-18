@@ -15,11 +15,11 @@ import (
 // streaming transforms (which all honor ctx) abort and clean up their partial
 // output. Progress/start/end are pushed to the frontend as application events.
 type jobManager struct {
-	mu      sync.Mutex
-	seq     int64
-	id      string
-	title   string
-	cancel  context.CancelFunc
+	mu     sync.Mutex
+	seq    int64
+	id     string
+	title  string
+	cancel context.CancelFunc
 }
 
 func (s *FileService) jobs() *jobManager {
@@ -39,6 +39,10 @@ func emitEvent(name string, data any) {
 // emitting start/progress/end events. progress(records, note) may be called by
 // fn to report incremental work.
 func (s *FileService) withJob(title string, fn func(ctx context.Context, progress func(records int64, note string)) (TransformResult, error)) (TransformResult, error) {
+	return withJobResult(s, title, fn)
+}
+
+func withJobResult[T any](s *FileService, title string, fn func(ctx context.Context, progress func(int64, string)) (T, error)) (result T, err error) {
 	jm := s.jobs()
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -46,9 +50,11 @@ func (s *FileService) withJob(title string, fn func(ctx context.Context, progres
 	if jm.id != "" {
 		// Only one in-flight transform is tracked/cancellable at a time; a second
 		// would overwrite the first's cancel handle and make it uncancellable.
+		activeTitle := jm.title
 		jm.mu.Unlock()
 		cancel()
-		return TransformResult{}, fmt.Errorf("another transform is already running (%s)", jm.title)
+		var zero T
+		return zero, fmt.Errorf("another transform is already running (%s)", activeTitle)
 	}
 	jm.seq++
 	id := fmt.Sprintf("job%d", jm.seq)
@@ -62,20 +68,22 @@ func (s *FileService) withJob(title string, fn func(ctx context.Context, progres
 		emitEvent("bigfile:job-progress", map[string]any{"id": id, "records": records, "note": note})
 	}
 
-	res, err := fn(ctx, progress)
+	defer func() {
+		jm.mu.Lock()
+		if jm.id == id {
+			jm.id, jm.title, jm.cancel = "", "", nil
+		}
+		jm.mu.Unlock()
+		cancel()
+		emitEvent("bigfile:job-end", map[string]any{"id": id})
+		if errors.Is(err, context.Canceled) {
+			var zero T
+			result = zero
+			err = fmt.Errorf("cancelled: %w", context.Canceled)
+		}
+	}()
 
-	jm.mu.Lock()
-	if jm.id == id {
-		jm.id, jm.title, jm.cancel = "", "", nil
-	}
-	jm.mu.Unlock()
-	cancel()
-
-	emitEvent("bigfile:job-end", map[string]any{"id": id})
-	if errors.Is(err, context.Canceled) {
-		return TransformResult{}, errors.New("cancelled")
-	}
-	return res, err
+	return fn(ctx, progress)
 }
 
 // CancelJob cancels the active long transform, if any. The transform aborts and

@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +14,6 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"novera/internal/bigfile/encodingx"
-	sqlanalyze "novera/internal/bigfile/plugins/sql/analyze"
 	"novera/internal/bigfile/regexutil"
 	"novera/internal/bigfile/search"
 	"novera/internal/bigfile/session"
@@ -51,7 +50,7 @@ type FileService struct {
 	reg *session.Registry
 
 	sqlMu      sync.Mutex
-	sqlSummary map[string]sqlanalyze.Summary // cached SQL dump analysis per file id
+	sqlSummary map[string]cachedSQLSummary // cached by file id and immutable document generation
 
 	jobOnce sync.Once
 	jobMgr  *jobManager
@@ -61,7 +60,7 @@ type FileService struct {
 func NewFileService() *FileService {
 	return &FileService{
 		reg:        session.New(),
-		sqlSummary: make(map[string]sqlanalyze.Summary),
+		sqlSummary: make(map[string]cachedSQLSummary),
 	}
 }
 
@@ -95,7 +94,7 @@ type Window struct {
 func (s *FileService) OpenViaDialog() (FileMeta, error) {
 	path, err := application.Get().Dialog.OpenFile().
 		CanChooseFiles(true).
-		SetTitle("Open file in Quarry").
+		SetTitle("Open file in Novera").
 		AddFilter("All files (*.*)", "*.*").
 		AddFilter("Data & dumps (*.sql, *.csv, *.tsv, *.log, *.txt, *.json)", "*.sql;*.csv;*.tsv;*.log;*.txt;*.json").
 		PromptForSingleSelection()
@@ -109,13 +108,14 @@ func (s *FileService) OpenViaDialog() (FileMeta, error) {
 }
 
 // OpenFile opens path, starts background indexing, and returns its metadata.
+// Opening a file is intentionally non-mutating: adjacent recovery artifacts
+// are left untouched for an explicit, user-confirmed recovery workflow.
 func (s *FileService) OpenFile(path string) (FileMeta, error) {
-	recoverInPlace(path) // replay any leftover in-place patch sidecar first
 	f, err := s.reg.Open(path)
 	if err != nil {
 		return FileMeta{}, err
 	}
-	f.StartIndexing()
+	defer f.Release()
 	m := f.Doc.Metadata()
 	return FileMeta{
 		FileID:   f.ID,
@@ -130,7 +130,9 @@ func (s *FileService) OpenFile(path string) (FileMeta, error) {
 
 // CloseFile releases a file's resources.
 func (s *FileService) CloseFile(fileID string) error {
-	return s.reg.Close(fileID)
+	err := s.reg.Close(fileID)
+	s.invalidateSQLSummary(fileID)
+	return err
 }
 
 // FileSize re-stats the file on disk and returns its current size. Cheap — used
@@ -140,6 +142,7 @@ func (s *FileService) FileSize(fileID string) (int64, error) {
 	if !ok {
 		return 0, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	st, err := f.Doc.CurrentFileState()
 	if err != nil {
 		return 0, err
@@ -148,14 +151,16 @@ func (s *FileService) FileSize(fileID string) (int64, error) {
 }
 
 // RefreshFile reloads the file from disk under the same id (fresh size + line
-// index), for following a growing file or picking up external changes. Any
-// staged edits are discarded, so callers should confirm before using it on a
-// file with pending edits.
+// index), for following a growing file or picking up external changes. It
+// fails while edits are staged; discarding them requires the explicit
+// DiscardEdits operation.
 func (s *FileService) RefreshFile(fileID string) (FileMeta, error) {
-	f, err := s.reg.Reopen(fileID)
+	f, err := s.reg.ReopenIfClean(fileID)
 	if err != nil {
 		return FileMeta{}, err
 	}
+	defer f.Release()
+	s.invalidateSQLSummary(fileID)
 	m := f.Doc.Metadata()
 	return FileMeta{
 		FileID:   f.ID,
@@ -170,11 +175,11 @@ func (s *FileService) RefreshFile(fileID string) (FileMeta, error) {
 
 // SearchHit is one match (or a not-found / timed-out / unsupported result).
 type SearchHit struct {
-	Found    bool   `json:"found"`
-	Offset   int64  `json:"offset"`
-	Length   int    `json:"length"`
-	Line     int64  `json:"line"`     // approximate until the index is built
-	TimedOut bool   `json:"timedOut"` // search hit the time budget before finishing
+	Found    bool  `json:"found"`
+	Offset   int64 `json:"offset"`
+	Length   int   `json:"length"`
+	Line     int64 `json:"line"`     // approximate until the index is built
+	TimedOut bool  `json:"timedOut"` // search hit the time budget before finishing
 	// Unsupported is set when the query can't be searched in the file's encoding
 	// (e.g. regex over a UTF-16/Windows-125x file, or a term with characters not
 	// representable in that encoding) — so the UI can say so instead of "no matches".
@@ -197,6 +202,7 @@ func (s *FileService) find(fileID, query string, start int64, backward, regex, c
 	if !ok {
 		return SearchHit{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	if strings.TrimSpace(query) == "" {
 		return SearchHit{}, nil
 	}
@@ -280,12 +286,11 @@ func (s *FileService) SearchAll(fileID, query string, regex, caseSensitive, whol
 	if !ok {
 		return SearchAllResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	if strings.TrimSpace(query) == "" {
 		return SearchAllResult{}, nil
 	}
-	if maxHits <= 0 {
-		maxHits = 1000
-	}
+	maxHits = clampRequestInt(maxHits, defaultSearchAllHits, maxSearchAllHits)
 	enc := f.Doc.Metadata().Encoding
 	isUTF8 := enc == "" || strings.EqualFold(enc, "UTF-8")
 	var pattern []byte
@@ -335,6 +340,7 @@ func (s *FileService) HarvestMatchesViaDialog(fileID, pattern string, caseInsens
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	if strings.TrimSpace(pattern) == "" {
 		return TransformResult{}, errors.New("enter a regex pattern")
 	}
@@ -350,36 +356,33 @@ func (s *FileService) HarvestMatchesViaDialog(fileID, pattern string, caseInsens
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	out, err := os.Create(dst)
-	if err != nil {
-		return TransformResult{}, err
-	}
-	defer out.Close()
-	bw := bufio.NewWriterSize(out, 1<<20)
-	var count int64
-	ctx, cancel := context.WithTimeout(context.Background(), searchTimeout)
-	defer cancel()
-	err = search.FindRegexp(ctx, f.Doc, re, search.RegexOptions{CaseInsensitive: caseInsensitive}, func(m search.Match) error {
-		b, rerr := f.Doc.ReadRange(m.Offset, m.Offset+int64(m.Length))
-		if rerr != nil {
-			return rerr
+	return s.withJob("Harvest regex matches", func(jobCtx context.Context, progress func(int64, string)) (TransformResult, error) {
+		ctx, cancel := context.WithTimeout(jobCtx, searchTimeout)
+		defer cancel()
+		var count int64
+		_, err = writeSafeOutput(f.Doc, f.Path, dst, func(out io.Writer) error {
+			bw := bufio.NewWriterSize(out, 1<<20)
+			if err := search.FindRegexp(ctx, f.Doc, re, search.RegexOptions{CaseInsensitive: caseInsensitive}, func(m search.Match) error {
+				b, rerr := f.Doc.ReadRange(m.Offset, m.Offset+int64(m.Length))
+				if rerr != nil {
+					return rerr
+				}
+				if _, werr := bw.Write(bytes.ReplaceAll(b, []byte("\n"), []byte(" "))); werr != nil {
+					return werr
+				}
+				count++
+				progress(count, "matches written")
+				return bw.WriteByte('\n')
+			}); err != nil {
+				return err
+			}
+			return bw.Flush()
+		})
+		if err != nil {
+			return TransformResult{}, err
 		}
-		if _, werr := bw.Write(bytes.ReplaceAll(b, []byte("\n"), []byte(" "))); werr != nil {
-			return werr
-		}
-		count++
-		return bw.WriteByte('\n')
+		return TransformResult{OutputPath: dst, RecordsWritten: count, Note: fmt.Sprintf("%d matches", count)}, nil
 	})
-	if err != nil {
-		return TransformResult{}, err
-	}
-	if err := bw.Flush(); err != nil {
-		return TransformResult{}, err
-	}
-	if err := out.Sync(); err != nil {
-		return TransformResult{}, err
-	}
-	return TransformResult{OutputPath: dst, RecordsWritten: count, Note: fmt.Sprintf("%d matches", count)}, nil
 }
 
 // ResolveLine maps a 1-based line number to a byte offset (exact if the index
@@ -389,6 +392,7 @@ func (s *FileService) ResolveLine(fileID string, line int64) (int64, error) {
 	if !ok {
 		return 0, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	if line < 1 {
 		line = 1
 	}
@@ -408,6 +412,7 @@ func (s *FileService) GetWindow(fileID string, startByte int64, maxBytes int) (W
 	if !ok {
 		return Window{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	return s.windowFrom(f, startByte, maxBytes)
 }
 
@@ -423,9 +428,8 @@ func (s *FileService) GetPrevWindow(fileID string, currentStart int64, maxBytes 
 	if !ok {
 		return Window{}, fmt.Errorf("unknown file id %q", fileID)
 	}
-	if maxBytes <= 0 {
-		maxBytes = defaultWindowBytes
-	}
+	defer f.Release()
+	maxBytes = clampRequestInt(maxBytes, defaultWindowBytes, maxWindowRequestBytes)
 	if currentStart <= 0 {
 		return s.windowFrom(f, 0, maxBytes)
 	}
@@ -451,9 +455,7 @@ func (s *FileService) GetPrevWindow(fileID string, currentStart int64, maxBytes 
 }
 
 func (s *FileService) windowFrom(f *session.File, startByte int64, maxBytes int) (Window, error) {
-	if maxBytes <= 0 {
-		maxBytes = defaultWindowBytes
-	}
+	maxBytes = clampRequestInt(maxBytes, defaultWindowBytes, maxWindowRequestBytes)
 	size := f.Doc.Size()
 	startByte = f.Doc.ClampOffset(startByte)
 
@@ -472,10 +474,7 @@ func (s *FileService) windowFrom(f *session.File, startByte int64, maxBytes int)
 	// collapsing huge mysqldump INSERT lines to one compact row. This stays fast
 	// even across a region of multi-MB lines (it never decodes the whole window),
 	// so the window has enough rows to scroll and the next load is cheap.
-	scanEnd := startByte + windowScanCap
-	if scanEnd > size {
-		scanEnd = size
-	}
+	scanEnd := boundedReadEnd(startByte, size, int(windowScanCap))
 
 	var b strings.Builder
 	offsets := make([]int64, 0, 256)
@@ -521,10 +520,7 @@ func (s *FileService) windowFrom(f *session.File, startByte int64, maxBytes int)
 	const chunk = 1 << 20
 	pos := startByte
 	for pos < scanEnd && len(offsets) < windowLineTarget {
-		readEnd := pos + chunk
-		if readEnd > scanEnd {
-			readEnd = scanEnd
-		}
+		readEnd := boundedReadEnd(pos, scanEnd, chunk)
 		buf, err := f.Doc.ReadRange(pos, readEnd)
 		if err != nil {
 			return Window{}, err

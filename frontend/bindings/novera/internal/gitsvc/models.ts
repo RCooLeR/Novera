@@ -14,6 +14,8 @@ export class CommitResult {
     "subject": string;
     "message": string;
     "status": Status;
+    "committed": boolean;
+    "refreshError": string;
 
     /** Creates a new CommitResult instance. */
     constructor($$source: Partial<CommitResult> = {}) {
@@ -31,6 +33,12 @@ export class CommitResult {
         }
         if (!("status" in $$source)) {
             this["status"] = (new Status());
+        }
+        if (!("committed" in $$source)) {
+            this["committed"] = false;
+        }
+        if (!("refreshError" in $$source)) {
+            this["refreshError"] = "";
         }
 
         Object.assign(this, $$source);

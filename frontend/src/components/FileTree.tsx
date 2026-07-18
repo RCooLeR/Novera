@@ -100,6 +100,21 @@ export default function FileTree() {
     if (total === 0) return;
     const cur = selIndex < 0 ? 0 : selIndex;
     const node = flat[cur];
+    if ((e.shiftKey && e.key === "F10") || e.key === "ContextMenu") {
+      e.preventDefault();
+      const row = document.getElementById(`treeitem-${cur}`);
+      const rect = row?.getBoundingClientRect();
+      if (node) {
+        openFileMenu({
+          x: rect?.left ?? 12,
+          y: rect?.bottom ?? 12,
+          rel: node.entry.path,
+          isDir: node.entry.isDir,
+          name: node.entry.name,
+        });
+      }
+      return;
+    }
     switch (e.key) {
       case "ArrowDown":
         e.preventDefault();
@@ -147,17 +162,21 @@ export default function FileTree() {
       ref={wrapRef}
       tabIndex={0}
       role="tree"
+      aria-label="Workspace files"
+      aria-activedescendant={selIndex >= 0 ? `treeitem-${selIndex}` : undefined}
       onKeyDown={onKeyDown}
-      style={{ height: total * ROW_H, position: "relative", outline: "none" }}
+      style={{ height: total * ROW_H, position: "relative" }}
     >
       <div style={{ position: "absolute", top: start * ROW_H, left: 0, right: 0 }}>
-        {visible.map((n) => {
+        {visible.map((n, visibleIndex) => {
           const { entry, depth } = n;
+          const absoluteIndex = start + visibleIndex;
           const isExpanded = expanded[entry.path] ?? false;
           const loading = loadingPath[entry.path] ?? false;
           const selected = selectedPath === entry.path;
           return (
             <div
+              id={`treeitem-${absoluteIndex}`}
               key={entry.path}
               className={`tree__row ${selected ? "selected" : ""}`}
               style={{ paddingLeft: 8 + depth * 14 }}
@@ -165,11 +184,14 @@ export default function FileTree() {
               aria-selected={selected}
               aria-expanded={entry.isDir ? isExpanded : undefined}
               onClick={() => {
+                wrapRef.current?.focus();
+                useStore.setState({ selectedPath: entry.path });
                 if (entry.isDir) void toggleDir(entry.path);
                 else void openFile(entry.path, entry.name);
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
+                wrapRef.current?.focus();
                 useStore.setState({ selectedPath: entry.path });
                 openFileMenu({ x: e.clientX, y: e.clientY, rel: entry.path, isDir: entry.isDir, name: entry.name });
               }}

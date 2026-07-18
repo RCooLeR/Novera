@@ -6,6 +6,12 @@ import { toCsv, sortIndices, nextSort, type Sort } from "../lib/grid";
 import { useStore } from "../state/store";
 import VirtualGrid from "./VirtualGrid";
 
+function truncationLabel(reason: string): string {
+  if (reason === "row_limit") return "row limit reached";
+  if (reason === "byte_limit") return "result byte limit reached";
+  return "truncated";
+}
+
 export default function DbQueryView({ connId }: { connId: string }) {
   const sql = useStore((s) => s.dbSql[connId] ?? "");
   const setDbSql = useStore((s) => s.setDbSql);
@@ -111,7 +117,7 @@ export default function DbQueryView({ connId }: { connId: string }) {
           {result && (
             <span className="dbq__meta">
               {result.rowCount} row{result.rowCount === 1 ? "" : "s"}
-              {result.truncated ? " (truncated)" : ""} · {result.elapsedMs} ms
+              {result.truncated ? ` (${truncationLabel(result.truncationReason)})` : ""} · {result.elapsedMs} ms
             </span>
           )}
           {result && result.rows.length > 0 && (

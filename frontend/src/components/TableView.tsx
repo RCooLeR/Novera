@@ -2,18 +2,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Clipboard, Download, Loader2, Search } from "lucide-react";
 import { Workspace, Shell, errMessage } from "../lib/services";
 import { toCsv, nextSort, type Sort } from "../lib/grid";
+import { writeClipboardText } from "../lib/clipboard";
 import { useStore } from "../state/store";
 import VirtualGrid from "./VirtualGrid";
 
 const WINDOW = 800; // rows fetched per window
 const MARGIN = 200; // rows loaded before the visible start, for scroll slack
 
-// TableView previews CSV/TSV/XLSX of any size with a single sliding window: only
-// ~one screenful (plus slack) is ever in memory. Browsing streams the visible
+// TableView previews large CSV/TSV/XLSX inputs with a sliding UI window: only
+// ~one screenful (plus slack) is retained by this component. Browsing requests the visible
 // window off disk (and a background TableInfo counts rows + builds a seek index
 // so the scrollbar spans the whole file and jumps are fast); a filter or sort is
 // computed over the whole file by the backend and served from cache.
-export default function TableView({ rel }: { rel: string }) {
+export default function TableView({ rel, sourceVersion = 0 }: { rel: string; sourceVersion?: number }) {
   const setStatus = useStore((s) => s.setStatus);
   const [columns, setColumns] = useState<string[]>([]);
   const [sheet, setSheet] = useState("");
@@ -41,11 +42,14 @@ export default function TableView({ rel }: { rel: string }) {
   const fetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const inflight = useRef(false);
   const wantOffset = useRef<number | null>(null);
+  const queryGeneration = useRef(0);
 
   const query = useCallback(
     (offset: number) =>
       Workspace.QueryTable(rel, { offset, limit: WINDOW, filter: debFilter, sortCol, sortDir, delimiter }),
-    [rel, debFilter, sortCol, sortDir, delimiter],
+    // sourceVersion is intentionally part of the request identity. A watcher
+    // event must refetch the same path/settings rather than reuse stale rows.
+    [rel, debFilter, sortCol, sortDir, delimiter, sourceVersion],
   );
 
   // Debounce the filter so a full-file scan doesn't run on every keystroke.
@@ -57,6 +61,7 @@ export default function TableView({ rel }: { rel: string }) {
   // Reset + load the first window (and, for browse, the background row count)
   // whenever the file, filter, sort, or delimiter changes.
   useEffect(() => {
+    const generation = ++queryGeneration.current;
     let alive = true;
     setError("");
     setMessage("");
@@ -68,7 +73,7 @@ export default function TableView({ rel }: { rel: string }) {
     wantOffset.current = null;
     query(0)
       .then((p) => {
-        if (!alive) return;
+        if (!alive || generation !== queryGeneration.current) return;
         setColumns(p.columns);
         setSheet(p.sheet);
         setDetected(p.delimiter);
@@ -79,14 +84,20 @@ export default function TableView({ rel }: { rel: string }) {
         setHasMore(p.hasMore);
         if (p.totalRows >= 0) setTotalRows(p.totalRows); // filter/sort: exact total
       })
-      .catch((e) => alive && setError(errMessage(e)))
+      .catch((e) => {
+        if (alive && generation === queryGeneration.current) setError(errMessage(e));
+      })
       .finally(() => {
-        if (alive) setLoading(false);
-        inflight.current = false;
+        if (alive && generation === queryGeneration.current) {
+          setLoading(false);
+          inflight.current = false;
+        }
       });
     if (!filteringOrSorting) {
       Workspace.TableInfo(rel, delimiter)
-        .then((info) => alive && setTotalRows(info.rows))
+        .then((info) => {
+          if (alive && generation === queryGeneration.current) setTotalRows(info.rows);
+        })
         .catch(() => {});
     }
     return () => {
@@ -102,16 +113,21 @@ export default function TableView({ rel }: { rel: string }) {
       }
       inflight.current = true;
       setLoading(true);
+      const generation = queryGeneration.current;
       query(offset)
         .then((p) => {
+          if (generation !== queryGeneration.current) return;
           setColumns(p.columns);
           setWindowStart(offset);
           setWindowRows(p.rows);
           setHasMore(p.hasMore);
           if (p.totalRows >= 0) setTotalRows(p.totalRows);
         })
-        .catch((e) => setStatus(errMessage(e), "error"))
+        .catch((e) => {
+          if (generation === queryGeneration.current) setStatus(errMessage(e), "error");
+        })
         .finally(() => {
+          if (generation !== queryGeneration.current) return;
           inflight.current = false;
           setLoading(false);
           const next = wantOffset.current;
@@ -135,7 +151,14 @@ export default function TableView({ rel }: { rel: string }) {
   useEffect(() => () => clearTimeout(fetchTimer.current), []);
 
   const baseName = rel.split("/").pop() ?? "data";
-  const copyCsv = () => void navigator.clipboard?.writeText(toCsv(columns, windowRows));
+  const copyCsv = async () => {
+    try {
+      await writeClipboardText(toCsv(columns, windowRows));
+      setStatus(`Copied the visible window (${windowRows.length} rows) as CSV.`, "success");
+    } catch (error) {
+      setStatus(errMessage(error), "error");
+    }
+  };
   const exportCsv = async () => {
     try {
       const path = await Shell.SaveTextFile(baseName.replace(/\.[^.]+$/, "") + ".csv", toCsv(columns, windowRows));
@@ -185,7 +208,7 @@ export default function TableView({ rel }: { rel: string }) {
         </span>
         {columns.length > 0 && (
           <>
-            <button className="btn" onClick={copyCsv} title="Copy the visible window as CSV">
+            <button className="btn" onClick={() => void copyCsv()} title="Copy the visible window as CSV">
               <Clipboard size={13} /> Copy
             </button>
             <button className="btn" onClick={() => void exportCsv()} title="Export the visible window to a CSV file">

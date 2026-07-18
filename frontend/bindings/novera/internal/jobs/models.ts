@@ -29,7 +29,7 @@ export class Job {
     "startedAt": number;
 
     /**
-     * unix ms, 0 while running
+     * unix ms, 0 while active
      */
     "endedAt": number;
     "error": string;

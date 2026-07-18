@@ -11,6 +11,11 @@ vars:
 
   # Docker image for cross-compilation (used when building on non-macOS)
   CROSS_IMAGE: wails-cross
+  BUILDINFO_LDFLAGS: >-
+    -X novera/internal/buildinfo.Version={{.NOVERA_BUILD_VERSION | default "0.1.0-dev"}}
+    -X novera/internal/buildinfo.Commit={{.NOVERA_BUILD_COMMIT | default "unknown"}}
+    -X novera/internal/buildinfo.BuildDate={{.NOVERA_BUILD_DATE | default "unknown"}}
+    -X novera/internal/buildinfo.Channel={{.NOVERA_BUILD_CHANNEL | default "development"}}
 
 tasks:
   build:
@@ -30,7 +35,7 @@ tasks:
     summary: Builds the application natively on macOS
     internal: true
     deps:
-      - task: common:go:mod:tidy
+      - task: common:go:mod:check
       - task: common:build:frontend
         vars:
           BUILD_FLAGS:
@@ -41,7 +46,7 @@ tasks:
     cmds:
       - go build {{.BUILD_FLAGS}} -o "{{.OUTPUT}}"
     vars:
-      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if .EXTRA_TAGS}}-tags {{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s"{{end}}'
+      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if .EXTRA_TAGS}}-tags {{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l" -ldflags="{{.BUILDINFO_LDFLAGS}}"{{else}}-tags production{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s {{.BUILDINFO_LDFLAGS}}"{{end}}'
       DEFAULT_OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}'
       OUTPUT: '{{ .OUTPUT | default .DEFAULT_OUTPUT }}'
     env:
@@ -66,7 +71,7 @@ tasks:
           Docker image '{{.CROSS_IMAGE}}' not found.
           Build it first: wails3 task setup:docker
     cmds:
-      - docker run --rm -v "{{.ROOT_DIR}}:/app" {{.GO_CACHE_MOUNT}} {{.REPLACE_MOUNTS}} -e APP_NAME="{{.APP_NAME}}" {{if .EXTRA_TAGS}}-e EXTRA_TAGS="{{.EXTRA_TAGS}}"{{end}} {{.CROSS_IMAGE}} darwin {{.DOCKER_ARCH}}
+      - docker run --rm -v "{{.ROOT_DIR}}:/app" {{.GO_CACHE_MOUNT}} {{.REPLACE_MOUNTS}} -e APP_NAME="{{.APP_NAME}}" -e NOVERA_BUILD_VERSION="{{.NOVERA_BUILD_VERSION | default "0.1.0-dev"}}" -e NOVERA_BUILD_COMMIT="{{.NOVERA_BUILD_COMMIT | default "unknown"}}" -e NOVERA_BUILD_DATE="{{.NOVERA_BUILD_DATE | default "unknown"}}" -e NOVERA_BUILD_CHANNEL="{{.NOVERA_BUILD_CHANNEL | default "development"}}" {{if .EXTRA_TAGS}}-e EXTRA_TAGS="{{.EXTRA_TAGS}}"{{end}} {{.CROSS_IMAGE}} darwin {{.DOCKER_ARCH}}
       - docker run --rm -v "{{.ROOT_DIR}}:/app" alpine chown -R $(id -u):$(id -g) /app/bin
       - mkdir -p {{.BIN_DIR}}
       - mv "bin/{{.APP_NAME}}-darwin-{{.DOCKER_ARCH}}" "{{.OUTPUT}}"

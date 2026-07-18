@@ -56,7 +56,7 @@ type InMemoryLoadOptions struct {
 
 // LoadInMemoryBuffer decodes the whole file only after proving it is inside the
 // caller-provided memory budget. This is the boundary that keeps normal editor
-// behavior separate from Quarry's huge-file streaming path.
+// behavior separate from Novera's large-file streaming path.
 func LoadInMemoryBuffer(doc *FileDocument, editableLimit int64) (*InMemoryBuffer, error) {
 	return LoadInMemoryBufferContext(context.Background(), doc, editableLimit)
 }
@@ -241,7 +241,7 @@ func (b *InMemoryBuffer) EncodedReplacement(text string) (int64, int64, []byte, 
 }
 
 // WriteCopy writes edited buffer text to a user-selected output path. It refuses
-// to write over the source path; replacing originals must go through Quarry's
+// to write over the source path; replacing originals must go through Novera's
 // manifest/backup/finalize workflows.
 func (b *InMemoryBuffer) WriteCopy(outputPath string, text string) (int64, error) {
 	return b.WriteCopyWithOptions(outputPath, text, WriteCopyOptions{})
@@ -254,7 +254,7 @@ func (b *InMemoryBuffer) WriteCopyContext(ctx context.Context, outputPath string
 	return b.WriteCopyContextWithOptions(ctx, outputPath, text, WriteCopyOptions{})
 }
 
-// WriteCopyWithOptions writes edited buffer text through Quarry's safe-output
+// WriteCopyWithOptions writes edited buffer text through Novera's safe-output
 // path: encode, write an exclusive temp file, fsync/close it, and publish it
 // with a final rename. The default policy refuses to overwrite existing files.
 func (b *InMemoryBuffer) WriteCopyWithOptions(outputPath string, text string, opts WriteCopyOptions) (int64, error) {

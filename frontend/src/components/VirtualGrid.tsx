@@ -124,11 +124,13 @@ export default function VirtualGrid({
               <th
                 key={i}
                 className="dbq__sortable"
-                onClick={() => onSort(i)}
                 style={rainbow ? { color: CSV_PALETTE[i % CSV_PALETTE.length] } : undefined}
+                aria-sort={sort?.col === i ? (sort.dir === 1 ? "ascending" : "descending") : "none"}
               >
-                {c}
-                {sortIndicator(sort, i)}
+                <button type="button" className="dbq__sortbtn" onClick={() => onSort(i)}>
+                  {c}
+                  <span aria-hidden="true">{sortIndicator(sort, i)}</span>
+                </button>
               </th>
             ))}
           </tr>

@@ -42,7 +42,20 @@ func delimiterString(r rune) string {
 	return string(r)
 }
 
-func (s *FileService) csvSampleReader(fileID string) (io.Reader, string, error) {
+type leasedSampleReader struct {
+	io.Reader
+	release func()
+}
+
+func (r *leasedSampleReader) Close() error {
+	if r != nil && r.release != nil {
+		r.release()
+		r.release = nil
+	}
+	return nil
+}
+
+func (s *FileService) csvSampleReader(fileID string) (io.ReadCloser, string, error) {
 	f, ok := s.reg.Get(fileID)
 	if !ok {
 		return nil, "", fmt.Errorf("unknown file id %q", fileID)
@@ -51,7 +64,7 @@ func (s *FileService) csvSampleReader(fileID string) (io.Reader, string, error) 
 	if n > csvSampleBytes {
 		n = csvSampleBytes
 	}
-	return io.NewSectionReader(f.Doc, 0, n), f.Path, nil
+	return &leasedSampleReader{Reader: io.NewSectionReader(f.Doc, 0, n), release: f.Release}, f.Path, nil
 }
 
 // ---- inspect (delimiter detection) -------------------------------------
@@ -80,6 +93,7 @@ func (s *FileService) CsvInspect(fileID string) (CsvInspectResult, error) {
 	if err != nil {
 		return CsvInspectResult{}, err
 	}
+	defer r.Close()
 	rep, err := csv.InspectReaderContext(context.Background(), r, csv.InspectOptions{MaxBytes: csvSampleBytes, MaxRows: 1000})
 	if err != nil {
 		return CsvInspectResult{}, err
@@ -115,9 +129,9 @@ type CsvColumn struct {
 }
 
 type CsvSchemaResult struct {
-	Columns  []CsvColumn `json:"columns"`
-	HasHeader bool       `json:"hasHeader"`
-	Warnings []string    `json:"warnings"`
+	Columns   []CsvColumn `json:"columns"`
+	HasHeader bool        `json:"hasHeader"`
+	Warnings  []string    `json:"warnings"`
 }
 
 func (s *FileService) CsvSchema(fileID string, delimiter string, hasHeader bool) (CsvSchemaResult, error) {
@@ -125,6 +139,7 @@ func (s *FileService) CsvSchema(fileID string, delimiter string, hasHeader bool)
 	if err != nil {
 		return CsvSchemaResult{}, err
 	}
+	defer r.Close()
 	rep, err := csv.InferSchemaContext(context.Background(), r, csv.SchemaOptions{
 		Delimiter: delimiterRune(delimiter),
 		HasHeader: hasHeader,
@@ -152,9 +167,8 @@ func (s *FileService) CsvPreview(fileID string, delimiter string, hasHeader bool
 	if err != nil {
 		return CsvPreviewResult{}, err
 	}
-	if maxRows <= 0 {
-		maxRows = 50
-	}
+	defer r.Close()
+	maxRows = clampRequestInt(maxRows, defaultCSVPreviewRows, maxCSVPreviewRows)
 	rep, err := csv.PreviewRowsContext(context.Background(), r, csv.PreviewOptions{
 		Delimiter: delimiterRune(delimiter),
 		HasHeader: hasHeader,
@@ -187,9 +201,8 @@ func (s *FileService) GetCsvGrid(fileID string, delimiter string, startByte int6
 	if !ok {
 		return CsvGridResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
-	if maxBytes <= 0 {
-		maxBytes = 128 * 1024
-	}
+	defer f.Release()
+	maxBytes = clampRequestInt(maxBytes, 128*1024, maxCSVGridBytes)
 	size := f.Doc.Size()
 	readRange := func(a, b int64) ([]byte, error) { return f.Doc.ReadRange(a, b) }
 	if startByte < 0 {
@@ -202,10 +215,7 @@ func (s *FileService) GetCsvGrid(fileID string, delimiter string, startByte int6
 	if err != nil {
 		return CsvGridResult{}, err
 	}
-	end := aligned + int64(maxBytes)
-	if end > size {
-		end = size
-	}
+	end := boundedReadEnd(aligned, size, maxBytes)
 	raw, err := readRange(aligned, end)
 	if err != nil {
 		return CsvGridResult{}, err
@@ -285,6 +295,7 @@ func (s *FileService) CsvProfile(fileID, delimiter string, hasHeader bool) (CsvP
 	if err != nil {
 		return CsvProfileResult{}, err
 	}
+	defer r.Close()
 	rep, err := csv.ProfileColumns(context.Background(), r, csv.SchemaOptions{
 		Delimiter:  delimiterRune(delimiter),
 		HasHeader:  hasHeader,
@@ -309,18 +320,25 @@ func (s *FileService) CsvProjectViaDialog(fileID string, delimiter string, keepI
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
+	if len(keepIndices) > maxCSVColumns {
+		return TransformResult{}, fmt.Errorf("column selection exceeds the %d-column limit", maxCSVColumns)
+	}
 	dst, err := saveDialog("Save projected CSV as", "projected.csv")
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	sum, err := csv.ProjectColumnsFile(context.Background(), f.Path, dst, csv.ProjectOptions{
-		Delimiter: delimiterRune(delimiter),
-		Columns:   keepIndices,
+	return s.withJob("Project CSV", func(ctx context.Context, progress func(int64, string)) (TransformResult, error) {
+		sum, err := csv.ProjectColumnsFile(ctx, f.Path, dst, csv.ProjectOptions{
+			Delimiter: delimiterRune(delimiter),
+			Columns:   keepIndices,
+			Progress:  func(p csv.ProjectProgress) { progress(p.RecordsRead, "rows read") },
+		})
+		if err != nil {
+			return TransformResult{}, err
+		}
+		return TransformResult{OutputPath: dst, RecordsRead: sum.RecordsRead, RecordsWritten: sum.RecordsWritten, Note: fmt.Sprintf("%d columns kept", sum.ColumnsWritten)}, nil
 	})
-	if err != nil {
-		return TransformResult{}, err
-	}
-	return TransformResult{OutputPath: dst, RecordsRead: sum.RecordsRead, RecordsWritten: sum.RecordsWritten, Note: fmt.Sprintf("%d columns kept", sum.ColumnsWritten)}, nil
 }
 
 // CsvAddColumnViaDialog writes a new CSV with a constant column appended to every
@@ -329,6 +347,10 @@ func (s *FileService) CsvAddColumnViaDialog(fileID string, delimiter string, col
 	f, ok := s.reg.Get(fileID)
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
+	}
+	defer f.Release()
+	if columnCount < 0 || columnCount > maxCSVColumns {
+		return TransformResult{}, fmt.Errorf("column count must be between 0 and %d", maxCSVColumns)
 	}
 	dst, err := saveDialog("Save CSV with added column as", "with-column.csv")
 	if err != nil || strings.TrimSpace(dst) == "" {
@@ -339,16 +361,19 @@ func (s *FileService) CsvAddColumnViaDialog(fileID string, delimiter string, col
 		keep = append(keep, i)
 	}
 	keep = append(keep, columnCount) // out-of-range index -> filled with MissingValue
-	sum, err := csv.ProjectColumnsFile(context.Background(), f.Path, dst, csv.ProjectOptions{
-		Delimiter:         delimiterRune(delimiter),
-		Columns:           keep,
-		AllowShortRecords: true,
-		MissingValue:      value,
+	return s.withJob("Add CSV column", func(ctx context.Context, progress func(int64, string)) (TransformResult, error) {
+		sum, err := csv.ProjectColumnsFile(ctx, f.Path, dst, csv.ProjectOptions{
+			Delimiter:         delimiterRune(delimiter),
+			Columns:           keep,
+			AllowShortRecords: true,
+			MissingValue:      value,
+			Progress:          func(p csv.ProjectProgress) { progress(p.RecordsRead, "rows read") },
+		})
+		if err != nil {
+			return TransformResult{}, err
+		}
+		return TransformResult{OutputPath: dst, RecordsRead: sum.RecordsRead, RecordsWritten: sum.RecordsWritten, Note: "constant column added"}, nil
 	})
-	if err != nil {
-		return TransformResult{}, err
-	}
-	return TransformResult{OutputPath: dst, RecordsRead: sum.RecordsRead, RecordsWritten: sum.RecordsWritten, Note: "constant column added"}, nil
 }
 
 // CsvToSQLPreview returns a short sample of the generated SQL.
@@ -357,6 +382,7 @@ func (s *FileService) CsvToSQLPreview(fileID, delimiter, tableName string, hasHe
 	if err != nil {
 		return "", err
 	}
+	defer r.Close()
 	rep, err := csv.PreviewSQLConversionContext(context.Background(), r, csv.SQLPreviewOptions{
 		SQLConvertOptions: csv.SQLConvertOptions{
 			Delimiter:          delimiterRune(delimiter),
@@ -379,20 +405,24 @@ func (s *FileService) CsvToSQLViaDialog(fileID, delimiter, tableName string, has
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	dst, err := saveDialog("Save SQL as", sqlTableName(tableName)+".sql")
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	sum, err := csv.ConvertToSQLFile(context.Background(), f.Path, dst, csv.SQLConvertOptions{
-		Delimiter:          delimiterRune(delimiter),
-		TableName:          sqlTableName(tableName),
-		HasHeader:          hasHeader,
-		IncludeCreateTable: includeCreate,
+	return s.withJob("Convert CSV to SQL", func(ctx context.Context, progress func(int64, string)) (TransformResult, error) {
+		sum, err := csv.ConvertToSQLFile(ctx, f.Path, dst, csv.SQLConvertOptions{
+			Delimiter:          delimiterRune(delimiter),
+			TableName:          sqlTableName(tableName),
+			HasHeader:          hasHeader,
+			IncludeCreateTable: includeCreate,
+			Progress:           func(p csv.SQLConvertProgress) { progress(p.RecordsRead, "rows read") },
+		})
+		if err != nil {
+			return TransformResult{}, err
+		}
+		return TransformResult{OutputPath: dst, RecordsRead: sum.RecordsRead, RecordsWritten: sum.RowsWritten, Note: fmt.Sprintf("table %q", sum.TableName)}, nil
 	})
-	if err != nil {
-		return TransformResult{}, err
-	}
-	return TransformResult{OutputPath: dst, RecordsRead: sum.RecordsRead, RecordsWritten: sum.RowsWritten, Note: fmt.Sprintf("table %q", sum.TableName)}, nil
 }
 
 func sqlTableName(name string) string {
@@ -473,6 +503,7 @@ func (s *FileService) CsvRedactViaDialog(fileID, delimiter string, hasHeader boo
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	cols := map[int]csv.RedactMode{}
 	for _, c := range columns {
 		cols[c.Index] = csv.RedactMode(strings.TrimSpace(c.Mode))
@@ -508,6 +539,7 @@ func (s *FileService) CsvFilterViaDialog(fileID, delimiter string, hasHeader boo
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	dst, err := saveDialog("Save filtered CSV as", "filtered.csv")
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
@@ -541,6 +573,7 @@ func (s *FileService) CsvDedupeViaDialog(fileID, delimiter string, hasHeader boo
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	dst, err := saveDialog("Save deduplicated CSV as", "deduped.csv")
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
@@ -572,6 +605,7 @@ func (s *FileService) CsvSampleViaDialog(fileID, delimiter string, hasHeader boo
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	if everyN <= 0 {
 		everyN = 10
 	}
@@ -604,6 +638,7 @@ func (s *FileService) CsvExportJSONLViaDialog(fileID, delimiter string, hasHeade
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	dst, err := saveDialog("Export JSON Lines as", "export.jsonl")
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
@@ -628,6 +663,7 @@ func (s *FileService) CsvExportSQLiteViaDialog(fileID, delimiter string, hasHead
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	dst, err := saveDialog("Export SQLite database as", "export.db")
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
@@ -653,6 +689,7 @@ func (s *FileService) CsvExportXLSXViaDialog(fileID, delimiter string, hasHeader
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	dst, err := saveDialog("Export Excel workbook as", "export.xlsx")
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
@@ -682,9 +719,8 @@ func (s *FileService) CsvMarkdownPreview(fileID, delimiter string, hasHeader boo
 	if err != nil {
 		return "", err
 	}
-	if maxRows <= 0 {
-		maxRows = 50
-	}
+	defer r.Close()
+	maxRows = clampRequestInt(maxRows, defaultCSVPreviewRows, maxCSVPreviewRows)
 	rep, err := csv.PreviewRowsContext(context.Background(), r, csv.PreviewOptions{
 		Delimiter: delimiterRune(delimiter),
 		HasHeader: hasHeader,
@@ -703,6 +739,7 @@ func (s *FileService) CsvToSQLConfigPreview(fileID string, cfg CsvSqlConfig) (st
 	if err != nil {
 		return "", err
 	}
+	defer r.Close()
 	opts, err := csvSqlOptions(cfg)
 	if err != nil {
 		return "", err
@@ -725,6 +762,7 @@ func (s *FileService) CsvToSQLConfigViaDialog(fileID string, cfg CsvSqlConfig) (
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	opts, err := csvSqlOptions(cfg)
 	if err != nil {
 		return TransformResult{}, err
@@ -733,7 +771,10 @@ func (s *FileService) CsvToSQLConfigViaDialog(fileID string, cfg CsvSqlConfig) (
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	sum, err := csv.ConvertToSQLFile(context.Background(), f.Path, dst, opts)
+	sum, err := withJobResult(s, "Convert CSV to SQL", func(ctx context.Context, progress func(int64, string)) (csv.SQLConvertSummary, error) {
+		opts.Progress = func(p csv.SQLConvertProgress) { progress(p.RecordsRead, "rows read") }
+		return csv.ConvertToSQLFile(ctx, f.Path, dst, opts)
+	})
 	if err != nil {
 		return TransformResult{}, err
 	}

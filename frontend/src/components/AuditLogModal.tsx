@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useRef } from "react";
 import { Check, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { useStore } from "../state/store";
+import { useDialogFocus } from "../lib/useDialogFocus";
 
 // Decision badge color: denied = red, approved = amber (a mutation you allowed),
 // auto = muted (a read tool that ran without a gate).
@@ -25,24 +26,15 @@ export default function AuditLogModal() {
   const loading = useStore((s) => s.auditLoading);
   const close = useStore((s) => s.closeAuditLog);
   const reload = useStore((s) => s.openAuditLog);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        close();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, close]);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useDialogFocus(open, close, closeRef);
 
   if (!open) return null;
 
   return (
     <div className="modal-overlay" onMouseDown={close}>
       <div
+        ref={dialogRef}
         className="modal toolsmodal"
         role="dialog"
         aria-modal="true"
@@ -58,7 +50,7 @@ export default function AuditLogModal() {
           <button className="icon-btn" title="Refresh" aria-label="Refresh" onClick={() => void reload()}>
             <RefreshCw size={14} aria-hidden focusable={false} />
           </button>
-          <button className="icon-btn" title="Close" aria-label="Close" onClick={close}>
+          <button ref={closeRef} className="icon-btn" title="Close" aria-label="Close" onClick={close}>
             <X size={15} aria-hidden focusable={false} />
           </button>
         </div>

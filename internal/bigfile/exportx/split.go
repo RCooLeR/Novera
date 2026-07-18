@@ -21,7 +21,7 @@ type SplitOptions struct {
 }
 
 // Split operations treat generated part files as an all-or-cleanup set. If a
-// split is canceled or fails after writing earlier parts, Quarry removes only
+// split is canceled or fails after writing earlier parts, Novera removes only
 // the part files created by the current operation and leaves the source file and
 // any pre-existing conflicting outputs untouched.
 type SplitSummary struct {

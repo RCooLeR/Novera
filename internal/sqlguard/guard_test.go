@@ -67,3 +67,47 @@ func TestCommentDoesNotBypassDangerousFunction(t *testing.T) {
 		}
 	}
 }
+
+// Quoted identifiers are still identifiers. PostgreSQL accepts a quoted
+// lower-case function name such as "pg_sleep"(10), so skipping quote contents
+// would let dangerous functions bypass the per-engine call blocklist.
+func TestQuotedIdentifierDoesNotBypassDangerousFunction(t *testing.T) {
+	cases := []struct {
+		kind string
+		sql  string
+	}{
+		{"postgres", `SELECT "pg_sleep"(10)`},
+		{"postgres", `SELECT public."pg_read_file"('/etc/passwd')`},
+		{"mysql", "SELECT `sleep`(10)"},
+		{"sqlite", "SELECT [load_extension]('x')"},
+	}
+	for _, c := range cases {
+		if _, err := NormalizeReadOnly(c.sql, Options{Kind: c.kind}); err == nil {
+			t.Errorf("quoted dangerous function not blocked for %s: %q", c.kind, c.sql)
+		}
+	}
+}
+
+func TestQuotedBlockedKeywordRemainsUsableAsIdentifier(t *testing.T) {
+	for _, q := range []string{
+		`SELECT "drop" FROM metadata`,
+		"SELECT `delete` FROM metadata",
+		"SELECT [update] FROM metadata",
+	} {
+		if _, err := NormalizeReadOnly(q, Options{Kind: "sqlite"}); err != nil {
+			t.Errorf("quoted identifier was treated as SQL syntax for %q: %v", q, err)
+		}
+	}
+}
+
+func TestQuotedClauseIdentifiersDoNotHideSelectInto(t *testing.T) {
+	queries := []string{
+		`SELECT "from", value INTO copied_rows FROM source_rows`,
+		`SELECT value INTO "from" FROM source_rows`,
+	}
+	for _, query := range queries {
+		if _, err := NormalizeReadOnly(query, Options{Kind: "postgres"}); err == nil {
+			t.Errorf("SELECT INTO hidden by quoted clause identifier was not blocked: %q", query)
+		}
+	}
+}

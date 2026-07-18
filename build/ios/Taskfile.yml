@@ -25,7 +25,7 @@ tasks:
     deps:
       - task: generate:ios:overlay
       - task: generate:ios:xcode
-      - task: common:go:mod:tidy
+      - task: common:go:mod:check
       - task: generate:ios:bindings
         vars:
           BUILD_FLAGS:
@@ -66,7 +66,7 @@ tasks:
   package:
     summary: Packages a production build of the application into a `.app` bundle
     deps:
-      - task: build
+      - task: compile:ios
         vars:
           PRODUCTION: "true"
     cmds:
@@ -118,6 +118,8 @@ tasks:
     summary: Compile the iOS executable from Go archive and main.m
     deps:
       - task: build
+        vars:
+          PRODUCTION: '{{.PRODUCTION | default "false"}}'
     vars:
       SDK_PATH:
         sh: xcrun --sdk iphonesimulator --show-sdk-path
@@ -133,7 +135,7 @@ tasks:
           -framework Foundation -framework UIKit -framework WebKit \
           -framework Security -framework CoreFoundation \
           -lresolv \
-          -o "{{.BIN_DIR}}/{{.APP_NAME | lower}}" \
+          -o "{{.BIN_DIR}}/{{.APP_NAME}}" \
           "$MAIN_M" "{{.BIN_DIR}}/{{.APP_NAME}}.a"
 
   generate:ios:bindings:
@@ -227,7 +229,7 @@ tasks:
     cmds:
       - rm -rf "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app"
       - mkdir -p "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app"
-      - cp "{{.BIN_DIR}}/{{.APP_NAME | lower}}" "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/{{.APP_NAME | lower}}"
+      - cp "{{.BIN_DIR}}/{{.APP_NAME}}" "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/{{.APP_NAME}}"
       - cp build/ios/Info.dev.plist "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Info.plist"
       - |
         # Compile asset catalog and embed icons for dev bundle
@@ -272,7 +274,7 @@ tasks:
         xcrun simctl spawn booted log stream \
           --level debug \
           --style compact \
-          --predicate 'senderImagePath CONTAINS[c] "{{.APP_NAME | lower}}.app/" OR composedMessage CONTAINS[c] "{{.APP_NAME | lower}}" OR eventMessage CONTAINS[c] "{{.APP_NAME | lower}}" OR process == "{{.APP_NAME | lower}}" OR category CONTAINS[c] "{{.APP_NAME | lower}}"'
+          --predicate 'senderImagePath CONTAINS[c] "{{.APP_NAME}}.app/" OR composedMessage CONTAINS[c] "{{.APP_NAME}}" OR eventMessage CONTAINS[c] "{{.APP_NAME}}" OR process == "{{.APP_NAME}}" OR category CONTAINS[c] "{{.APP_NAME}}"'
 
   logs:dev:
     summary: Stream logs for the dev bundle (used by `task ios:run`)
@@ -281,7 +283,7 @@ tasks:
         xcrun simctl spawn booted log stream \
           --level debug \
           --style compact \
-          --predicate 'senderImagePath CONTAINS[c] ".dev.app/" OR subsystem == "com.wails.{{.APP_NAME | lower}}.dev" OR process == "{{.APP_NAME | lower}}"'
+          --predicate 'senderImagePath CONTAINS[c] ".dev.app/" OR subsystem == "com.wails.{{.APP_NAME | lower}}.dev" OR process == "{{.APP_NAME}}"'
 
   logs:wide:
     summary: Wide log stream to help discover the exact process/bundle identifiers

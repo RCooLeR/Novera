@@ -14,7 +14,7 @@ type Analysis struct {
 	Warnings []string
 }
 
-// Analyze validates a regex pattern against Quarry's current bounded-regex rules.
+// Analyze validates a regex pattern against Novera's current bounded-regex rules.
 func Analyze(pattern []byte, caseInsensitive bool, maxMatchWindow int) (Analysis, error) {
 	if len(pattern) == 0 {
 		return Analysis{}, errors.New("empty pattern")
@@ -49,7 +49,7 @@ func Analyze(pattern []byte, caseInsensitive bool, maxMatchWindow int) (Analysis
 	return Analysis{Warnings: warnings}, nil
 }
 
-// Compile validates and compiles a regex pattern under Quarry's bounded-regex
+// Compile validates and compiles a regex pattern under Novera's bounded-regex
 // policy. Patterns that can match empty text are refused because they do not
 // consume input and can make search/replace counts ambiguous across chunks.
 func Compile(pattern []byte, caseInsensitive bool) (*regexp.Regexp, error) {

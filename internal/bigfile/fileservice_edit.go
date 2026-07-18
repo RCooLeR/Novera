@@ -27,10 +27,11 @@ const stagedPreviewBytes = 240
 
 // GetStagedEdits returns the pending edits (source-anchored) for the diff panel.
 func (s *FileService) GetStagedEdits(fileID string) ([]StagedEdit, error) {
-	f, ok := s.reg.Get(fileID)
+	f, ok := s.reg.GetEdit(fileID)
 	if !ok {
 		return nil, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	if f.Edit == nil || !f.Edit.HasEdits() {
 		return nil, nil
 	}
@@ -60,9 +61,11 @@ func (s *FileService) GetStagedEdits(fileID string) ([]StagedEdit, error) {
 // SaveCopyViaDialog shows a native save dialog and writes the edited copy there.
 // A cancelled dialog returns an empty SaveResult (Mode == "") with nil error.
 func (s *FileService) SaveCopyViaDialog(fileID string) (SaveResult, error) {
-	if _, ok := s.reg.Get(fileID); !ok {
+	f, ok := s.reg.Get(fileID)
+	if !ok {
 		return SaveResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	f.Release()
 	dst, err := application.Get().Dialog.SaveFile().
 		SetMessage("Save edited copy as").
 		PromptForSingleSelection()
@@ -103,12 +106,6 @@ type SaveResult struct {
 
 func sidecarPath(path string) string { return path + ".qrp" }
 
-// recoverInPlace replays any leftover in-place patch sidecar before a file is
-// opened, so reads see a consistent state after a crash mid-save.
-func recoverInPlace(path string) {
-	_, _ = inplace.Recover(path, sidecarPath(path))
-}
-
 // editableEncoding reports whether a file can be edited in v1: byte-exact
 // round-tripping is only guaranteed for UTF-8/ASCII with LF line endings.
 func editableEncoding(encoding, lineEnding string) bool {
@@ -123,13 +120,12 @@ func editableEncoding(encoding, lineEnding string) bool {
 // staged edits (reads the edited view when edits exist, else the raw document).
 // startByte is aligned down to a line start; pass any byte for go-to / prev.
 func (s *FileService) GetEditWindow(fileID string, startByte int64, maxBytes int) (Window, error) {
-	f, ok := s.reg.Get(fileID)
+	f, ok := s.reg.GetEdit(fileID)
 	if !ok {
 		return Window{}, fmt.Errorf("unknown file id %q", fileID)
 	}
-	if maxBytes <= 0 {
-		maxBytes = editWindowBytes
-	}
+	defer f.Release()
+	maxBytes = clampRequestInt(maxBytes, editWindowBytes, maxEditWindowBytes)
 
 	var size int64
 	var readRange func(a, b int64) ([]byte, error)
@@ -153,10 +149,7 @@ func (s *FileService) GetEditWindow(fileID string, startByte int64, maxBytes int
 	if err != nil {
 		return Window{}, err
 	}
-	readEnd := aligned + int64(maxBytes)
-	if readEnd > size {
-		readEnd = size
-	}
+	readEnd := boundedReadEnd(aligned, size, maxBytes)
 	raw, err := readRange(aligned, readEnd)
 	if err != nil {
 		return Window{}, err
@@ -219,13 +212,12 @@ type DiffWindow struct {
 // GetDiffWindow returns the edited and original text for a line-aligned window,
 // for the side-by-side diff view.
 func (s *FileService) GetDiffWindow(fileID string, startByte int64, maxBytes int) (DiffWindow, error) {
-	f, ok := s.reg.Get(fileID)
+	f, ok := s.reg.GetEdit(fileID)
 	if !ok {
 		return DiffWindow{}, fmt.Errorf("unknown file id %q", fileID)
 	}
-	if maxBytes <= 0 {
-		maxBytes = editWindowBytes
-	}
+	defer f.Release()
+	maxBytes = clampRequestInt(maxBytes, editWindowBytes, maxEditWindowBytes)
 	var size int64
 	var editedRange func(a, b int64) ([]byte, error)
 	if f.Edit != nil && f.Edit.HasEdits() {
@@ -246,10 +238,7 @@ func (s *FileService) GetDiffWindow(fileID string, startByte int64, maxBytes int
 	if err != nil {
 		return DiffWindow{}, err
 	}
-	end := aligned + int64(maxBytes)
-	if end > size {
-		end = size
-	}
+	end := boundedReadEnd(aligned, size, maxBytes)
 	ed, err := editedRange(aligned, end)
 	if err != nil {
 		return DiffWindow{}, err
@@ -288,12 +277,23 @@ func (s *FileService) GetDiffWindow(fileID string, startByte int64, maxBytes int
 // It trims the common prefix/suffix so only the genuinely changed bytes are
 // staged — keeping the diff granular and in-place patches minimal.
 func (s *FileService) StageEdit(fileID string, startByte int64, origLen int64, newText string) (StagingState, error) {
-	f, ok := s.reg.Get(fileID)
+	f, ok := s.reg.GetEdit(fileID)
 	if !ok {
 		return StagingState{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
+	if origLen > int64(maxEditWindowBytes) || len(newText) > maxEditWindowBytes {
+		return StagingState{}, errors.New("edit exceeds the bounded window limit")
+	}
+	endByte, ok := checkedRangeEnd(startByte, origLen)
+	if !ok {
+		return StagingState{}, errors.New("edit range is invalid")
+	}
 	sess := f.EditSession()
-	oldBytes, err := sess.ReadRange(f.Doc, startByte, startByte+origLen)
+	if endByte > sess.Size() {
+		return StagingState{}, errors.New("edit range is outside the staged document")
+	}
+	oldBytes, err := sess.ReadRange(f.Doc, startByte, endByte)
 	if err != nil {
 		return StagingState{}, err
 	}
@@ -325,34 +325,41 @@ func (s *FileService) StageEdit(fileID string, startByte int64, origLen int64, n
 
 // DiscardEdits drops all staged edits.
 func (s *FileService) DiscardEdits(fileID string) (StagingState, error) {
-	f, ok := s.reg.Get(fileID)
+	f, ok := s.reg.GetEdit(fileID)
 	if !ok {
 		return StagingState{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	f.ResetEdits()
 	return stagingState(f), nil
 }
 
 // GetStagingState reports current pending-edit status.
 func (s *FileService) GetStagingState(fileID string) (StagingState, error) {
-	f, ok := s.reg.Get(fileID)
+	f, ok := s.reg.GetEdit(fileID)
 	if !ok {
 		return StagingState{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	return stagingState(f), nil
 }
 
 // SaveCopy writes the edited file to dstPath via the streaming copy-through
 // pipeline (source untouched; staged edits remain).
 func (s *FileService) SaveCopy(fileID string, dstPath string) (SaveResult, error) {
-	f, ok := s.reg.Get(fileID)
+	f, ok := s.reg.GetEdit(fileID)
 	if !ok {
 		return SaveResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	if f.Edit == nil || !f.Edit.HasEdits() {
 		return SaveResult{}, errors.New("no staged edits")
 	}
-	summary, err := manualedit.WriteSessionToFile(context.Background(), f.Path, dstPath, f.Edit, manualedit.FileOptions{})
+	summary, err := withJobResult(s, "Save edited copy", func(ctx context.Context, progress func(int64, string)) (manualedit.FileSummary, error) {
+		return manualedit.WriteSessionToFile(ctx, f.Path, dstPath, f.Edit, manualedit.FileOptions{
+			Progress: func(p manualedit.Progress) { progress(p.BytesWritten, "bytes written") },
+		})
+	})
 	if err != nil {
 		return SaveResult{}, err
 	}
@@ -362,10 +369,16 @@ func (s *FileService) SaveCopy(fileID string, dstPath string) (SaveResult, error
 // SavePatch applies the staged edits in place (length-preserving only) with a
 // crash-safe reverse-patch sidecar, then refreshes the document from disk.
 func (s *FileService) SavePatch(fileID string) (SaveResult, error) {
-	f, ok := s.reg.Get(fileID)
+	f, ok := s.reg.GetEdit(fileID)
 	if !ok {
 		return SaveResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	released := false
+	defer func() {
+		if !released {
+			f.Release()
+		}
+	}()
 	if f.Edit == nil || !f.Edit.HasEdits() {
 		return SaveResult{}, errors.New("no staged edits")
 	}
@@ -387,20 +400,27 @@ func (s *FileService) SavePatch(fileID string) (SaveResult, error) {
 	}
 
 	// inplace.Apply commits then deletes the sidecar on success, so it is not a
-	// durable "undo" artifact and must not be reported as one — in-place rollback
-	// is a crash-recovery feature handled by inplace.Recover at open time.
+	// durable "undo" artifact and must not be reported as one. A sidecar left by
+	// an interrupted save is preserved for an explicit recovery workflow; merely
+	// opening the source must never trust and replay an adjacent file.
 	if err := inplace.Apply(f.Path, patches, sidecarPath(f.Path)); err != nil {
 		return SaveResult{}, err
 	}
-	if _, err := s.reg.Reopen(fileID); err != nil {
+	path := f.Path
+	f.Release()
+	released = true
+	reopened, err := s.reg.Reopen(fileID)
+	if err != nil {
 		return SaveResult{}, err
 	}
+	reopened.Release()
+	s.invalidateSQLSummary(fileID)
 
 	var written int64
 	for _, p := range patches {
 		written += int64(len(p.New))
 	}
-	return SaveResult{Mode: "patch", BytesWritten: written, OutputPath: f.Path}, nil
+	return SaveResult{Mode: "patch", BytesWritten: written, OutputPath: path}, nil
 }
 
 func stagingState(f *session.File) StagingState {

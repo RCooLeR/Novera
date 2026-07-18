@@ -84,6 +84,74 @@ func decodeText(data []byte) (text, enc string, ok bool) {
 	return b.String(), encLatin1, true
 }
 
+// detectPageEncoding classifies a bounded file head without requiring the
+// entire file. A trailing partial UTF-8 rune is ignored for classification;
+// invalid bytes inside the inspected prefix select lossless Latin-1.
+func detectPageEncoding(head []byte, complete bool) (enc string, binary bool) {
+	switch {
+	case bytes.HasPrefix(head, bomUTF8):
+		return encUTF8BOM, false
+	case bytes.HasPrefix(head, bomUTF16LE):
+		return encUTF16LE, false
+	case bytes.HasPrefix(head, bomUTF16BE):
+		return encUTF16BE, false
+	}
+	if bytes.IndexByte(head, 0) >= 0 {
+		if bigEndian, ok := sniffUTF16(head); ok {
+			if bigEndian {
+				return encUTF16BE, false
+			}
+			return encUTF16LE, false
+		}
+		return "", true
+	}
+	maxTrim := 3
+	if complete {
+		maxTrim = 0
+	}
+	for trim := 0; trim <= maxTrim && trim <= len(head); trim++ {
+		if utf8.Valid(head[:len(head)-trim]) {
+			return encUTF8, false
+		}
+	}
+	return encLatin1, false
+}
+
+func decodeTextPage(data []byte, enc string, absoluteOffset int64) (string, error) {
+	if absoluteOffset == 0 {
+		switch enc {
+		case encUTF8BOM:
+			data = bytes.TrimPrefix(data, bomUTF8)
+		case encUTF16LE:
+			data = bytes.TrimPrefix(data, bomUTF16LE)
+		case encUTF16BE:
+			data = bytes.TrimPrefix(data, bomUTF16BE)
+		}
+	}
+	switch enc {
+	case encUTF8, encUTF8BOM:
+		if !utf8.Valid(data) {
+			return "", fmt.Errorf("selected %s page is not valid UTF-8 at a decoder-aligned boundary", enc)
+		}
+		return string(data), nil
+	case encUTF16LE, encUTF16BE:
+		text, ok := decodeUTF16(data, enc == encUTF16BE)
+		if !ok {
+			return "", fmt.Errorf("selected %s page ends on a partial code unit", enc)
+		}
+		return text, nil
+	case encLatin1:
+		var b strings.Builder
+		b.Grow(len(data))
+		for _, c := range data {
+			b.WriteRune(rune(c))
+		}
+		return b.String(), nil
+	default:
+		return "", fmt.Errorf("unsupported page encoding %q", enc)
+	}
+}
+
 // sniffUTF16 reports whether data looks like BOM-less UTF-16 and, if so, its
 // byte order (true = big-endian). Heuristic: ASCII-ish text encoded as UTF-16
 // puts a 0x00 in the high byte of (almost) every 16-bit unit. A strong majority

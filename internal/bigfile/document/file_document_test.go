@@ -16,11 +16,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "quarry-document-test-home-*")
+	dir, err := os.MkdirTemp("", "novera-document-test-home-*")
 	if err != nil {
 		panic(err)
 	}
-	_ = os.Setenv("QUARRY_HOME", dir)
+	_ = os.Setenv("NOVERA_BIGFILE_HOME", filepath.Join(dir, "current"))
+	_ = os.Setenv("QUARRY_HOME", filepath.Join(dir, "legacy"))
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
@@ -568,6 +569,59 @@ func TestOpenFileFallsBackToLegacyIndexCache(t *testing.T) {
 	defer doc.Close()
 	if progress := doc.IndexProgress(); !progress.Done {
 		t.Fatalf("progress = %#v, want legacy cached done index", progress)
+	}
+	if _, err := os.Stat(indexCachePath(path)); err != nil {
+		t.Fatalf("validated legacy sidecar was not migrated to Novera cache: %v", err)
+	}
+}
+
+func TestOpenFileMigratesValidatedLegacyCentralIndexCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy-central-index.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree\nfour\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.StartIndexing(context.Background()); err != nil {
+		_ = doc.Close()
+		t.Fatal(err)
+	}
+	if err := doc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	canonical := indexCachePath(path)
+	data, err := os.ReadFile(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(canonical); err != nil {
+		t.Fatal(err)
+	}
+	legacy, ok := legacyCentralIndexCachePath(path)
+	if !ok {
+		t.Fatal("legacy central cache path is unavailable")
+	}
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	if progress := migrated.IndexProgress(); !progress.Done {
+		t.Fatalf("progress = %#v, want migrated cached done index", progress)
+	}
+	if _, err := os.Stat(canonical); err != nil {
+		t.Fatalf("validated legacy central cache was not republished: %v", err)
 	}
 }
 

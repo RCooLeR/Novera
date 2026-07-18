@@ -14,7 +14,7 @@ import { Shell, SecretService } from "../../bindings/novera";
 
 export { Workspace, Settings, Git, Term, LLM, Agent, Db, Watcher, Jobs, Artifacts, BigFile, Shell, SecretService };
 
-// Big-file engine (ported from Quarry) — windowed access to arbitrarily large files.
+// Big-file engine (ported from Quarry) — bounded windowed access to large files.
 export type {
   Window as BigWindow,
   HexWindow,

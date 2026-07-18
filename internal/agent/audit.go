@@ -16,14 +16,15 @@ import (
 // after-the-fact record of what the agent did and which mutations the user
 // approved or denied — the approval/audit surface the UI reads back.
 type AuditEntry struct {
-	Time     string `json:"time"` // RFC3339
-	RunID    string `json:"runId"`
-	CallID   string `json:"callId"`
-	Tool     string `json:"tool"`
-	Summary  string `json:"summary"`  // short, secret-free description of the args
-	Decision string `json:"decision"` // auto | approved | denied
-	Status   string `json:"status"`   // ok | error | denied
-	Detail   string `json:"detail"`   // clipped result/error
+	Time         string `json:"time"` // RFC3339
+	RunID        string `json:"runId"`
+	CallID       string `json:"callId"`
+	Tool         string `json:"tool"`
+	Summary      string `json:"summary"`                // short, secret-free description of the args
+	Decision     string `json:"decision"`               // auto | approved | denied
+	Status       string `json:"status"`                 // ok | error | denied
+	Detail       string `json:"detail"`                 // clipped result/error
+	IntentDigest string `json:"intentDigest,omitempty"` // exact reviewed operation, blank for automatic actions
 }
 
 // auditLog appends agent actions to a JSONL file under the user config dir. A

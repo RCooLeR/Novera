@@ -1,23 +1,54 @@
 package main
 
-import "novera/internal/secret"
+import (
+	"errors"
 
-// SecretService is the frontend-facing surface of the secret store. It
-// intentionally exposes NO value getter — the UI can store, check, delete, and
-// list credential refs, but can never read a secret back. Only Go services
-// (e.g. llm) read values, via the underlying store.
+	"novera/internal/settings"
+)
+
+// SecretService is a compatibility facade for the existing generated frontend
+// binding. It intentionally exposes no generic store access: every operation is
+// constrained to the current backend-owned LLM credential scope.
 type SecretService struct {
-	store *secret.Store
+	settings *settings.Service
 }
 
-// SetKey stores (encrypted) value under ref.
-func (s *SecretService) SetKey(ref, value string) error { return s.store.Set(ref, value) }
+const legacyLLMKeySelector = "llm.apikey"
 
-// HasKey reports whether a credential is stored for ref.
-func (s *SecretService) HasKey(ref string) bool { return s.store.Has(ref) }
+// acceptsLLMSelector keeps the old binding signature compatible while turning
+// ref into a non-authoritative selector. The actual storage handle is always
+// derived and owned by the settings service for the current provider/origin.
+func (s *SecretService) acceptsLLMSelector(ref string) bool {
+	return ref == legacyLLMKeySelector
+}
 
-// DeleteKey removes the credential for ref.
-func (s *SecretService) DeleteKey(ref string) error { return s.store.Delete(ref) }
+// SetKey stores only the current LLM credential. Arbitrary caller-selected
+// references (including database credential refs) are rejected.
+func (s *SecretService) SetKey(ref, value string) error {
+	if s.settings == nil || !s.acceptsLLMSelector(ref) {
+		return errors.New("credential reference is not owned by the LLM provider configuration")
+	}
+	return s.settings.SetLLMAPIKey(value)
+}
 
-// ListKeys returns the stored refs (never the values).
-func (s *SecretService) ListKeys() []string { return s.store.List() }
+// HasKey reports only the current LLM credential state.
+func (s *SecretService) HasKey(ref string) bool {
+	return s.settings != nil && s.acceptsLLMSelector(ref) && s.settings.HasLLMAPIKey()
+}
+
+// DeleteKey removes only the current LLM credential.
+func (s *SecretService) DeleteKey(ref string) error {
+	if s.settings == nil || !s.acceptsLLMSelector(ref) {
+		return errors.New("credential reference is not owned by the LLM provider configuration")
+	}
+	return s.settings.DeleteLLMAPIKey()
+}
+
+// ListKeys returns at most the current LLM-owned ref. Database and other
+// subsystem refs are never disclosed across the renderer boundary.
+func (s *SecretService) ListKeys() []string {
+	if s.settings == nil || !s.settings.HasLLMAPIKey() {
+		return []string{}
+	}
+	return []string{legacyLLMKeySelector}
+}

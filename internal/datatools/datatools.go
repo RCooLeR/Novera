@@ -1,11 +1,13 @@
 // Package datatools provides pure-Go inspection utilities for tabular data and
 // SQL dumps — CSV column-schema inference and SQL-dump table analysis — adapted
-// from the sibling Quarry project. Everything streams or works off a bounded
+// from code historically labeled Quarry (the exact upstream is unresolved).
+// Everything streams or works off a bounded
 // sample, so the functions stay memory-safe on multi-GB inputs.
 package datatools
 
 import (
 	"bufio"
+	"context"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -132,7 +134,7 @@ func InferCSVSchema(r io.Reader, comma rune, maxRows int) (SchemaResult, error) 
 			break
 		}
 		if e != nil {
-			break // tolerate a malformed tail; report what we have
+			return SchemaResult{}, fmt.Errorf("read CSV data record %d: %w", scanned+1, e)
 		}
 		for i := 0; i < n; i++ {
 			v := ""
@@ -196,6 +198,16 @@ var (
 // that begin with CREATE/INSERT, so even million-line dumps scan quickly.
 // maxBytes > 0 caps the scan (Truncated is set if hit); 0 means the whole file.
 func AnalyzeSQLDump(r io.Reader, maxBytes int64) (DumpSummary, error) {
+	return AnalyzeSQLDumpContext(context.Background(), r, maxBytes)
+}
+
+// AnalyzeSQLDumpContext is the cancellable form used by tracked workspace jobs.
+// It retains only a bounded statement prefix while draining arbitrarily large
+// extended-INSERT lines.
+func AnalyzeSQLDumpContext(ctx context.Context, r io.Reader, maxBytes int64) (DumpSummary, error) {
+	if maxBytes > 0 && maxBytes < math.MaxInt64 {
+		r = io.LimitReader(r, maxBytes+1)
+	}
 	br := bufio.NewReaderSize(r, 256<<10)
 	var sum DumpSummary
 	idx := map[string]int{}
@@ -204,9 +216,10 @@ func AnalyzeSQLDump(r io.Reader, maxBytes int64) (DumpSummary, error) {
 	inCopy := false  // inside a pg_dump COPY … FROM stdin data block
 
 	for {
-		line, err := br.ReadString('\n')
+		lineBytes, bytesRead, err := readSQLLinePrefix(ctx, br)
+		line := string(lineBytes)
 		lineOff := offset
-		offset += int64(len(line))
+		offset += bytesRead
 		if offset < 4096 && strings.Contains(strings.ToLower(line), "mysqldump") {
 			sum.Mysqldump = true
 		}
@@ -254,7 +267,7 @@ func AnalyzeSQLDump(r io.Reader, maxBytes int64) (DumpSummary, error) {
 		if err != nil {
 			return sum, err
 		}
-		if maxBytes > 0 && offset >= maxBytes {
+		if maxBytes > 0 && offset > maxBytes {
 			sum.Truncated = true
 			break
 		}

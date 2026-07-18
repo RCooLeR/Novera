@@ -13,6 +13,11 @@ vars:
 
   # Docker image for cross-compilation with CGO (used when CGO_ENABLED=1 on non-Windows)
   CROSS_IMAGE: wails-cross
+  BUILDINFO_LDFLAGS: >-
+    -X novera/internal/buildinfo.Version={{.NOVERA_BUILD_VERSION | default "0.1.0-dev"}}
+    -X novera/internal/buildinfo.Commit={{.NOVERA_BUILD_COMMIT | default "unknown"}}
+    -X novera/internal/buildinfo.BuildDate={{.NOVERA_BUILD_DATE | default "unknown"}}
+    -X novera/internal/buildinfo.Channel={{.NOVERA_BUILD_CHANNEL | default "development"}}
 
 tasks:
   build:
@@ -32,7 +37,7 @@ tasks:
     summary: Builds the application using native Go cross-compilation
     internal: true
     deps:
-      - task: common:go:mod:tidy
+      - task: common:go:mod:check
       - task: common:build:frontend
         vars:
           BUILD_FLAGS:
@@ -48,7 +53,7 @@ tasks:
       - cmd: rm -f *.syso
         platforms: [linux, darwin]
     vars:
-      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if .EXTRA_TAGS}}-tags {{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui"{{end}}'
+      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if .EXTRA_TAGS}}-tags {{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l" -ldflags="{{.BUILDINFO_LDFLAGS}}"{{else}}-tags production{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui {{.BUILDINFO_LDFLAGS}}"{{end}}'
     env:
       GOOS: windows
       CGO_ENABLED: '{{.CGO_ENABLED | default "0"}}'
@@ -69,7 +74,7 @@ tasks:
           Build it first: wails3 task setup:docker
     cmds:
       - task: generate:syso
-      - docker run --rm -v "{{.ROOT_DIR}}:/app" {{.GO_CACHE_MOUNT}} {{.REPLACE_MOUNTS}} -e APP_NAME="{{.APP_NAME}}" {{if .EXTRA_TAGS}}-e EXTRA_TAGS="{{.EXTRA_TAGS}}"{{end}} {{.CROSS_IMAGE}} windows {{.DOCKER_ARCH}}
+      - docker run --rm -v "{{.ROOT_DIR}}:/app" {{.GO_CACHE_MOUNT}} {{.REPLACE_MOUNTS}} -e APP_NAME="{{.APP_NAME}}" -e NOVERA_BUILD_VERSION="{{.NOVERA_BUILD_VERSION | default "0.1.0-dev"}}" -e NOVERA_BUILD_COMMIT="{{.NOVERA_BUILD_COMMIT | default "unknown"}}" -e NOVERA_BUILD_DATE="{{.NOVERA_BUILD_DATE | default "unknown"}}" -e NOVERA_BUILD_CHANNEL="{{.NOVERA_BUILD_CHANNEL | default "development"}}" {{if .EXTRA_TAGS}}-e EXTRA_TAGS="{{.EXTRA_TAGS}}"{{end}} {{.CROSS_IMAGE}} windows {{.DOCKER_ARCH}}
       - docker run --rm -v "{{.ROOT_DIR}}:/app" alpine chown -R $(id -u):$(id -g) /app/bin
       - rm -f *.syso
     vars:
@@ -93,9 +98,12 @@ tasks:
           done | tr '\n' ' '
 
   package:
-    summary: Packages the application
+    summary: Packages the application as an NSIS installer
+    preconditions:
+      - sh: '[ "{{.FORMAT}}" = "nsis" ]'
+        msg: "Only FORMAT=nsis is supported. MSIX packaging is disabled until a reviewed, committed Wails v3 configuration and package-verification workflow exist."
     cmds:
-      - task: '{{if eq (.FORMAT | default "nsis") "msix"}}create:msix:package{{else}}create:nsis:installer{{end}}'
+      - task: create:nsis:installer
     vars:
       FORMAT: '{{.FORMAT | default "nsis"}}'
 
@@ -124,32 +132,6 @@ tasks:
     vars:
       ARCH: '{{.ARCH | default ARCH}}'
       ARG_FLAG: '{{if eq .ARCH "amd64"}}AMD64{{else}}ARM64{{end}}'
-
-  create:msix:package:
-    summary: Creates an MSIX package
-    deps:
-      - task: build
-    cmds:
-      - |-
-        wails3 tool msix \
-          --config "{{.ROOT_DIR}}/wails.json" \
-          --name "{{.APP_NAME}}" \
-          --executable "{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}.exe" \
-          --arch "{{.ARCH}}" \
-          --out "{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}-{{.ARCH}}.msix" \
-          {{if .CERT_PATH}}--cert "{{.CERT_PATH}}"{{end}} \
-          {{if .PUBLISHER}}--publisher "{{.PUBLISHER}}"{{end}} \
-          {{if .USE_MSIX_TOOL}}--use-msix-tool{{else}}--use-makeappx{{end}}
-    vars:
-      ARCH: '{{.ARCH | default ARCH}}'
-      CERT_PATH: '{{.CERT_PATH | default ""}}'
-      PUBLISHER: '{{.PUBLISHER | default ""}}'
-      USE_MSIX_TOOL: '{{.USE_MSIX_TOOL | default "false"}}'
-
-  install:msix:tools:
-    summary: Installs tools required for MSIX packaging
-    cmds:
-      - wails3 tool msix-install-tools
 
   run:
     cmds:

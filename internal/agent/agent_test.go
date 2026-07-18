@@ -127,14 +127,18 @@ func TestAwaitContinueApprove(t *testing.T) {
 		s := &Service{approvals: map[string]chan bool{}}
 		const runID = "run-test"
 		callID := fmt.Sprintf("%s-continue-%d", runID, 50)
-		res := make(chan bool, 1)
+		res := make(chan gateDecision, 1)
 		go func() { res <- s.awaitContinue(context.Background(), runID, 50) }()
 		waitRegistered(t, s, callID)
 		s.Approve(callID, want)
 		select {
 		case got := <-res:
-			if got != want {
-				t.Errorf("awaitContinue = %v, want %v", got, want)
+			wantDecision := gateDenied
+			if want {
+				wantDecision = gateApproved
+			}
+			if got != wantDecision {
+				t.Errorf("awaitContinue = %s, want %s", got, wantDecision)
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("awaitContinue did not return after Approve")
@@ -152,14 +156,14 @@ func TestAwaitContinueApprove(t *testing.T) {
 func TestAwaitContinueCancel(t *testing.T) {
 	s := &Service{approvals: map[string]chan bool{}}
 	ctx, cancel := context.WithCancel(context.Background())
-	res := make(chan bool, 1)
+	res := make(chan gateDecision, 1)
 	go func() { res <- s.awaitContinue(ctx, "run-c", 50) }()
 	waitRegistered(t, s, "run-c-continue-50")
 	cancel()
 	select {
 	case got := <-res:
-		if got {
-			t.Error("awaitContinue should return false on cancel")
+		if got != gateCanceled {
+			t.Errorf("awaitContinue = %s, want %s", got, gateCanceled)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("awaitContinue did not return on cancel")
@@ -209,38 +213,82 @@ func TestAwaitGateDecisionReasons(t *testing.T) {
 	})
 }
 
+func TestAwaitGateCancellationIsAuthoritativeOverBufferedApproval(t *testing.T) {
+	s := &Service{approvals: map[string]chan bool{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	emitting := make(chan struct{})
+	releaseSelect := make(chan struct{})
+	result := make(chan gateDecision, 1)
+	go func() {
+		result <- s.awaitGate(ctx, "cancel-versus-approve", time.Second, func() {
+			close(emitting)
+			<-releaseSelect
+		})
+	}()
+	waitAgentSignal(t, emitting, "approval request callback")
+	// awaitGate is blocked before its select. Buffer approval and cancellation
+	// first so both cases are ready when it proceeds; cancellation must win no
+	// matter which case Go's select chooses.
+	s.Approve("cancel-versus-approve", true)
+	cancel()
+	close(releaseSelect)
+	select {
+	case got := <-result:
+		if got != gateCanceled {
+			t.Fatalf("awaitGate = %s, want cancellation to override approval", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("awaitGate did not resolve")
+	}
+}
+
 func TestSessionAppendAndReset(t *testing.T) {
+	done := make(chan struct{})
+	canceled := false
 	s := &Service{
-		cancels:   map[string]context.CancelFunc{},
-		approvals: map[string]chan bool{},
+		runs: map[string]*runLease{
+			"run-1": {cancel: func() { canceled = true; close(done) }, done: done, sessionID: 0},
+		},
+		approvals:       map[string]chan bool{},
+		shutdownTimeout: time.Second,
 	}
 	call := wireToolCall{ID: "call-1", Type: "function", Function: wireFunc{Name: "db_query", Arguments: `{"sql":"select 1"}`}}
 	msg := wireMsg{Role: "assistant", ToolCalls: []wireToolCall{call}}
-	s.appendSession(0, msg)
+	if !s.appendSession("run-1", 0, msg) {
+		t.Fatal("active run could not append its session message")
+	}
 	msg.ToolCalls[0].Function.Name = "mutated"
 	if got := s.session[0].ToolCalls[0].Function.Name; got != "db_query" {
 		t.Fatalf("session did not deep-copy tool calls, got %q", got)
 	}
 
-	canceled := false
-	s.cancels["run-1"] = func() { canceled = true }
-	s.approvals["call-1"] = make(chan bool, 1)
-	s.ResetConversation()
+	s.approvals["run-1-tool-1"] = make(chan bool, 1)
+	if err := s.ResetConversation(); err != nil {
+		t.Fatal(err)
+	}
 	if !canceled {
 		t.Fatal("ResetConversation did not cancel active runs")
 	}
 	if len(s.session) != 0 {
 		t.Fatalf("session length after reset = %d, want 0", len(s.session))
 	}
-	if len(s.cancels) != 0 || len(s.approvals) != 0 {
-		t.Fatalf("reset did not clear maps: cancels=%d approvals=%d", len(s.cancels), len(s.approvals))
+	if len(s.runs) != 1 || len(s.approvals) != 0 {
+		t.Fatalf("reset must retain the active-run lease while clearing approvals: runs=%d approvals=%d", len(s.runs), len(s.approvals))
 	}
 
-	s.appendSession(0, wireMsg{Role: "assistant", Content: "stale"})
+	if s.appendSession("run-1", 0, wireMsg{Role: "assistant", Content: "stale"}) {
+		t.Fatal("canceled run unexpectedly reported a successful append")
+	}
 	if len(s.session) != 0 {
 		t.Fatal("stale run appended to reset session")
 	}
-	s.appendSession(s.sessionID, wireMsg{Role: "assistant", Content: "fresh"})
+	s.mu.Lock()
+	delete(s.runs, "run-1") // simulate the run finalizer after the reset waiter observed done
+	s.runs["run-2"] = &runLease{done: make(chan struct{}), sessionID: s.sessionID}
+	s.mu.Unlock()
+	if !s.appendSession("run-2", s.sessionID, wireMsg{Role: "assistant", Content: "fresh"}) {
+		t.Fatal("fresh run could not append")
+	}
 	if len(s.session) != 1 || s.session[0].Content != "fresh" {
 		t.Fatalf("fresh append failed: %+v", s.session)
 	}
@@ -527,17 +575,18 @@ func TestSameHTTPToolRedirectHostAllowsApexWWWOnly(t *testing.T) {
 	}
 }
 
-func TestVisibleAssistantContentStripsInternalTail(t *testing.T) {
-	report := "# Project Review: Novera\n\nUseful report body.\n\n*Report generated by Gemma Review Agent.*"
-	raw := report + "\nThe user denied the write_file request for gemma-review.md. I will attempt to use append_file instead.\n\nWait, I see what happened.<channel|>\n" + report
-	if got := visibleAssistantContent(raw); got != report {
-		t.Fatalf("visibleAssistantContent() = %q, want %q", got, report)
-	}
-	if got := visibleAssistantContent("thought\n<channel|>\nsecret"); got != "" {
-		t.Fatalf("pure internal content should be hidden, got %q", got)
-	}
-	if got := visibleAssistantContent(report + "\n<channel|>\n" + report); got != report {
-		t.Fatalf("channel marker should trim duplicate tail, got %q", got)
+func TestVisibleAssistantContentPreservesAllProviderText(t *testing.T) {
+	for _, content := range []string{
+		"analysis\nThis is a legitimate report section.",
+		"The user denied the write_file request in this documented example.",
+		"Wait, I see what happened: the parser retained the marker.",
+		"A protocol article may mention <channel|> and <|thought verbatim.",
+		"Continue now by emitting real tool_calls is quoted test data.",
+		"The prompt says tool output should remain visible.",
+	} {
+		if got := visibleAssistantContent("\r\n" + content + "\r\n"); got != content {
+			t.Fatalf("visibleAssistantContent() = %q, want complete %q", got, content)
+		}
 	}
 }
 

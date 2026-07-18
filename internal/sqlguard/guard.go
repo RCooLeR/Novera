@@ -203,12 +203,14 @@ type sqlToken struct {
 	text      string
 	qualified bool
 	called    bool
+	quoted    bool
 }
 
 func analyze(query string) analysis {
 	var result analysis
 	runes := []rune(query)
 	var tokenBuilder strings.Builder
+	currentTokenQuoted := false
 	currentHasContent := false
 	nextTokenQualified := false
 	lastTokenIndex := -1
@@ -223,13 +225,15 @@ func analyze(query string) analysis {
 
 	flushToken := func() {
 		if tokenBuilder.Len() == 0 {
+			currentTokenQuoted = false
 			return
 		}
 		token := strings.ToLower(tokenBuilder.String())
 		result.tokens = append(result.tokens, token)
-		result.tokenInfos = append(result.tokenInfos, sqlToken{text: token, qualified: nextTokenQualified})
+		result.tokenInfos = append(result.tokenInfos, sqlToken{text: token, qualified: nextTokenQualified, quoted: currentTokenQuoted})
 		lastTokenIndex = len(result.tokenInfos) - 1
 		tokenBuilder.Reset()
+		currentTokenQuoted = false
 		nextTokenQualified = false
 		currentHasContent = true
 		afterTokenOnlySpace = true
@@ -281,30 +285,42 @@ func analyze(query string) analysis {
 		if inDoubleQuote {
 			if current == '"' {
 				if index+1 < len(runes) && runes[index+1] == '"' {
+					tokenBuilder.WriteRune(current)
 					index++
 				} else {
 					inDoubleQuote = false
+					flushToken()
 				}
+			} else {
+				tokenBuilder.WriteRune(current)
 			}
 			continue
 		}
 		if inBacktickQuote {
 			if current == '`' {
 				if index+1 < len(runes) && runes[index+1] == '`' {
+					tokenBuilder.WriteRune(current)
 					index++
 				} else {
 					inBacktickQuote = false
+					flushToken()
 				}
+			} else {
+				tokenBuilder.WriteRune(current)
 			}
 			continue
 		}
 		if inBracketQuote {
 			if current == ']' {
 				if index+1 < len(runes) && runes[index+1] == ']' {
+					tokenBuilder.WriteRune(current)
 					index++
 				} else {
 					inBracketQuote = false
+					flushToken()
 				}
+			} else {
+				tokenBuilder.WriteRune(current)
 			}
 			continue
 		}
@@ -344,16 +360,19 @@ func analyze(query string) analysis {
 		case '"':
 			flushToken()
 			afterTokenOnlySpace = false
+			currentTokenQuoted = true
 			inDoubleQuote = true
 			currentHasContent = true
 		case '`':
 			flushToken()
 			afterTokenOnlySpace = false
+			currentTokenQuoted = true
 			inBacktickQuote = true
 			currentHasContent = true
 		case '[':
 			flushToken()
 			afterTokenOnlySpace = false
+			currentTokenQuoted = true
 			inBracketQuote = true
 			currentHasContent = true
 		case '$':
@@ -451,6 +470,13 @@ func isSQLWordRune(value rune) bool {
 
 func containsBlockedSQL(tokens []sqlToken) bool {
 	for index, tokenInfo := range tokens {
+		// Quoted identifiers are not SQL syntax even when they are named after a
+		// blocked keyword (for example SELECT "drop" FROM metadata). They remain
+		// in tokenInfos so a quoted dangerous function call can still be detected
+		// by the per-engine blocklist below.
+		if tokenInfo.quoted {
+			continue
+		}
 		token := tokenInfo.text
 		switch token {
 		case "insert", "update", "delete", "drop", "alter", "truncate", "create", "attach", "detach",
@@ -475,14 +501,19 @@ func containsBlockedSQL(tokens []sqlToken) bool {
 }
 
 func looksLikeSelectInto(tokens []sqlToken, index int) bool {
-	next := nextSQLToken(tokens, index)
-	if next == "" || next == "from" || next == "as" {
+	next, ok := nextSQLToken(tokens, index)
+	if !ok || (!next.quoted && (next.text == "from" || next.text == "as")) {
 		return false
 	}
-	if next == "outfile" || next == "dumpfile" {
+	if !next.quoted && (next.text == "outfile" || next.text == "dumpfile") {
 		return true
 	}
 	for previous := index - 1; previous >= 0; previous-- {
+		// A quoted identifier named after a clause (for example "from") is
+		// data, not a clause boundary. Keep scanning to the actual SELECT.
+		if tokens[previous].quoted {
+			continue
+		}
 		switch tokens[previous].text {
 		case "select":
 			return true
@@ -493,11 +524,11 @@ func looksLikeSelectInto(tokens []sqlToken, index int) bool {
 	return true
 }
 
-func nextSQLToken(tokens []sqlToken, index int) string {
+func nextSQLToken(tokens []sqlToken, index int) (sqlToken, bool) {
 	if index+1 >= len(tokens) {
-		return ""
+		return sqlToken{}, false
 	}
-	return tokens[index+1].text
+	return tokens[index+1], true
 }
 
 func containsBlockedSQLForKind(analysis analysis, kind string) bool {

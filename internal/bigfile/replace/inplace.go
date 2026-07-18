@@ -27,7 +27,7 @@ type InPlaceSummary struct {
 var ErrInPlacePatchDisabled = errors.New("in-place patching is disabled because it can partially mutate the source; use safe output replace instead")
 
 // ReplacePlainFileInPlace used to patch sourcePath directly for same-length replacements.
-// Quarry now refuses that public path because it can leave the original partially mutated
+// Novera refuses that public path because it can leave the original partially mutated
 // after a crash or cancellation. Use the safe output/manifest replacement pipeline instead.
 func ReplacePlainFileInPlace(ctx context.Context, sourcePath string, pattern []byte, repl []byte, opts InPlaceOptions) (InPlaceSummary, error) {
 	_ = ctx

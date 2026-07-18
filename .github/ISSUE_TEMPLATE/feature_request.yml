@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose a bounded Novera capability or usability improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe observable behavior, limits, cancellation, and error handling.
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Security and data impact
+      description: Note any new filesystem, process, network, database, credential, bridge, or persistence authority.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

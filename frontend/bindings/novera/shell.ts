@@ -12,6 +12,20 @@
 // @ts-ignore: Unused imports
 import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Create } from "@wailsio/runtime";
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as buildinfo$0 from "./internal/buildinfo/models.js";
+
+/**
+ * BuildInfo returns the canonical, non-secret identity embedded in the running
+ * executable so users and support can identify the exact build in About.
+ */
+export function BuildInfo(): $CancellablePromise<buildinfo$0.Info> {
+    return $Call.ByID(3076332310).then(($result: any) => {
+        return $$createType0($result);
+    });
+}
+
 /**
  * OpenExternal opens a web/mail URL in the OS default handler. Only http(s) and
  * mailto are allowed; file/UNC and other schemes are rejected so a crafted
@@ -36,3 +50,16 @@ export function SaveTextFile(suggestedName: string, content: string): $Cancellab
 export function SelectFolder(): $CancellablePromise<string> {
     return $Call.ByID(1911959446);
 }
+
+/**
+ * SetUnsavedResources mirrors the renderer's aggregate dirty-resource state
+ * into the native host. The WindowClosing hook consults this value before the
+ * WebView is torn down, so an OS title-bar close cannot bypass the renderer's
+ * normal save/discard checks.
+ */
+export function SetUnsavedResources(unsaved: boolean): $CancellablePromise<void> {
+    return $Call.ByID(3659178193, unsaved);
+}
+
+// Private type creation functions
+const $$createType0 = buildinfo$0.Info.createFrom;

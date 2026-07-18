@@ -1,4 +1,4 @@
-// Package document is Quarry's bounded file-reading model.
+// Package document is Novera's bounded file-reading model.
 //
 // A FileDocument represents a source file without loading it all into memory.
 // Callers ask for byte ranges, line starts, decoded previews, and sparse index

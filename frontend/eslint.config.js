@@ -8,14 +8,19 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+  },
+  {
     files: ["**/*.{ts,tsx}"],
     languageOptions: {
       globals: { ...globals.browser },
     },
     rules: {
-      // This app interops with untyped bridge/event payloads; `any` is sometimes
-      // unavoidable at those seams, and unused names are a warning, not an error.
-      "@typescript-eslint/no-explicit-any": "off",
+			// Bridge and event payloads enter as unknown and are validated before use.
+			"@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
     },
   },
