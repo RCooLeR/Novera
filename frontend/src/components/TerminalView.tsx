@@ -5,16 +5,48 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Events } from "@wailsio/runtime";
 import "@xterm/xterm/css/xterm.css";
 import { Term } from "../lib/services";
+import { useStore } from "../state/store";
+import { TerminalEventRouter } from "./terminalEventRouter";
+import type { TerminalRoutedEvent } from "./terminalEventRouter";
 
 interface DataPayload {
   id: string;
   data: string;
 }
 
+// Serialize terminal Start/Close calls across React effect generations. This
+// ensures a workspace change cannot start the replacement PTY before the old
+// effect's pending Start has either been adopted or closed.
+let terminalLifecycle: Promise<void> = Promise.resolve();
+
+function enqueueTerminalLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+  const result = terminalLifecycle.then(operation, operation);
+  terminalLifecycle = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
 function payloadOf(e: { data: unknown }): DataPayload | null {
   const d = Array.isArray(e.data) ? e.data[0] : e.data;
-  if (d && typeof d === "object" && "id" in d) return d as DataPayload;
+  if (
+    d &&
+    typeof d === "object" &&
+    "id" in d &&
+    typeof d.id === "string" &&
+    "data" in d &&
+    typeof d.data === "string"
+  ) {
+    return { id: d.id, data: d.data };
+  }
   return null;
+}
+
+function exitIdOf(e: { data: unknown }): string {
+  const d = Array.isArray(e.data) ? e.data[0] : e.data;
+  if (d && typeof d === "object" && "id" in d && typeof d.id === "string") return d.id;
+  return "";
 }
 
 function decodeBase64(b64: string): Uint8Array {
@@ -26,8 +58,11 @@ function decodeBase64(b64: string): Uint8Array {
 
 export default function TerminalView() {
   const ref = useRef<HTMLDivElement | null>(null);
+  const isOpen = useStore((state) => state.isOpen);
+  const workspaceInstanceId = useStore((state) => state.workspaceInstanceId);
 
   useEffect(() => {
+    if (!isOpen) return;
     const el = ref.current;
     if (!el) return;
 
@@ -52,8 +87,40 @@ export default function TerminalView() {
     let starting = false;
     let started = false; // first fit+start is deferred until the element has size
     let disposed = false;
-    let offData: (() => void) | undefined;
-    let offExit: (() => void) | undefined;
+    const eventRouter = new TerminalEventRouter();
+
+    const reportError = (operation: string, error: unknown) => {
+      if (!disposed) term.writeln(`\r\n\x1b[31m[terminal ${operation} failed: ${String(error)}]\x1b[0m`);
+    };
+
+    const applyEvents = (events: TerminalRoutedEvent[]) => {
+      for (const event of events) {
+        if (event.kind === "data") {
+          try {
+            term.write(decodeBase64(event.data));
+          } catch (error) {
+            reportError("output decode", error);
+          }
+        } else if (event.kind === "exit") {
+          closed = true;
+          term.writeln("\r\n\x1b[90m[process exited — press Enter to restart]\x1b[0m");
+        } else {
+          term.writeln("\r\n\x1b[33m[early terminal output exceeded the safety buffer and was truncated]\x1b[0m");
+        }
+      }
+    };
+
+    // Subscribe before Start: the backend read loop begins before the Start
+    // promise is delivered, so output and exit must be queued by backend ID
+    // until that ID is adopted below.
+    const offData = Events.On("term:data", (e: { data: unknown }) => {
+      const payload = payloadOf(e);
+      if (payload) applyEvents(eventRouter.data(payload.id, payload.data));
+    });
+    const offExit = Events.On("term:exit", (e: { data: unknown }) => {
+      const eventId = exitIdOf(e);
+      if (eventId) applyEvents(eventRouter.exit(eventId));
+    });
 
     // Coalesce keystrokes / paste chunks into a single IPC write per microtask
     // instead of one round-trip per character.
@@ -63,7 +130,7 @@ export default function TerminalView() {
       flushScheduled = false;
       const data = writeBuf;
       writeBuf = "";
-      if (data && !closed && id) void Term.Write(id, data);
+      if (data && !closed && id) void Term.Write(id, data).catch((error) => reportError("write", error));
     };
     const queueWrite = (d: string) => {
       writeBuf += d;
@@ -77,29 +144,21 @@ export default function TerminalView() {
       if (starting) return; // ignore a second restart while one is in flight
       starting = true;
       id = ""; // drop the stale id so a late write can't hit a dead session
+      eventRouter.deactivate();
       try {
-        const newId = await Term.Start(term.cols, term.rows);
-        if (disposed) {
-          void Term.Close(newId);
-          return;
-        }
-        id = newId;
-        closed = false; // only now is it safe to accept input
-        offData?.();
-        offExit?.();
-        offData = Events.On("term:data", (e: { data: unknown }) => {
-          const p = payloadOf(e);
-          if (p && p.id === id) term.write(decodeBase64(p.data));
-        });
-        offExit = Events.On("term:exit", (e: { data: unknown }) => {
-          const p = payloadOf(e);
-          if (p && p.id === id) {
-            closed = true;
-            term.writeln("\r\n\x1b[90m[process exited — press Enter to restart]\x1b[0m");
+        await enqueueTerminalLifecycle(async () => {
+          const newId = await Term.Start(term.cols, term.rows);
+          if (disposed) {
+            await Term.Close(newId);
+            return;
           }
+          id = newId;
+          closed = false;
+          applyEvents(eventRouter.activate(newId));
         });
       } catch (err) {
-        term.writeln("Failed to start terminal: " + String(err));
+        if (disposed) console.error("terminal lifecycle failed after disposal", err);
+        else term.writeln("Failed to start terminal: " + String(err));
       } finally {
         starting = false;
       }
@@ -131,7 +190,7 @@ export default function TerminalView() {
         return;
       }
       fit.fit();
-      if (id && !closed) void Term.Resize(id, term.cols, term.rows);
+      if (id && !closed) void Term.Resize(id, term.cols, term.rows).catch((error) => reportError("resize", error));
     };
     const ro = new ResizeObserver(onResize);
     ro.observe(el);
@@ -139,12 +198,17 @@ export default function TerminalView() {
     return () => {
       disposed = true;
       ro.disconnect();
-      offData?.();
-      offExit?.();
-      if (id) void Term.Close(id);
+      offData();
+      offExit();
+      void enqueueTerminalLifecycle(async () => {
+        if (id) await Term.Close(id);
+      }).catch((error) => console.error("terminal close failed", error));
       term.dispose();
     };
-  }, []);
+  }, [isOpen, workspaceInstanceId]);
 
-  return <div className="term" ref={ref} />;
+  if (!isOpen) {
+    return <div className="panel__empty" role="status">Open a folder to start a terminal.</div>;
+  }
+  return <div className="term" ref={ref} key={workspaceInstanceId} />;
 }

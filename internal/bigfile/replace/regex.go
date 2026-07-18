@@ -219,7 +219,9 @@ func ReplaceRegexpFile(ctx context.Context, sourcePath string, outputPath string
 		writeFailedManifest(summary.ManifestPath, &manifest, err)
 		return summary, err
 	}
-	manifest.Phase = "output_written"
+	if err := writeManifestPhaseOrFail(summary.ManifestPath, &manifest, "output_written"); err != nil {
+		return summary, err
+	}
 
 	if opts.SwapOriginal {
 		if err := verifySourceUnchanged(sourcePath, sourceState); err != nil {
@@ -238,9 +240,11 @@ func ReplaceRegexpFile(ctx context.Context, sourcePath string, outputPath string
 		}
 		manifest.Backup = backupPath
 		manifest.Swapped = true
-		manifest.Phase = "swapped"
 		summary.BackupPath = backupPath
 		summary.Swapped = true
+		if err := writeManifestPhaseOrFail(summary.ManifestPath, &manifest, "swapped"); err != nil {
+			return summary, err
+		}
 	}
 
 	if err := writeCompletedManifestOrFail(summary.ManifestPath, &manifest, st.Size()); err != nil {

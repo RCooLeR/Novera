@@ -3,12 +3,9 @@
 package secret
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
-	"encoding/base64"
 	"errors"
-	"io"
+	"fmt"
 	"sync"
 
 	"github.com/zalando/go-keyring"
@@ -16,100 +13,78 @@ import (
 
 // On non-Windows platforms secrets are AES-256-GCM encrypted with a per-user
 // master key kept in the OS keyring (macOS Keychain / Linux Secret Service via
-// libsecret). The master key — not the secrets — lives in the keyring; the
-// encrypted values live in the 0600 secrets file. This is real at-rest
-// encryption: a leak of the config dir no longer leaks credentials. We fail
-// closed if the keyring is unavailable rather than silently storing plaintext.
-const (
-	keyringService = "Novera"
-	keyringKeyName = "secret-store-master-key"
-)
+// libsecret). The master key, not the secrets, lives in the keyring; encrypted
+// values live in the 0600 secrets file. We fail closed if the keyring is
+// unavailable and never replace existing malformed key material.
+var masterKeyMu sync.Mutex
 
-var (
-	masterKeyMu sync.Mutex
-	cachedKey   []byte
-)
-
-// masterKey returns the per-user AES-256 key, fetching it from the OS keyring or
-// generating + persisting one there on first use.
-func masterKey() ([]byte, error) {
+// masterKey fetches the durable key on every operation. Caching it would let a
+// running process keep writing ciphertext after the durable keyring entry was
+// removed or corrupted. Creation is allowed only for a proven-empty store.
+func masterKey(allowCreate bool) ([]byte, error) {
 	masterKeyMu.Lock()
 	defer masterKeyMu.Unlock()
-	if cachedKey != nil {
-		return cachedKey, nil
-	}
 	enc, err := keyring.Get(keyringService, keyringKeyName)
 	if err == nil {
-		if key, derr := base64.StdEncoding.DecodeString(enc); derr == nil && len(key) == 32 {
-			cachedKey = key
-			return key, nil
+		return resolveMasterKeyMaterial(enc, true, false, nil, nil)
+	}
+	if !errors.Is(err, keyring.ErrNotFound) {
+		return nil, fmt.Errorf("read secret-store master key from OS keyring service %q account %q: %w", keyringService, keyringKeyName, err)
+	}
+	return resolveMasterKeyMaterial("", false, allowCreate, func(record string) error {
+		return persistAndVerifyMasterKeyRecord(record, func(value string) error {
+			return keyring.Set(keyringService, keyringKeyName, value)
+		}, func() (string, error) {
+			return keyring.Get(keyringService, keyringKeyName)
+		})
+	}, rand.Reader)
+}
+
+// encryptionBackendHealth validates the durable key without ever creating or
+// rewriting it. A missing key is healthy only when there is no ciphertext that
+// could depend on an older key.
+func encryptionBackendHealth(hasEncryptedSecrets bool) error {
+	masterKeyMu.Lock()
+	defer masterKeyMu.Unlock()
+	enc, err := keyring.Get(keyringService, keyringKeyName)
+	if err == nil {
+		_, err = decodeMasterKeyMaterial(enc)
+		return err
+	}
+	if errors.Is(err, keyring.ErrNotFound) {
+		if hasEncryptedSecrets {
+			return &MasterKeyUnavailableError{Service: keyringService, Account: keyringKeyName}
 		}
-		// Stored key is corrupt/wrong size — regenerate (existing secrets become
-		// undecryptable, which Get() surfaces rather than masking).
-	} else if !errors.Is(err, keyring.ErrNotFound) {
-		// Keyring backend unavailable (e.g. headless, no Secret Service) — fail
-		// closed instead of falling back to plaintext.
-		return nil, err
+		return nil
 	}
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
-	}
-	if err := keyring.Set(keyringService, keyringKeyName, base64.StdEncoding.EncodeToString(key)); err != nil {
-		return nil, err
-	}
-	cachedKey = key
-	return key, nil
+	return fmt.Errorf("read secret-store master key from OS keyring service %q account %q: %w", keyringService, keyringKeyName, err)
 }
 
-func aead() (cipher.AEAD, error) {
-	key, err := masterKey()
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
-}
-
-func encryptString(plain string) (string, error) {
+func encryptString(plain, ref string, allowKeyCreation bool) (string, error) {
 	if plain == "" {
 		return "", nil
 	}
-	gcm, err := aead()
+	key, err := masterKey(allowKeyCreation)
 	if err != nil {
 		return "", err
 	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-	// Prepend the nonce so decrypt can recover it; result is base64 for JSON.
-	ct := gcm.Seal(nonce, nonce, []byte(plain), nil)
-	return base64.StdEncoding.EncodeToString(ct), nil
+	return encryptStringWithKey(key, plain, ref, ciphertextV3, rand.Reader)
 }
 
-func decryptString(enc string) (string, error) {
-	if enc == "" {
-		return "", nil
+// newCiphertextDecryptor takes exactly one immutable master-key snapshot for a
+// validation pass. A keyring outage/change therefore cannot occur between the
+// health check and individual ciphertext authentication and be mislabeled as
+// permanent store corruption.
+func newCiphertextDecryptor(hasEncryptedSecrets bool) (ciphertextDecryptor, error) {
+	if !hasEncryptedSecrets {
+		if err := encryptionBackendHealth(false); err != nil {
+			return nil, err
+		}
+		return func(ciphertextRecord, string) (string, error) { return "", nil }, nil
 	}
-	raw, err := base64.StdEncoding.DecodeString(enc)
+	key, err := masterKey(false)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	gcm, err := aead()
-	if err != nil {
-		return "", err
-	}
-	ns := gcm.NonceSize()
-	if len(raw) < ns {
-		return "", errors.New("ciphertext too short")
-	}
-	plain, err := gcm.Open(nil, raw[:ns], raw[ns:], nil)
-	if err != nil {
-		return "", err
-	}
-	return string(plain), nil
+	return newCiphertextDecryptorWithKey(key)
 }

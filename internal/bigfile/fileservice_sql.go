@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 
@@ -39,6 +38,17 @@ type SqlSummaryResult struct {
 	Header       bool       `json:"header"`
 }
 
+type cachedSQLSummary struct {
+	Generation uint64
+	Summary    sqlanalyze.Summary
+}
+
+func (s *FileService) invalidateSQLSummary(fileID string) {
+	s.sqlMu.Lock()
+	delete(s.sqlSummary, fileID)
+	s.sqlMu.Unlock()
+}
+
 // SqlAnalyze streams a single pass over the dump to discover tables and stats,
 // caching the result for later extraction. This is a full pass — the UI should
 // show progress for huge files.
@@ -47,16 +57,21 @@ func (s *FileService) SqlAnalyze(fileID string) (SqlSummaryResult, error) {
 	if !ok {
 		return SqlSummaryResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	// Reuse the document's already-open descriptor (it satisfies ReaderAtSize)
 	// instead of AnalyzeFile reopening the path. NOTE: this still reads the whole
 	// file once; fusing the analyze pass with line indexing to avoid the second
 	// full read is a separate, larger change.
-	summary, err := sqlanalyze.Analyze(context.Background(), f.Doc, sqlanalyze.Options{})
+	summary, err := withJobResult(s, "Analyze SQL dump", func(ctx context.Context, progress func(int64, string)) (sqlanalyze.Summary, error) {
+		return sqlanalyze.Analyze(ctx, f.Doc, sqlanalyze.Options{
+			Progress: func(p sqlanalyze.Progress) { progress(p.BytesProcessed, "bytes analyzed") },
+		})
+	})
 	if err != nil {
 		return SqlSummaryResult{}, err
 	}
 	s.sqlMu.Lock()
-	s.sqlSummary[fileID] = summary
+	s.sqlSummary[fileID] = cachedSQLSummary{Generation: f.Generation, Summary: summary}
 	s.sqlMu.Unlock()
 
 	// Per-table byte size, from contiguous ranges (start of this table → start of
@@ -84,16 +99,11 @@ func (s *FileService) SqlAnalyze(fileID string) (SqlSummaryResult, error) {
 // SqlExtractTableViaDialog writes one table's byte range to a chosen output
 // file (streamed; never materializes the whole dump).
 func (s *FileService) SqlExtractTableViaDialog(fileID string, tableName string) (TransformResult, error) {
-	f, ok := s.reg.Get(fileID)
-	if !ok {
-		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
+	f, summary, err := s.sqlSummaryFor(fileID)
+	if err != nil {
+		return TransformResult{}, err
 	}
-	s.sqlMu.Lock()
-	summary, have := s.sqlSummary[fileID]
-	s.sqlMu.Unlock()
-	if !have {
-		return TransformResult{}, errors.New("analyze the dump first")
-	}
+	defer f.Release()
 	rng, err := sqlextract.PlanExtractTable(summary, f.Doc.Size(), tableName, sqlextract.PlanOptions{})
 	if err != nil {
 		return TransformResult{}, err
@@ -102,7 +112,11 @@ func (s *FileService) SqlExtractTableViaDialog(fileID string, tableName string) 
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	sum, err := exportx.ExportByteRange(context.Background(), f.Doc, f.Path, dst, rng.StartOffset, rng.EndOffset, exportx.Options{})
+	sum, err := withJobResult(s, "Extract SQL table", func(ctx context.Context, progress func(int64, string)) (exportx.Summary, error) {
+		return exportx.ExportByteRange(ctx, f.Doc, f.Path, dst, rng.StartOffset, rng.EndOffset, exportx.Options{
+			Progress: func(done int64, _ int64) { progress(done, "bytes written") },
+		})
+	})
 	if err != nil {
 		return TransformResult{}, err
 	}
@@ -132,6 +146,7 @@ func (s *FileService) SqlLint(fileID string) (SqlLintResult, error) {
 	if err != nil {
 		return SqlLintResult{}, err
 	}
+	defer f.Release()
 	var out []SqlLintFinding
 
 	empty := make([]string, 0)
@@ -191,12 +206,17 @@ func (s *FileService) SqlSplitByTableViaDialog(fileID string) (TransformResult, 
 	if err != nil {
 		return TransformResult{}, err
 	}
+	defer f.Release()
 	dir, err := dirDialog("Choose a folder for the per-table files")
 	if err != nil || strings.TrimSpace(dir) == "" {
 		return TransformResult{}, err
 	}
-	sum, err := sqlextract.SplitByTable(context.Background(), f.Doc, f.Path, summary,
-		sqlextract.WriteOptions{PlanOptions: sqlextract.PlanOptions{OutputDir: dir}})
+	sum, err := withJobResult(s, "Split SQL dump", func(ctx context.Context, progress func(int64, string)) (sqlextract.WriteSummary, error) {
+		return sqlextract.SplitByTable(ctx, f.Doc, f.Path, summary, sqlextract.WriteOptions{
+			PlanOptions: sqlextract.PlanOptions{OutputDir: dir},
+			Progress:    func(done int64, _ int64, _ int) { progress(done, "bytes written") },
+		})
+	})
 	if err != nil {
 		return TransformResult{}, err
 	}
@@ -214,6 +234,7 @@ func (s *FileService) SqlExtractSchemaViaDialog(fileID, tableName string) (Trans
 	if err != nil {
 		return TransformResult{}, err
 	}
+	defer f.Release()
 	ranges, err := sqlextract.PlanTableRanges(summary, f.Doc.Size(), sqlextract.PlanOptions{})
 	if err != nil {
 		return TransformResult{}, err
@@ -242,7 +263,9 @@ func (s *FileService) SqlExtractSchemaViaDialog(fileID, tableName string) (Trans
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	written, err := exportRanges(f.Doc, dst, regions)
+	written, err := withJobResult(s, "Extract SQL schema", func(ctx context.Context, progress func(int64, string)) (int64, error) {
+		return exportRanges(ctx, f.Doc, f.Path, dst, regions, progress)
+	})
 	if err != nil {
 		return TransformResult{}, err
 	}
@@ -255,6 +278,7 @@ func (s *FileService) SqlExtractDataViaDialog(fileID, tableName string) (Transfo
 	if err != nil {
 		return TransformResult{}, err
 	}
+	defer f.Release()
 	ranges, err := sqlextract.PlanTableRanges(summary, f.Doc.Size(), sqlextract.PlanOptions{})
 	if err != nil {
 		return TransformResult{}, err
@@ -271,7 +295,9 @@ func (s *FileService) SqlExtractDataViaDialog(fileID, tableName string) (Transfo
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	written, err := exportRanges(f.Doc, dst, [][2]int64{region})
+	written, err := withJobResult(s, "Extract SQL data", func(ctx context.Context, progress func(int64, string)) (int64, error) {
+		return exportRanges(ctx, f.Doc, f.Path, dst, [][2]int64{region}, progress)
+	})
 	if err != nil {
 		return TransformResult{}, err
 	}
@@ -285,12 +311,13 @@ func (s *FileService) sqlSummaryFor(fileID string) (*session.File, sqlanalyze.Su
 		return nil, sqlanalyze.Summary{}, fmt.Errorf("unknown file id %q", fileID)
 	}
 	s.sqlMu.Lock()
-	summary, have := s.sqlSummary[fileID]
+	cached, have := s.sqlSummary[fileID]
 	s.sqlMu.Unlock()
-	if !have {
+	if !have || cached.Generation != f.Generation {
+		f.Release()
 		return nil, sqlanalyze.Summary{}, errors.New("analyze the dump first")
 	}
-	return f, summary, nil
+	return f, cached.Summary, nil
 }
 
 func findRange(ranges []sqlextract.TableRange, name string) (sqlextract.TableRange, bool) {
@@ -325,28 +352,43 @@ func dataRegion(r sqlextract.TableRange) [2]int64 {
 }
 
 // exportRanges streams the given byte ranges of doc, in order, into one file.
-func exportRanges(doc *document.FileDocument, dst string, ranges [][2]int64) (int64, error) {
-	out, err := os.Create(dst)
-	if err != nil {
+func exportRanges(ctx context.Context, doc *document.FileDocument, sourcePath, dst string, ranges [][2]int64, progress func(int64, string)) (int64, error) {
+	return writeSafeOutput(doc, sourcePath, dst, func(out io.Writer) error {
+		bw := bufio.NewWriterSize(out, 1<<20)
+		var written int64
+		for _, rg := range ranges {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if rg[1] <= rg[0] {
+				continue
+			}
+			n, err := io.Copy(bw, &jobContextReader{ctx: ctx, reader: io.NewSectionReader(doc, rg[0], rg[1]-rg[0])})
+			written += n
+			if progress != nil {
+				progress(written, "bytes written")
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return bw.Flush()
+	})
+}
+
+type jobContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *jobContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
 		return 0, err
 	}
-	defer out.Close()
-	bw := bufio.NewWriterSize(out, 1<<20)
-	var total int64
-	for _, rg := range ranges {
-		if rg[1] <= rg[0] {
-			continue
-		}
-		n, err := io.Copy(bw, io.NewSectionReader(doc, rg[0], rg[1]-rg[0]))
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	if err := bw.Flush(); err != nil {
-		return total, err
-	}
-	return total, out.Sync()
+	return r.reader.Read(p)
 }
 
 // SqlSampleFixtureViaDialog writes a small "dev fixture" dump: each table's DDL
@@ -357,9 +399,8 @@ func (s *FileService) SqlSampleFixtureViaDialog(fileID string, rowsPerTable int)
 	if err != nil {
 		return TransformResult{}, err
 	}
-	if rowsPerTable <= 0 {
-		rowsPerTable = 100
-	}
+	defer f.Release()
+	rowsPerTable = clampRequestInt(rowsPerTable, defaultSQLFixtureRows, maxSQLFixtureRows)
 	ranges, err := sqlextract.PlanTableRanges(summary, f.Doc.Size(), sqlextract.PlanOptions{})
 	if err != nil {
 		return TransformResult{}, err
@@ -369,45 +410,49 @@ func (s *FileService) SqlSampleFixtureViaDialog(fileID string, rowsPerTable int)
 		return TransformResult{}, err
 	}
 
-	out, err := os.Create(dst)
+	size, err := withJobResult(s, "Create SQL fixture", func(ctx context.Context, progress func(int64, string)) (int64, error) {
+		return writeSafeOutput(f.Doc, f.Path, dst, func(out io.Writer) error {
+			bw := bufio.NewWriterSize(out, 1<<20)
+			var processed int64
+
+			// Leading preamble (SET NAMES / charset) so the fixture re-imports cleanly.
+			if len(ranges) > 0 && ranges[0].StartOffset > 0 {
+				n, err := copyRange(ctx, bw, f.Doc, 0, ranges[0].StartOffset)
+				processed += n
+				progress(processed, "bytes read")
+				if err != nil {
+					return err
+				}
+			}
+			for _, r := range ranges {
+				sch := schemaRegion(r)
+				n, err := copyRange(ctx, bw, f.Doc, sch[0], sch[1])
+				processed += n
+				progress(processed, "bytes read")
+				if err != nil {
+					return err
+				}
+				dat := dataRegion(r)
+				if dat[1] > dat[0] {
+					sample, read, err := sampleInsertRows(ctx, f.Doc, dat[0], dat[1], rowsPerTable)
+					processed += read
+					progress(processed, "bytes read")
+					if err != nil {
+						return err
+					}
+					if _, err := bw.Write(sample); err != nil {
+						return err
+					}
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return bw.Flush()
+		})
+	})
 	if err != nil {
 		return TransformResult{}, err
-	}
-	defer out.Close()
-	bw := bufio.NewWriterSize(out, 1<<20)
-
-	// Leading preamble (SET NAMES / charset) so the fixture re-imports cleanly.
-	if len(ranges) > 0 && ranges[0].StartOffset > 0 {
-		if err := copyRange(bw, f.Doc, 0, ranges[0].StartOffset); err != nil {
-			return TransformResult{}, err
-		}
-	}
-	for _, r := range ranges {
-		sch := schemaRegion(r)
-		if err := copyRange(bw, f.Doc, sch[0], sch[1]); err != nil {
-			return TransformResult{}, err
-		}
-		dat := dataRegion(r)
-		if dat[1] > dat[0] {
-			sample, err := sampleInsertRows(f.Doc, dat[0], dat[1], rowsPerTable)
-			if err != nil {
-				return TransformResult{}, err
-			}
-			if _, err := bw.Write(sample); err != nil {
-				return TransformResult{}, err
-			}
-		}
-	}
-	if err := bw.Flush(); err != nil {
-		return TransformResult{}, err
-	}
-	if err := out.Sync(); err != nil {
-		return TransformResult{}, err
-	}
-	info, _ := os.Stat(dst)
-	var size int64
-	if info != nil {
-		size = info.Size()
 	}
 	return TransformResult{
 		OutputPath:     dst,
@@ -417,33 +462,37 @@ func (s *FileService) SqlSampleFixtureViaDialog(fileID string, rowsPerTable int)
 }
 
 // copyRange streams doc[start:end) into bw.
-func copyRange(bw *bufio.Writer, doc *document.FileDocument, start, end int64) error {
+func copyRange(ctx context.Context, bw *bufio.Writer, doc *document.FileDocument, start, end int64) (int64, error) {
 	if end <= start {
-		return nil
+		return 0, nil
 	}
-	_, err := io.Copy(bw, io.NewSectionReader(doc, start, end-start))
-	return err
+	return io.Copy(bw, &jobContextReader{ctx: ctx, reader: io.NewSectionReader(doc, start, end-start)})
 }
 
 // sampleInsertRows returns the prefix of an INSERT region doc[start:end) that
 // contains the first maxRows value tuples, terminated as valid SQL. It counts
 // top-level "(...)" tuples, respecting single-quoted strings with backslash and
 // doubled-quote escapes, and reads the region in chunks so it stops early.
-func sampleInsertRows(r io.ReaderAt, start, end int64, maxRows int) ([]byte, error) {
+func sampleInsertRows(ctx context.Context, r io.ReaderAt, start, end int64, maxRows int) ([]byte, int64, error) {
 	var out bytes.Buffer
 	rows, depth := 0, 0
 	inStr, esc := false, false
 	pos := start
+	var bytesRead int64
 	const chunk = 256 * 1024
 	buf := make([]byte, chunk)
 	for pos < end && rows < maxRows {
+		if err := ctx.Err(); err != nil {
+			return nil, bytesRead, err
+		}
 		want := int64(chunk)
 		if want > end-pos {
 			want = end - pos
 		}
 		n, err := r.ReadAt(buf[:want], pos)
+		bytesRead += int64(n)
 		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
+			return nil, bytesRead, err
 		}
 		if n == 0 {
 			break
@@ -490,13 +539,13 @@ func sampleInsertRows(r io.ReaderAt, start, end int64, maxRows int) ([]byte, err
 	}
 	trimmed := bytes.TrimRight(out.Bytes(), " \t\r\n,")
 	if len(trimmed) == 0 {
-		return nil, nil
+		return nil, bytesRead, nil
 	}
 	tail := []byte(";\n")
 	if trimmed[len(trimmed)-1] == ';' {
 		tail = []byte("\n")
 	}
-	return append(trimmed, tail...), nil
+	return append(trimmed, tail...), bytesRead, nil
 }
 
 // SqlReplaceViaDialog streams a find/replace (plain or regex) to a new file —
@@ -506,6 +555,7 @@ func (s *FileService) SqlReplaceViaDialog(fileID, find, replaceWith string, rege
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	if strings.TrimSpace(find) == "" {
 		return TransformResult{}, errors.New("enter text to find")
 	}
@@ -515,16 +565,19 @@ func (s *FileService) SqlReplaceViaDialog(fileID, find, replaceWith string, rege
 	}
 	rules := []replace.BatchRule{{Name: "find-replace", Find: []byte(find), Replace: []byte(replaceWith)}}
 
-	var sum replace.FileSummary
-	if regex {
-		sum, err = replace.ReplaceBatchRegexpFile(context.Background(), f.Path, dst, rules,
-			replace.FileOptions{CaseInsensitive: caseInsensitive, WholeWord: wholeWord},
-			replace.RegexOptions{CaseInsensitive: caseInsensitive})
-	} else {
-		sum, err = replace.ReplaceBatchPlainFile(context.Background(), f.Path, dst, rules,
-			replace.FileOptions{CaseInsensitive: caseInsensitive, WholeWord: wholeWord},
+	sum, err := withJobResult(s, "Replace SQL text", func(ctx context.Context, progress func(int64, string)) (replace.FileSummary, error) {
+		fileOpts := replace.FileOptions{
+			CaseInsensitive: caseInsensitive,
+			WholeWord:       wholeWord,
+			Progress:        func(p replace.Progress) { progress(p.BytesProcessed, "bytes processed") },
+		}
+		if regex {
+			return replace.ReplaceBatchRegexpFile(ctx, f.Path, dst, rules, fileOpts,
+				replace.RegexOptions{CaseInsensitive: caseInsensitive})
+		}
+		return replace.ReplaceBatchPlainFile(ctx, f.Path, dst, rules, fileOpts,
 			replace.BatchOptions{CaseInsensitive: caseInsensitive, WholeWord: wholeWord})
-	}
+	})
 	if err != nil {
 		return TransformResult{}, err
 	}
@@ -543,6 +596,8 @@ func (s *FileService) SqlReshapeInsertsViaDialog(fileID, mode string, batchSize 
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
+	batchSize = clampRequestInt(batchSize, defaultSQLBatchRows, maxSQLBatchRows)
 	m := sqlreshape.ModeSingleRow
 	defName := "single-row.sql"
 	if strings.EqualFold(strings.TrimSpace(mode), "multi") {
@@ -553,9 +608,11 @@ func (s *FileService) SqlReshapeInsertsViaDialog(fileID, mode string, batchSize 
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	sum, err := sqlreshape.ReshapeInsertsFile(context.Background(), f.Path, dst, sqlreshape.Options{
-		Mode:      m,
-		BatchSize: batchSize,
+	sum, err := withJobResult(s, "Reshape SQL inserts", func(ctx context.Context, _ func(int64, string)) (sqlreshape.Summary, error) {
+		return sqlreshape.ReshapeInsertsFile(ctx, f.Path, dst, sqlreshape.Options{
+			Mode:      m,
+			BatchSize: batchSize,
+		})
 	})
 	if err != nil {
 		return TransformResult{}, err
@@ -570,12 +627,12 @@ func (s *FileService) SqlReshapeInsertsViaDialog(fileID, mode string, batchSize 
 
 // SqlSchemaDiffResult is the structural diff between two dumps.
 type SqlSchemaDiffResult struct {
-	FileA          string                       `json:"fileA"`
-	FileB          string                       `json:"fileB"`
-	AddedTables    []string                     `json:"addedTables"`
-	RemovedTables  []string                     `json:"removedTables"`
-	ChangedTables  []sqlschemadiff.TableDiff    `json:"changedTables"`
-	UnchangedCount int                          `json:"unchangedCount"`
+	FileA          string                    `json:"fileA"`
+	FileB          string                    `json:"fileB"`
+	AddedTables    []string                  `json:"addedTables"`
+	RemovedTables  []string                  `json:"removedTables"`
+	ChangedTables  []sqlschemadiff.TableDiff `json:"changedTables"`
+	UnchangedCount int                       `json:"unchangedCount"`
 }
 
 // SqlSchemaDiff compares the table/column structure of two analyzed dumps
@@ -585,10 +642,12 @@ func (s *FileService) SqlSchemaDiff(fileIDA, fileIDB string) (SqlSchemaDiffResul
 	if err != nil {
 		return SqlSchemaDiffResult{}, err
 	}
+	defer fa.Release()
 	fb, tb, err := s.parsedSchema(fileIDB)
 	if err != nil {
 		return SqlSchemaDiffResult{}, err
 	}
+	defer fb.Release()
 	res := sqlschemadiff.Diff(ta, tb)
 	return SqlSchemaDiffResult{
 		FileA:          baseName(fa.Path),
@@ -609,6 +668,7 @@ func (s *FileService) parsedSchema(fileID string) (*session.File, []sqlschemadif
 	}
 	ranges, err := sqlextract.PlanTableRanges(summary, f.Doc.Size(), sqlextract.PlanOptions{})
 	if err != nil {
+		f.Release()
 		return nil, nil, err
 	}
 	// A CREATE TABLE statement is small; bound the read so a table whose data
@@ -634,6 +694,7 @@ func (s *FileService) parsedSchema(fileID string) (*session.File, []sqlschemadif
 		}
 		ddl, rerr := f.Doc.ReadRange(reg[0], end)
 		if rerr != nil {
+			f.Release()
 			return nil, nil, rerr
 		}
 		tables = append(tables, sqlschemadiff.Table{Name: r.Name, Columns: sqlschemadiff.ParseColumns(ddl)})
@@ -662,6 +723,7 @@ func (s *FileService) SqlApplyPresetViaDialog(fileID, name, a1, a2, a3, a4 strin
 	if !ok {
 		return TransformResult{}, fmt.Errorf("unknown file id %q", fileID)
 	}
+	defer f.Release()
 	cfg, err := sqlpreset.Build(name, a1, a2, a3, a4)
 	if err != nil {
 		return TransformResult{}, err
@@ -671,27 +733,29 @@ func (s *FileService) SqlApplyPresetViaDialog(fileID, name, a1, a2, a3, a4 strin
 		return TransformResult{}, err
 	}
 	ci := !cfg.CaseSensitive
-	var sum replace.FileSummary
-	switch cfg.Mode {
-	case sqlpreset.ModeRegex:
-		rules := []replace.BatchRule{{Name: name, Find: []byte(cfg.Search), Replace: []byte(cfg.Replace)}}
-		sum, err = replace.ReplaceBatchRegexpFile(context.Background(), f.Path, dst, rules,
-			replace.FileOptions{CaseInsensitive: ci, WholeWord: cfg.WholeWord},
-			replace.RegexOptions{CaseInsensitive: ci})
-	case sqlpreset.ModeRegexBatch:
-		sum, err = replace.ReplaceBatchRegexpFile(context.Background(), f.Path, dst, cfg.BatchRules,
-			replace.FileOptions{CaseInsensitive: ci, WholeWord: cfg.WholeWord},
-			replace.RegexOptions{CaseInsensitive: ci})
-	case sqlpreset.ModeBatch:
-		sum, err = replace.ReplaceBatchPlainFile(context.Background(), f.Path, dst, cfg.BatchRules,
-			replace.FileOptions{CaseInsensitive: ci, WholeWord: cfg.WholeWord},
-			replace.BatchOptions{CaseInsensitive: ci, WholeWord: cfg.WholeWord})
-	default: // plain
-		rules := []replace.BatchRule{{Name: name, Find: []byte(cfg.Search), Replace: []byte(cfg.Replace)}}
-		sum, err = replace.ReplaceBatchPlainFile(context.Background(), f.Path, dst, rules,
-			replace.FileOptions{CaseInsensitive: ci, WholeWord: cfg.WholeWord},
-			replace.BatchOptions{CaseInsensitive: ci, WholeWord: cfg.WholeWord})
-	}
+	sum, err := withJobResult(s, "Apply SQL preset", func(ctx context.Context, progress func(int64, string)) (replace.FileSummary, error) {
+		fileOpts := replace.FileOptions{
+			CaseInsensitive: ci,
+			WholeWord:       cfg.WholeWord,
+			Progress:        func(p replace.Progress) { progress(p.BytesProcessed, "bytes processed") },
+		}
+		switch cfg.Mode {
+		case sqlpreset.ModeRegex:
+			rules := []replace.BatchRule{{Name: name, Find: []byte(cfg.Search), Replace: []byte(cfg.Replace)}}
+			return replace.ReplaceBatchRegexpFile(ctx, f.Path, dst, rules, fileOpts,
+				replace.RegexOptions{CaseInsensitive: ci})
+		case sqlpreset.ModeRegexBatch:
+			return replace.ReplaceBatchRegexpFile(ctx, f.Path, dst, cfg.BatchRules, fileOpts,
+				replace.RegexOptions{CaseInsensitive: ci})
+		case sqlpreset.ModeBatch:
+			return replace.ReplaceBatchPlainFile(ctx, f.Path, dst, cfg.BatchRules, fileOpts,
+				replace.BatchOptions{CaseInsensitive: ci, WholeWord: cfg.WholeWord})
+		default:
+			rules := []replace.BatchRule{{Name: name, Find: []byte(cfg.Search), Replace: []byte(cfg.Replace)}}
+			return replace.ReplaceBatchPlainFile(ctx, f.Path, dst, rules, fileOpts,
+				replace.BatchOptions{CaseInsensitive: ci, WholeWord: cfg.WholeWord})
+		}
+	})
 	if err != nil {
 		return TransformResult{}, err
 	}

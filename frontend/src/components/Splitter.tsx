@@ -7,10 +7,18 @@ export default function Splitter({
   axis,
   side,
   onResize,
+  value,
+  min,
+  max,
+  label,
 }: {
   axis: "x" | "y";
   side: "left" | "right" | "top";
   onResize: (delta: number) => void;
+  value?: number;
+  min?: number;
+  max?: number;
+  label?: string;
 }) {
   // Holds the teardown for an in-flight drag so it can also run on unmount —
   // otherwise unmounting mid-drag would leak the window listeners.
@@ -58,5 +66,42 @@ export default function Splitter({
     [axis, onResize],
   );
 
-  return <div className={`splitter splitter--${side}`} onPointerDown={onPointerDown} />;
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    const horizontal = axis === "x";
+    const physicalStep =
+      event.key === "ArrowLeft" || event.key === "ArrowUp"
+        ? -10
+        : event.key === "ArrowRight" || event.key === "ArrowDown"
+          ? 10
+          : null;
+    if (physicalStep !== null && ((horizontal && event.key.includes("Arrow")) || (!horizontal && event.key.includes("Arrow")))) {
+      if ((horizontal && (event.key === "ArrowUp" || event.key === "ArrowDown")) ||
+          (!horizontal && (event.key === "ArrowLeft" || event.key === "ArrowRight"))) return;
+      event.preventDefault();
+      onResize(physicalStep);
+      return;
+    }
+    if ((event.key === "Home" || event.key === "End") && value != null && min != null && max != null) {
+      event.preventDefault();
+      const target = event.key === "Home" ? min : max;
+      // Right-edge splitters grow with positive pointer motion; left/top-edge
+      // splitters grow with negative pointer motion.
+      onResize(side === "right" ? target - value : value - target);
+    }
+  };
+
+  return (
+    <div
+      className={`splitter splitter--${side}`}
+      role="separator"
+      tabIndex={0}
+      aria-label={label ?? `Resize ${axis === "x" ? "panel width" : "panel height"}`}
+      aria-orientation={axis === "x" ? "vertical" : "horizontal"}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={value}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+    />
+  );
 }

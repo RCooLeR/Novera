@@ -1,4 +1,4 @@
-// Package plugins defines Quarry's plugin descriptor model.
+// Package plugins defines Novera's large-file plugin descriptor model.
 //
 // A plugin describes a language or workflow capability: file type detection,
 // syntax family, symbols, formatters, commands, and tool-panel metadata. The

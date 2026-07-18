@@ -190,26 +190,14 @@ export function ReadFile(rel: string): $CancellablePromise<$models.FileContent> 
 }
 
 /**
- * ReadFileRange returns a single byte-range page of a file using ReadAt, so a
- * multi-GB file can be inspected without loading it whole. Binary-ness is
- * sniffed from the file head (not the page) so mid-file text pages aren't
- * misclassified; binary files are returned as a hex dump.
+ * ReadFileRange returns one bounded, encoding-aware byte-range page using
+ * ReadAt, so a multi-GB file can be inspected without loading it whole. Source
+ * encoding is detected from the head; text boundaries are decoder-aligned and
+ * binary files retain exact requested offsets as a hex dump.
  */
 export function ReadFileRange(rel: string, offset: number, length: number): $CancellablePromise<$models.FileChunk> {
     return $Call.ByID(3731277180, rel, offset, length).then(($result: any) => {
         return $$createType11($result);
-    });
-}
-
-/**
- * ReadRaw returns a file's exact bytes (existed=false, nil data if absent). The
- * rollback journal uses it to snapshot/restore content byte-faithfully —
- * including binary and the original encoding — bypassing the editor's text decode.
- */
-export function ReadRaw(rel: string): $CancellablePromise<[string, boolean]> {
-    return $Call.ByID(589276061, rel).then(($result: any) => {
-        $result[0] = $Create.ByteSlice($result[0]);
-        return $result;
     });
 }
 
@@ -280,15 +268,6 @@ export function WriteFile(rel: string, content: string, expectedRevision: string
     return $Call.ByID(3558372542, rel, content, expectedRevision, encoding).then(($result: any) => {
         return $$createType15($result);
     });
-}
-
-/**
- * WriteRaw writes exact bytes atomically (path-contained, watcher-suppressed),
- * without the editor's encoding/optimistic-revision handling. Used by the
- * rollback restore and by append/copy where the payload is raw bytes.
- */
-export function WriteRaw(rel: string, data: string): $CancellablePromise<void> {
-    return $Call.ByID(1973568862, rel, data);
 }
 
 // Private type creation functions

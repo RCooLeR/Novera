@@ -10,9 +10,10 @@ import (
 	"novera/internal/bigfile/settings"
 )
 
-func TestWriteCreatesJSONLUnderQuarryHome(t *testing.T) {
+func TestWriteCreatesJSONLUnderNoveraBigFileHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(settings.ConfigDirEnv, home)
+	t.Setenv(settings.LegacyConfigDirEnv, "")
 
 	if err := Write("warn", "replace.recovery", "skipped manifest", map[string]string{
 		"path":  "output.sql.quarry.manifest.json",
@@ -45,6 +46,7 @@ func TestWriteCreatesJSONLUnderQuarryHome(t *testing.T) {
 func TestWriteRotatesExistingLog(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(settings.ConfigDirEnv, home)
+	t.Setenv(settings.LegacyConfigDirEnv, "")
 	oldMax := maxBytes
 	maxBytes = 8
 	defer func() {
@@ -73,6 +75,7 @@ func TestWriteRotatesExistingLog(t *testing.T) {
 func TestReadRecentReturnsNewestEntriesFirstAndSkipsMalformedLines(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(settings.ConfigDirEnv, home)
+	t.Setenv(settings.LegacyConfigDirEnv, "")
 
 	if err := Write("info", "first", "oldest", nil); err != nil {
 		t.Fatal(err)
@@ -111,6 +114,7 @@ func TestReadRecentReturnsNewestEntriesFirstAndSkipsMalformedLines(t *testing.T)
 func TestReadRecentMissingLogReturnsEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(settings.ConfigDirEnv, home)
+	t.Setenv(settings.LegacyConfigDirEnv, "")
 
 	entries, err := ReadRecent(5)
 	if err != nil {
@@ -118,5 +122,48 @@ func TestReadRecentMissingLogReturnsEmpty(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("entries = %#v, want none for missing log", entries)
+	}
+}
+
+func TestReadRecentCopiesBoundedLegacyLogIntoNovera(t *testing.T) {
+	current := filepath.Join(t.TempDir(), "current")
+	legacy := filepath.Join(t.TempDir(), "legacy")
+	t.Setenv(settings.ConfigDirEnv, current)
+	t.Setenv(settings.LegacyConfigDirEnv, legacy)
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyEntry := Entry{
+		Time:      "2026-07-17T00:00:00Z",
+		Level:     "warn",
+		Component: "migration",
+		Message:   "legacy diagnostic",
+	}
+	data, err := json.Marshal(legacyEntry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(legacy, legacyLogFileName)
+	if err := os.WriteFile(legacyPath, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := ReadRecent(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Message != legacyEntry.Message {
+		t.Fatalf("entries = %#v, want copied legacy diagnostic", entries)
+	}
+	currentPath := filepath.Join(current, logFileName)
+	if _, err := os.Stat(currentPath); err != nil {
+		t.Fatalf("Novera log was not created from legacy diagnostics: %v", err)
+	}
+	legacyAfter, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(legacyAfter), legacyEntry.Message) {
+		t.Fatal("legacy log changed during copy-forward migration")
 	}
 }

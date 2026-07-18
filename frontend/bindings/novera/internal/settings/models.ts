@@ -106,6 +106,10 @@ export class LLM {
     "provider": string;
     "baseURL": string;
     "model": string;
+
+    /**
+     * output-only backend-owned provider/origin handle; caller input is ignored
+     */
     "apiKeyRef": string;
 
     /**
@@ -142,6 +146,43 @@ export class LLM {
     static createFrom($$source: any = {}): LLM {
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         return new LLM($$parsedSource as Partial<LLM>);
+    }
+}
+
+/**
+ * LLMAPIKeyStatus is a non-secret, backend-verified credential state for UI
+ * rendering. Presence of an opaque APIKeyRef alone is never treated as proof
+ * that a credential is usable.
+ */
+export class LLMAPIKeyStatus {
+    /**
+     * missing | verified | quarantined | unavailable
+     */
+    "state": string;
+
+    /**
+     * actionable diagnostic for non-verified states
+     */
+    "message": string;
+
+    /** Creates a new LLMAPIKeyStatus instance. */
+    constructor($$source: Partial<LLMAPIKeyStatus> = {}) {
+        if (!("state" in $$source)) {
+            this["state"] = "";
+        }
+        if (!("message" in $$source)) {
+            this["message"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new LLMAPIKeyStatus instance from a string or object.
+     */
+    static createFrom($$source: any = {}): LLMAPIKeyStatus {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new LLMAPIKeyStatus($$parsedSource as Partial<LLMAPIKeyStatus>);
     }
 }
 

@@ -182,19 +182,19 @@ export class Entry {
 
 /**
  * FileChunk is one byte-range page of a file, for the read-only viewer that
- * handles files too large for the editor. Only the requested window is read
- * into memory — never the whole file.
+ * handles files too large for the editor. Text windows may expand by at most a
+ * few bytes to complete a rune/surrogate pair; the whole file is never read.
  */
 export class FileChunk {
     "path": string;
 
     /**
-     * byte offset of this page
+     * actual decoder-aligned byte offset of this page
      */
     "offset": number;
 
     /**
-     * bytes actually returned
+     * source bytes actually returned/decoded
      */
     "length": number;
 
@@ -214,7 +214,12 @@ export class FileChunk {
     "binary": boolean;
 
     /**
-     * UTF-8 text page (empty when Binary)
+     * detected source encoding; empty when binary
+     */
+    "encoding": string;
+
+    /**
+     * decoded UTF-8 text page (empty when Binary)
      */
     "text": string;
 
@@ -242,6 +247,9 @@ export class FileChunk {
         }
         if (!("binary" in $$source)) {
             this["binary"] = false;
+        }
+        if (!("encoding" in $$source)) {
+            this["encoding"] = "";
         }
         if (!("text" in $$source)) {
             this["text"] = "";
@@ -493,7 +501,7 @@ export class TablePage {
     "totalRows": number;
 
     /**
-     * the filtered/sorted set hit tableResultCap
+     * the filtered/sorted set hit its row or byte budget
      */
     "capped": boolean;
 

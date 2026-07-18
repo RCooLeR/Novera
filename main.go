@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 
 	"novera/internal/agent"
 	"novera/internal/artifacts"
@@ -32,6 +33,13 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// watcherSelfWriteNotifier adapts the watcher's package-only producer function
+// to Workspace's internal notification interface. This adapter is not a Wails
+// service, so Suppress cannot leak into the renderer bridge.
+type watcherSelfWriteNotifier struct{ service *watcher.Service }
+
+func (n watcherSelfWriteNotifier) Suppress(abs string) { watcher.Suppress(n.service, abs) }
+
 func main() {
 	if err := run(); err != nil {
 		// Log and exit non-zero without an abrupt log.Fatal mid-stack, so any
@@ -43,16 +51,17 @@ func main() {
 
 func run() error {
 	ws := workspace.New()
-	set := settings.New()
 	secrets := secret.New()
+	set := settings.New(secrets)
 	git := gitsvc.New(ws)
 	dbsvc := db.New(secrets)
 	jobsvc := jobs.New()
 	artsvc := artifacts.New(ws)
+	shell := &Shell{}
 	// Wire the watcher so the workspace's own atomic saves aren't reported back
 	// to the UI as external changes.
 	fsWatcher := watcher.New(ws)
-	workspace.WireSelfWriteNotifier(ws, fsWatcher)
+	workspace.WireSelfWriteNotifier(ws, watcherSelfWriteNotifier{service: fsWatcher})
 	// Let long data-tool ops surface as tracked jobs and register their outputs
 	// as artifacts (with lineage back to the source file).
 	workspace.WireJobsAndArtifacts(ws, jobsvc, artsvc)
@@ -64,6 +73,15 @@ func run() error {
 	app := application.New(application.Options{
 		Name:        "Novera",
 		Description: "Local-first AI workbench",
+		ShouldQuit: func() bool {
+			if !shell.hasUnsavedResources() {
+				return true
+			}
+			if mainWindow != nil {
+				mainWindow.EmitEvent("app:close-blocked")
+			}
+			return false
+		},
 		// Only one Novera may run at a time — a second launch refocuses the first
 		// instead of opening a duplicate window with its own service state.
 		SingleInstance: &application.SingleInstanceOptions{
@@ -88,8 +106,8 @@ func run() error {
 			application.NewService(jobsvc),
 			application.NewService(artsvc),
 			application.NewService(set),
-			application.NewService(&SecretService{store: secrets}),
-			application.NewService(&Shell{}),
+			application.NewService(&SecretService{settings: set}),
+			application.NewService(shell),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -116,7 +134,7 @@ func run() error {
 		MinWidth:         900,
 		MinHeight:        600,
 		BackgroundColour: application.NewRGB(13, 17, 23),
-		DevToolsEnabled:  true,
+		DevToolsEnabled:  devToolsEnabled,
 		URL:              "/",
 		Windows: application.WindowsWindow{
 			Theme: application.Dark,
@@ -129,6 +147,19 @@ func run() error {
 		},
 	})
 	mainWindow = win
+
+	// Native title-bar/window-manager close requests do not reliably honour a
+	// WebView beforeunload handler on every platform. Keep the close decision in
+	// the native event path as well: while any renderer resource is dirty, cancel
+	// the close and tell the UI why. After the user saves or explicitly discards
+	// those resources, the next close request proceeds normally.
+	win.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
+		if !shell.hasUnsavedResources() {
+			return
+		}
+		event.Cancel()
+		win.EmitEvent("app:close-blocked")
+	})
 
 	// app.Run blocks until the app quits; returning the error lets main log it
 	// and exit non-zero without an abrupt log.Fatal.

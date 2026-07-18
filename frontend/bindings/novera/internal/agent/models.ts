@@ -39,6 +39,11 @@ export class AuditEntry {
      */
     "detail": string;
 
+    /**
+     * exact reviewed operation, blank for automatic actions
+     */
+    "intentDigest"?: string;
+
     /** Creates a new AuditEntry instance. */
     constructor($$source: Partial<AuditEntry> = {}) {
         if (!("time" in $$source)) {

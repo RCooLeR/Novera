@@ -1,51 +1,15 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Bot, Check, CheckCircle2, Circle, Copy, Loader2, RefreshCw, Send, Settings2, ShieldCheck, Square, Trash2, User, Wrench, X } from "lucide-react";
 import { useStore } from "../state/store";
 import type { ChatMsg } from "../state/store";
 import Splitter from "./Splitter";
+import { visibleAssistantContent } from "./assistantContent";
+import { approvalIntentPages } from "./approvalIntent";
+import { writeClipboardText } from "../lib/clipboard";
+import ConfirmModal from "./ConfirmModal";
 
 const DEFAULT_REQUEST_TIMEOUT_SEC = 1800;
 const MAX_REQUEST_TIMEOUT_SEC = 21600;
-
-function visibleAssistantContent(content: string): string {
-  let text = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  if (!text) return "";
-  const markerIndexes = ["<channel|>", "<|channel", "<|thought", "\nthought\n", "\nanalysis\n"]
-    .map((marker) => text.indexOf(marker))
-    .filter((idx) => idx >= 0);
-  let cut = markerIndexes.length ? Math.min(...markerIndexes) : -1;
-  let offset = 0;
-  for (const line of text.match(/[^\n]*(?:\n|$)/g) ?? []) {
-    if (line === "") break;
-    if (isInternalAssistantLine(line.trim())) {
-      cut = cut < 0 ? offset : Math.min(cut, offset);
-      break;
-    }
-    offset += line.length;
-  }
-  if (cut >= 0) text = text.slice(0, cut);
-  return text.trim();
-}
-
-function isInternalAssistantLine(line: string): boolean {
-  const lower = line.toLowerCase();
-  return (
-    lower === "thought" ||
-    lower === "analysis" ||
-    lower.startsWith("the user denied the write_file request") ||
-    lower.startsWith("the user denied the append_file request") ||
-    lower.startsWith("the write_file was rejected") ||
-    lower.startsWith("since write_file was denied") ||
-    lower.startsWith("wait, looking at the previous turn") ||
-    lower.startsWith("wait, i see what happened") ||
-    lower.startsWith("wait, i see the instruction") ||
-    lower.startsWith("actually, looking at the error") ||
-    lower.startsWith("actually, let me try") ||
-    lower.startsWith("let me try append_file") ||
-    lower.includes("continue now by emitting real tool_calls") ||
-    (lower.startsWith("the prompt says") && lower.includes("tool"))
-  );
-}
 
 // Minimal, dependency-free, XSS-safe markdown for assistant output: fenced code
 // blocks and inline `code` rendered as real elements, everything else as plain
@@ -83,6 +47,49 @@ function MessageBody({ content }: { content: string }) {
   );
 }
 
+function ApprovalIntentDetail({ msg }: { msg: ChatMsg }) {
+  const pages = useMemo(() => approvalIntentPages(msg.intent ?? ""), [msg.intent]);
+  const [page, setPage] = useState(0);
+  useEffect(() => setPage(0), [msg.intent]);
+  const currentPage = Math.min(page, pages.length - 1);
+
+  if (!msg.intent || !msg.intentDigest) {
+    return <div className="toolcard__intenterror">This request has no verifiable canonical intent and cannot be approved.</div>;
+  }
+
+  return (
+    <div className="toolcard__intent">
+      <div className="toolcard__intentmeta">
+        <span>
+          Complete canonical intent · page {currentPage + 1} of {pages.length}
+        </span>
+        {msg.expiresAt && <span>Expires {new Date(msg.expiresAt).toLocaleString()}</span>}
+      </div>
+      <pre className="toolcard__detail" aria-label={`Canonical approval intent, page ${currentPage + 1} of ${pages.length}`}>
+        {pages[currentPage]}
+      </pre>
+      {pages.length > 1 && (
+        <div className="toolcard__intentpages">
+          <button type="button" className="btn" disabled={currentPage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>
+            Previous
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={currentPage === pages.length - 1}
+            onClick={() => setPage((value) => Math.min(pages.length - 1, value + 1))}
+          >
+            Next
+          </button>
+        </div>
+      )}
+      <div className="toolcard__digest">
+        SHA-256 <code>{msg.intentDigest}</code>
+      </div>
+    </div>
+  );
+}
+
 function ToolCard({ msg }: { msg: ChatMsg }) {
   const approveAgent = useStore((s) => s.approveAgent);
   let args: Record<string, string> = {};
@@ -111,16 +118,16 @@ function ToolCard({ msg }: { msg: ChatMsg }) {
   } else if (toolName === "http_request") {
     prompt = "Send this HTTP request?";
     detail = `${args.method || "GET"} ${args.url || ""}`;
-    if (args.body) detail += `\n\n${args.body.slice(0, 1200)}`;
+    if (args.body) detail += `\nRequest body: ${args.body.length.toLocaleString()} characters (shown in full below)`;
   } else if (toolName === "db_query") {
     prompt = "Run this database query?";
     detail = args.sql ?? "";
   } else if (toolName === "write_file") {
     prompt = `Create or overwrite ${args.path}?`;
-    detail = (args.content ?? "").slice(0, 1200);
+    detail = `${(args.content ?? "").length.toLocaleString()} characters (shown in full below)`;
   } else if (toolName === "apply_edit") {
     prompt = `Apply this edit to ${args.path}?`;
-    detail = `- ${(args.oldText ?? "").slice(0, 600)}\n+ ${(args.newText ?? "").slice(0, 600)}`;
+    detail = `Replace ${(args.oldText ?? "").length.toLocaleString()} characters with ${(args.newText ?? "").length.toLocaleString()} characters (shown in full below)`;
   }
 
   return (
@@ -134,11 +141,22 @@ function ToolCard({ msg }: { msg: ChatMsg }) {
         <div className="toolcard__approve">
           <span className={toolName === "run_command" || toolName === "http_request" ? "toolcard__warn" : ""}>{prompt}</span>
           {detail && <pre className="toolcard__detail">{detail}</pre>}
+          <ApprovalIntentDetail msg={msg} />
           <div className="toolcard__approvebtns">
-            <button className="btn btn--primary" onClick={() => void approveAgent(msg.callId!, true)}>
+            <button
+              type="button"
+              className="btn btn--primary"
+              disabled={!msg.intent || !msg.intentDigest}
+              onClick={() => void approveAgent(msg.callId!, true, msg.intentDigest)}
+            >
               <Check size={13} /> Allow
             </button>
-            <button className="btn" onClick={() => void approveAgent(msg.callId!, false)}>
+            <button
+              type="button"
+              className="btn"
+              disabled={!msg.intent || !msg.intentDigest}
+              onClick={() => void approveAgent(msg.callId!, false, msg.intentDigest)}
+            >
               <X size={13} /> Deny
             </button>
           </div>
@@ -181,10 +199,16 @@ export default function AssistantPanel() {
   const chatStreaming = useStore((s) => s.chatStreaming);
   const models = useStore((s) => s.models);
   const settings = useStore((s) => s.settings);
+  const settingsError = useStore((s) => s.settingsError);
+  const llmAPIKeyAvailable = useStore((s) => s.llmAPIKeyAvailable);
+  const llmAPIKeyStatus = useStore((s) => s.llmAPIKeyStatus);
+  const llmAPIKeyStatusMessage = useStore((s) => s.llmAPIKeyStatusMessage);
   const agentMode = useStore((s) => s.agentMode);
   const agentPlan = useStore((s) => s.agentPlan);
   const toggleAgentMode = useStore((s) => s.toggleAgentMode);
   const resizeAssistant = useStore((s) => s.resizeAssistant);
+  const assistantWidth = useStore((s) => s.assistantWidth);
+  const setStatus = useStore((s) => s.setStatus);
   const sendChat = useStore((s) => s.sendChat);
   const sendAgent = useStore((s) => s.sendAgent);
   const cancelChat = useStore((s) => s.cancelChat);
@@ -197,15 +221,28 @@ export default function AssistantPanel() {
   const [input, setInput] = useState("");
   const [configOpen, setConfigOpen] = useState(false);
   const [keyInput, setKeyInput] = useState("");
+  const [confirmRemoveKey, setConfirmRemoveKey] = useState(false);
+  const [streamAnnouncement, setStreamAnnouncement] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
+  const wasStreamingRef = useRef(false);
 
   const llm = settings?.llm;
+  const llmCredentialPending = llmAPIKeyStatus === "quarantined";
+  const llmCredentialUnavailable = llmAPIKeyStatus === "unavailable";
+  const settingsBlocked = Boolean(settingsError);
+  const settingsDiagnosticId = settingsError ? "assistant-settings-error" : undefined;
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [chat, agentPlan]);
+
+  useEffect(() => {
+    if (chatStreaming && !wasStreamingRef.current) setStreamAnnouncement("Assistant response started.");
+    if (!chatStreaming && wasStreamingRef.current) setStreamAnnouncement("Assistant response finished.");
+    wasStreamingRef.current = chatStreaming;
+  }, [chatStreaming]);
 
   const handleMessagesScroll = () => {
     const el = scrollRef.current;
@@ -224,7 +261,7 @@ export default function AssistantPanel() {
 
   return (
     <div className="assistant">
-      <Splitter axis="x" side="left" onResize={resizeAssistant} />
+      <Splitter axis="x" side="left" onResize={resizeAssistant} value={assistantWidth} min={260} max={720} label="Resize assistant" />
       <div className="assistant__header">
         <div className="assistant__modes">
           <button
@@ -248,6 +285,8 @@ export default function AssistantPanel() {
         <select
           className="assistant__model"
           value={llm?.model ?? ""}
+          disabled={settingsBlocked}
+          aria-describedby={settingsDiagnosticId}
           onChange={(e) => void saveLLMConfig({ model: e.target.value })}
           title="Model"
         >
@@ -270,11 +309,22 @@ export default function AssistantPanel() {
         </button>
       </div>
 
+      {settingsError && (
+        <div id="assistant-settings-error" className="assistant__config-error" role="alert">
+          {settingsError}
+        </div>
+      )}
+
       {configOpen && llm && (
         <div className="assistant__config">
           <label>
             Provider
-            <select value={llm.provider} onChange={(e) => void saveLLMConfig({ provider: e.target.value })}>
+            <select
+              value={llm.provider}
+              disabled={settingsBlocked}
+              aria-describedby={settingsDiagnosticId}
+              onChange={(e) => void saveLLMConfig({ provider: e.target.value })}
+            >
               <option value="ollama">Ollama (local)</option>
               <option value="openai">OpenAI</option>
               <option value="custom">Custom (OpenAI-compatible)</option>
@@ -287,6 +337,8 @@ export default function AssistantPanel() {
             <input
               key={`baseurl-${llm.baseURL}`}
               defaultValue={llm.baseURL}
+              disabled={settingsBlocked}
+              aria-describedby={settingsDiagnosticId}
               spellCheck={false}
               onBlur={(e) => {
                 if (e.target.value !== llm.baseURL) void saveLLMConfig({ baseURL: e.target.value });
@@ -295,21 +347,48 @@ export default function AssistantPanel() {
             />
           </label>
           <label>
-            API key {llm.apiKeyRef ? <span className="assistant__keyset">stored</span> : null}
+            API key {llmAPIKeyAvailable ? <span className="assistant__keyset">stored</span> : null}
+            {llmCredentialPending ? <span className="assistant__keypending">re-entry required</span> : null}
+            {llmCredentialUnavailable ? <span className="assistant__keypending">unavailable</span> : null}
             <input
               type="password"
               value={keyInput}
+              disabled={settingsBlocked || llmCredentialUnavailable}
+              aria-describedby={settingsDiagnosticId}
               spellCheck={false}
               onChange={(e) => setKeyInput(e.target.value)}
-              placeholder={llm.apiKeyRef ? "•••••• (stored — type to replace)" : "Not needed for local Ollama"}
-              onBlur={() => {
-                if (keyInput) {
-                  void setApiKey(keyInput);
-                  setKeyInput("");
+              placeholder={
+                llmAPIKeyAvailable
+                  ? "•••••• (stored — type to replace)"
+                  : llmCredentialPending
+                    ? "Re-enter the key for this provider origin"
+                    : llmCredentialUnavailable
+                      ? "Credential storage is unavailable"
+                      : "Enter an API key if this provider requires one"
+              }
+              onBlur={async () => {
+                if (keyInput && !settingsBlocked) {
+                  if (await setApiKey(keyInput)) setKeyInput("");
                 }
               }}
             />
+            {llmCredentialUnavailable && llmAPIKeyStatusMessage ? (
+              <span className="assistant__keyerror" role="alert">
+                {llmAPIKeyStatusMessage}
+              </span>
+            ) : null}
           </label>
+          {llmAPIKeyAvailable && !llmCredentialUnavailable && (
+            <button
+              type="button"
+              className="btn btn--danger"
+              disabled={settingsBlocked}
+              aria-describedby={settingsDiagnosticId}
+              onClick={() => setConfirmRemoveKey(true)}
+            >
+              Remove stored key
+            </button>
+          )}
           <label>
             Request timeout (seconds)
             {/* Commit on blur (uncontrolled, key resets to the saved value). A
@@ -321,6 +400,8 @@ export default function AssistantPanel() {
               min={30}
               max={MAX_REQUEST_TIMEOUT_SEC}
               defaultValue={llm.requestTimeoutSec || DEFAULT_REQUEST_TIMEOUT_SEC}
+              disabled={settingsBlocked}
+              aria-describedby={settingsDiagnosticId}
               spellCheck={false}
               onBlur={(e) => {
                 const n = Math.round(Number(e.target.value));
@@ -329,13 +410,14 @@ export default function AssistantPanel() {
               }}
             />
           </label>
-          <button className="btn" onClick={() => void loadModels()}>
+          <button className="btn" disabled={settingsBlocked} aria-describedby={settingsDiagnosticId} onClick={() => void loadModels()}>
             <RefreshCw size={14} /> Load models
           </button>
         </div>
       )}
 
-      <div className="assistant__messages" ref={scrollRef} onScroll={handleMessagesScroll}>
+      <span className="sr-only" role="status" aria-live="polite">{streamAnnouncement}</span>
+      <div className="assistant__messages" ref={scrollRef} aria-busy={chatStreaming} onScroll={handleMessagesScroll}>
         {chat.length === 0 && (
           <div className="assistant__empty">
             {agentMode
@@ -357,7 +439,11 @@ export default function AssistantPanel() {
                 <button
                   className="msg__copy"
                   title="Copy message"
-                  onClick={() => void navigator.clipboard?.writeText(visibleAssistantContent(m.content))}
+                  onClick={() =>
+                    void writeClipboardText(visibleAssistantContent(m.content))
+                      .then(() => setStatus("Copied assistant message.", "success"))
+                      .catch((error) => setStatus(error instanceof Error ? error.message : String(error), "error"))
+                  }
                 >
                   <Copy size={12} />
                 </button>
@@ -426,6 +512,20 @@ export default function AssistantPanel() {
           </button>
         )}
       </div>
+      {confirmRemoveKey && (
+        <ConfirmModal
+          title="Remove stored API key?"
+          body="The key will be deleted from credential storage. The provider and model settings will be kept."
+          confirmLabel="Remove key"
+          danger
+          onCancel={() => setConfirmRemoveKey(false)}
+          onConfirm={() => {
+            void setApiKey("").then((removed) => {
+              if (removed) setConfirmRemoveKey(false);
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

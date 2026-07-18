@@ -1,17 +1,59 @@
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../state/store";
-import { Shell } from "../lib/services";
+import { errMessage, Shell } from "../lib/services";
+import { buildIdentityText, type BuildIdentity } from "./aboutBuildIdentity";
+import { useDialogFocus } from "../lib/useDialogFocus";
 
 const REPO_URL = "https://github.com/RCooLeR/Novera";
 
-// Help → About Novera. A small product/credits dialog.
+// Help → About Novera. Build identity is read from the running executable, not
+// duplicated from package metadata that may describe a different artifact.
 export default function AboutModal() {
   const open = useStore((s) => s.aboutOpen);
   const close = useStore((s) => s.closeAbout);
+  const [build, setBuild] = useState<BuildIdentity | null>(null);
+  const [error, setError] = useState("");
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useDialogFocus(open, close, closeRef);
+
+  useEffect(() => {
+    if (!open) return;
+    let current = true;
+    setBuild(null);
+    setError("");
+    void Shell.BuildInfo()
+      .then((info) => {
+        if (current) setBuild(info);
+      })
+      .catch((cause: unknown) => {
+        if (current) setError(`Build metadata unavailable: ${errMessage(cause)}`);
+      });
+    return () => {
+      current = false;
+    };
+  }, [open]);
+
   if (!open) return null;
+
+  const openDocumentation = async () => {
+    setError("");
+    try {
+      await Shell.OpenExternal(`${REPO_URL}#readme`);
+    } catch (cause) {
+      setError(`Could not open documentation: ${errMessage(cause)}`);
+    }
+  };
 
   return (
     <div className="modal-overlay" onClick={close}>
-      <div className="modal about" onClick={(e) => e.stopPropagation()}>
+      <div
+        ref={dialogRef}
+        className="modal about"
+        role="dialog"
+        aria-modal="true"
+        aria-label="About Novera"
+        onClick={(event) => event.stopPropagation()}
+      >
         <div className="about__head">
           <img className="about__logo" src="/novera-logo.png" alt="" />
           <div>
@@ -21,15 +63,26 @@ export default function AboutModal() {
         </div>
         <p className="about__text">
           Code, data files, SQL dumps, databases, terminals, and local or OpenAI-compatible LLMs in one desktop app. A
-          streaming engine opens and edits files of <em>any</em> size — windowed viewing with line numbers, in-file
-          search, hex view, follow-tail, syntax highlighting, and crash-safe editing — plus a CSV/SQL data-tools suite.
+          bounded, windowed engine handles large files without sending whole-file content across the Go/JavaScript
+          bridge, with line numbers, in-file search, hex view, follow-tail, syntax highlighting, guarded editing, and
+          CSV/SQL tools. Actual limits depend on file structure, operation, storage, memory, and available disk space.
         </p>
-        <p className="about__meta">Wails v3 · React + TypeScript · Go</p>
+        <p className="about__meta">{build ? buildIdentityText(build) : "Loading build identity…"}</p>
+        {build && (
+          <p className="about__meta">
+            {build.goVersion} · Wails {build.wailsVersion} · React + TypeScript
+          </p>
+        )}
+        {error && (
+          <div className="alert alert--error" role="alert">
+            {error}
+          </div>
+        )}
         <div className="modal__actions">
-          <button className="btn" onClick={() => void Shell.OpenExternal(`${REPO_URL}#readme`)}>
+          <button className="btn" onClick={() => void openDocumentation()}>
             Documentation
           </button>
-          <button className="btn btn--primary" onClick={close}>
+          <button ref={closeRef} className="btn btn--primary" onClick={close}>
             Close
           </button>
         </div>

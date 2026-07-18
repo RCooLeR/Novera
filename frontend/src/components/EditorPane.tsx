@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
 import type { OnMount } from "@monaco-editor/react";
 import { monaco } from "../lib/monaco";
@@ -7,6 +7,8 @@ import { setActiveEditor } from "../lib/editorBridge";
 import DbQueryView from "./DbQueryView";
 import TableView from "./TableView";
 import BigFileView from "./BigFileView";
+import ConfirmModal from "./ConfirmModal";
+import { errMessage, Shell } from "../lib/services";
 
 const MONO = "Cascadia Code, JetBrains Mono, Consolas, monospace";
 
@@ -23,11 +25,18 @@ export default function EditorPane() {
   const root = useStore((s) => s.root);
   const updateContent = useStore((s) => s.updateContent);
   const saveActive = useStore((s) => s.saveActive);
+  const overwriteStaleTab = useStore((s) => s.overwriteStaleTab);
   const reloadTab = useStore((s) => s.reloadTab);
+  const setStatus = useStore((s) => s.setStatus);
   const settings = useStore((s) => s.settings);
   const pendingReveal = useStore((s) => s.pendingReveal);
   const clearReveal = useStore((s) => s.clearReveal);
   const editorRef = useRef<EditorInstance | null>(null);
+  const [conflictAction, setConflictAction] = useState<"reload" | "overwrite" | null>(null);
+
+  useEffect(() => {
+    setConflictAction(null);
+  }, [tab?.instanceId]);
 
   // Keep the editor bridge pointed at a live file editor (cleared for non-files).
   useEffect(() => {
@@ -66,7 +75,7 @@ export default function EditorPane() {
   }
 
   if (tab.kind === "table" && tab.rel) {
-    return <TableView key={tab.rel} rel={tab.rel} />;
+    return <TableView key={tab.rel} rel={tab.rel} sourceVersion={tab.sourceVersion} />;
   }
 
   if (tab.kind === "diff") {
@@ -96,7 +105,17 @@ export default function EditorPane() {
   // engine opens by absolute path, so resolve it against the workspace root.
   if (tab.tooLarge || tab.binary) {
     const abs = root ? `${root}/${tab.path}` : tab.path;
-    return <BigFileView key={tab.path} abs={abs} name={tab.name} binaryHint={tab.binary} />;
+    return (
+      <BigFileView
+        key={tab.path}
+        abs={abs}
+        name={tab.name}
+        tabPath={tab.path}
+        binaryHint={tab.binary}
+        sourceVersion={tab.sourceVersion}
+        staleOnDisk={tab.staleOnDisk}
+      />
+    );
   }
 
   const onMount: OnMount = (editor) => {
@@ -118,25 +137,50 @@ export default function EditorPane() {
     }
   };
 
+  const saveConflictCopy = async () => {
+    const submittedContent = tab.content;
+    try {
+      const destination = await Shell.SaveTextFile(`${tab.name}.local-copy`, submittedContent);
+      if (destination) setStatus(`Saved a copy of the local editor version to ${destination}`, "success");
+    } catch (error) {
+      setStatus(`Could not save a copy: ${errMessage(error)}`, "error");
+    }
+  };
+
   return (
     <div className="editorwrap">
       {tab.staleOnDisk && (
         <div className="disk-banner">
-          <span>This file changed on disk.</span>
-          <button className="btn" onClick={() => void reloadTab(tab.path)}>
-            Reload
+          <span>This file changed on disk. Your editor version is preserved.</span>
+          <button className="btn" onClick={() => void saveConflictCopy()}>
+            Save Copy…
           </button>
-          <button
-            className="btn"
-            onClick={() =>
-              useStore.setState((st) => ({
-                tabs: st.tabs.map((t) => (t.path === tab.path ? { ...t, staleOnDisk: false } : t)),
-              }))
-            }
-          >
-            Keep mine
+          <button className="btn" onClick={() => setConflictAction("reload")}>
+            Reload Disk…
+          </button>
+          <button className="btn btn--danger" disabled={!tab.staleRevision} onClick={() => setConflictAction("overwrite")}>
+            Overwrite Disk…
           </button>
         </div>
+      )}
+      {conflictAction && (
+        <ConfirmModal
+          title={conflictAction === "reload" ? "Reload disk version?" : "Overwrite disk version?"}
+          body={
+            conflictAction === "reload"
+              ? "This discards the unsaved editor version. Save a copy first if you may need it."
+              : "This replaces only the exact external revision Novera observed. If the file changed again, the overwrite will be refused."
+          }
+          confirmLabel={conflictAction === "reload" ? "Discard Mine & Reload" : "Overwrite Observed Version"}
+          danger
+          onConfirm={() => {
+            const action = conflictAction;
+            setConflictAction(null);
+            if (action === "reload") void reloadTab(tab.path);
+            else void overwriteStaleTab(tab.path);
+          }}
+          onCancel={() => setConflictAction(null)}
+        />
       )}
       <div className="editorwrap__editor">
         <Editor

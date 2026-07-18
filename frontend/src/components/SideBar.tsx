@@ -16,6 +16,7 @@ export default function SideBar() {
   const startNewFile = useStore((s) => s.startNewFile);
   const startNewFolder = useStore((s) => s.startNewFolder);
   const resizeSidebar = useStore((s) => s.resizeSidebar);
+  const sidebarWidth = useStore((s) => s.sidebarWidth);
 
   const collapseAll = () => useStore.setState({ expanded: { "": true } });
 
@@ -63,7 +64,15 @@ export default function SideBar() {
         {view === "artifacts" && <ArtifactsView />}
         {view === "settings" && <SettingsView />}
       </div>
-      <Splitter axis="x" side="right" onResize={resizeSidebar} />
+      <Splitter
+        axis="x"
+        side="right"
+        value={sidebarWidth}
+        min={180}
+        max={640}
+        label="Resize sidebar"
+        onResize={resizeSidebar}
+      />
     </div>
   );
 }

@@ -2,7 +2,8 @@
 // (agent runs, dump imports, …). It records each job's lifecycle
 // (running/success/failed/canceled/timeout), a bounded log, and a cancel hook,
 // and emits a "jobs:changed" event so the UI can live-update. Producers call the
-// Start/Append/Finish API; the frontend reads ListJobs/GetJob and CancelJob.
+// package-level Start/Append/Finish API; the frontend reads ListJobs/GetJob and
+// can invoke the consumer methods exposed on Service.
 package jobs
 
 import (
@@ -19,8 +20,8 @@ import (
 const EventChanged = "jobs:changed"
 
 const (
-	maxJobs     = 200  // ring cap on retained jobs
-	maxLogLines = 1000 // per-job log cap
+	maxFinishedJobs = 200  // cap on retained terminal history; active jobs are never evicted
+	maxLogLines     = 1000 // per-job log cap
 )
 
 // Status is a job's lifecycle state.
@@ -42,7 +43,7 @@ type Job struct {
 	Title     string   `json:"title"` // short human label
 	Status    Status   `json:"status"`
 	StartedAt int64    `json:"startedAt"` // unix ms
-	EndedAt   int64    `json:"endedAt"`   // unix ms, 0 while running
+	EndedAt   int64    `json:"endedAt"`   // unix ms, 0 while active
 	Error     string   `json:"error"`
 	Log       []string `json:"log"`
 
@@ -60,39 +61,51 @@ func (j *Job) clone(includeLog bool) Job {
 	return c
 }
 
-// Service is the bound Wails jobs ledger.
+// active is intentionally based on lifecycle completion rather than a list of
+// status strings. That keeps queued, running, and cancellation-requested work
+// protected if producers add intermediate non-terminal statuses in the future.
+func (j *Job) active() bool { return j.EndedAt == 0 }
+
+// Service is the bound Wails jobs ledger. Its exported methods are the complete
+// renderer contract. Producer operations deliberately remain package-level
+// functions so Wails cannot publish them as methods on this bound type.
 type Service struct {
-	mu   sync.Mutex
-	jobs []*Job // oldest..newest
-	byID map[string]*Job
-	seq  int
+	mu       sync.Mutex
+	jobs     []*Job // retained jobs in start order, oldest..newest
+	byID     map[string]*Job
+	finished []string // retained terminal IDs in completion order, oldest..newest
+	seq      int
 }
 
 // New constructs an empty jobs ledger.
 func New() *Service { return &Service{byID: map[string]*Job{}} }
 
-// --- producer API (not bound to the frontend) ---
+// --- producer API (package-level functions are not bound by Wails) ---
 
 // Start registers a new running job and returns its id. cancel may be nil for a
 // job that can't be interrupted.
-func (s *Service) Start(kind, title string, cancel context.CancelFunc) string {
+func Start(s *Service, kind, title string, cancel context.CancelFunc) string {
+	return s.start(kind, title, cancel)
+}
+
+func (s *Service) start(kind, title string, cancel context.CancelFunc) string {
 	s.mu.Lock()
 	s.seq++
 	id := fmt.Sprintf("job-%d", s.seq)
 	j := &Job{ID: id, Kind: kind, Title: title, Status: StatusRunning, StartedAt: nowMs(), cancel: cancel}
 	s.jobs = append(s.jobs, j)
 	s.byID[id] = j
-	for len(s.jobs) > maxJobs {
-		delete(s.byID, s.jobs[0].ID)
-		s.jobs = s.jobs[1:]
-	}
 	s.mu.Unlock()
 	s.emit()
 	return id
 }
 
 // Append adds a log line to a job (no-op for an unknown id).
-func (s *Service) Append(id, line string) {
+func Append(s *Service, id, line string) {
+	s.append(id, line)
+}
+
+func (s *Service) append(id, line string) {
 	s.mu.Lock()
 	if j, ok := s.byID[id]; ok {
 		j.Log = append(j.Log, line)
@@ -104,15 +117,21 @@ func (s *Service) Append(id, line string) {
 	s.emit()
 }
 
-// Finish marks a running job terminal. It is idempotent — a later Finish (e.g. a
+// Finish marks an active job terminal. It is idempotent — a later Finish (e.g. a
 // timeout racing a cancel) is ignored once the job has ended.
-func (s *Service) Finish(id string, status Status, errMsg string) {
+func Finish(s *Service, id string, status Status, errMsg string) {
+	s.finish(id, status, errMsg)
+}
+
+func (s *Service) finish(id string, status Status, errMsg string) {
 	s.mu.Lock()
-	if j, ok := s.byID[id]; ok && j.Status == StatusRunning {
+	if j, ok := s.byID[id]; ok && j.active() {
 		j.Status = status
 		j.Error = errMsg
 		j.EndedAt = nowMs()
 		j.cancel = nil
+		s.finished = append(s.finished, id)
+		s.pruneFinishedLocked()
 	}
 	s.mu.Unlock()
 	s.emit()
@@ -142,7 +161,7 @@ func (s *Service) GetJob(id string) (Job, error) {
 	return j.clone(true), nil
 }
 
-// CancelJob requests cancellation of a running job via its registered hook.
+// CancelJob requests cancellation of an active job via its registered hook.
 func (s *Service) CancelJob(id string) error {
 	s.mu.Lock()
 	j, ok := s.byID[id]
@@ -150,10 +169,10 @@ func (s *Service) CancelJob(id string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("job %q not found", id)
 	}
-	running := j.Status == StatusRunning
+	active := j.active()
 	cancel := j.cancel
 	s.mu.Unlock()
-	if !running {
+	if !active {
 		return nil // already finished — nothing to do
 	}
 	if cancel == nil {
@@ -163,20 +182,56 @@ func (s *Service) CancelJob(id string) error {
 	return nil
 }
 
-// ClearFinished drops every non-running job from the ledger.
+// ClearFinished drops every terminal job from the ledger.
 func (s *Service) ClearFinished() {
 	s.mu.Lock()
 	kept := s.jobs[:0]
 	for _, j := range s.jobs {
-		if j.Status == StatusRunning {
+		if j.active() {
 			kept = append(kept, j)
 		} else {
 			delete(s.byID, j.ID)
 		}
 	}
+	for i := len(kept); i < len(s.jobs); i++ {
+		s.jobs[i] = nil
+	}
 	s.jobs = kept
+	s.finished = nil
 	s.mu.Unlock()
 	s.emit()
+}
+
+// pruneFinishedLocked retains the most recently completed terminal jobs. It
+// must be called with s.mu held. Active entries are never considered for
+// eviction, regardless of their status string or their position in s.jobs.
+func (s *Service) pruneFinishedLocked() {
+	for len(s.finished) > maxFinishedJobs {
+		id := s.finished[0]
+		s.finished[0] = ""
+		s.finished = s.finished[1:]
+
+		j, ok := s.byID[id]
+		if !ok || j.active() {
+			continue
+		}
+		delete(s.byID, id)
+		s.removeJobLocked(id)
+	}
+}
+
+// removeJobLocked removes one retained entry without leaving its pointer in
+// the slice backing array. It must be called with s.mu held.
+func (s *Service) removeJobLocked(id string) {
+	for i, j := range s.jobs {
+		if j.ID != id {
+			continue
+		}
+		copy(s.jobs[i:], s.jobs[i+1:])
+		s.jobs[len(s.jobs)-1] = nil
+		s.jobs = s.jobs[:len(s.jobs)-1]
+		return
+	}
 }
 
 func (s *Service) emit() {

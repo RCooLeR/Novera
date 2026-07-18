@@ -185,6 +185,9 @@ func assertSourceModifiedBeforeSwap(t *testing.T, manifestPath string, sourcePat
 	if manifest.Status != "failed" {
 		t.Fatalf("manifest status = %q", manifest.Status)
 	}
+	if manifest.Phase != "output_written" {
+		t.Fatalf("manifest phase = %q, want durable output_written checkpoint", manifest.Phase)
+	}
 	if manifest.Error != ErrSourceModifiedDuringOperation.Error() {
 		t.Fatalf("manifest error = %q", manifest.Error)
 	}

@@ -11,15 +11,6 @@
 import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Create } from "@wailsio/runtime";
 
 /**
- * Suppress marks an absolute path as about-to-be-written by Novera itself, so
- * the fs event(s) the write produces are not reported back to the UI as an
- * external change. Called by the workspace service just before an atomic save.
- */
-export function Suppress(abs: string): $CancellablePromise<void> {
-    return $Call.ByID(2995329593, abs);
-}
-
-/**
  * Watch sets the workspace-relative files to monitor (the open editor tabs).
  * It (re)watches their parent directories and drops directories no longer needed.
  */

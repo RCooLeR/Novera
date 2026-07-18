@@ -1,9 +1,23 @@
 package datatools
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestAppendBoundedSQLStatementRejectsAggregateOverflow(t *testing.T) {
+	var statement strings.Builder
+	if err := appendBoundedSQLStatement(&statement, "123456", 8); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendBoundedSQLStatement(&statement, "789", 8); !errors.Is(err, ErrSQLStatementTooLong) {
+		t.Fatalf("error = %v, want ErrSQLStatementTooLong", err)
+	}
+	if got := statement.String(); got != "123456" {
+		t.Fatalf("statement changed on rejected append: %q", got)
+	}
+}
 
 func TestDumpTableToCSV_MysqldumpInsert(t *testing.T) {
 	dump := "CREATE TABLE `t` (id int, name varchar(20), email varchar(50));\n" +

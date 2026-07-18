@@ -10,8 +10,14 @@ vars:
   #
   # Password is stored securely in system keychain. Run: wails3 setup signing
 
-  # Docker image for cross-compilation (used when building on non-Linux or no CC available)
+  # Base name for target-platform Linux builder images. build:docker appends
+  # -linux-<arch> so an ARM64 image can never be confused with an AMD64 image.
   CROSS_IMAGE: wails-cross
+  BUILDINFO_LDFLAGS: >-
+    -X novera/internal/buildinfo.Version={{.NOVERA_BUILD_VERSION | default "0.1.0-dev"}}
+    -X novera/internal/buildinfo.Commit={{.NOVERA_BUILD_COMMIT | default "unknown"}}
+    -X novera/internal/buildinfo.BuildDate={{.NOVERA_BUILD_DATE | default "unknown"}}
+    -X novera/internal/buildinfo.Channel={{.NOVERA_BUILD_CHANNEL | default "development"}}
 
 tasks:
   build:
@@ -40,7 +46,7 @@ tasks:
     summary: Builds the application natively on Linux
     internal: true
     deps:
-      - task: common:go:mod:tidy
+      - task: common:go:mod:check
       - task: common:build:frontend
         vars:
           BUILD_FLAGS:
@@ -52,7 +58,7 @@ tasks:
     cmds:
       - go build {{.BUILD_FLAGS}} -o {{.OUTPUT}}
     vars:
-      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if .EXTRA_TAGS}}-tags {{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s"{{end}}'
+      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if .EXTRA_TAGS}}-tags {{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l" -ldflags="{{.BUILDINFO_LDFLAGS}}"{{else}}-tags production{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s {{.BUILDINFO_LDFLAGS}}"{{end}}'
       DEFAULT_OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}'
       OUTPUT: '{{ .OUTPUT | default .DEFAULT_OUTPUT }}'
     env:
@@ -61,7 +67,7 @@ tasks:
       GOARCH: '{{.ARCH | default ARCH}}'
 
   build:docker:
-    summary: Builds for Linux using Docker (for non-Linux hosts or when no C compiler available)
+    summary: Builds for Linux in a target-platform Docker image
     internal: true
     deps:
       - task: common:build:frontend
@@ -70,17 +76,26 @@ tasks:
     preconditions:
       - sh: docker info > /dev/null 2>&1
         msg: "Docker is required for cross-compilation to Linux. Please install Docker."
-      - sh: docker image inspect {{.CROSS_IMAGE}} > /dev/null 2>&1
+      - sh: docker buildx version > /dev/null 2>&1
         msg: |
-          Docker image '{{.CROSS_IMAGE}}' not found.
-          Build it first: wails3 task setup:docker
+          Docker Buildx is required for target-platform Linux CGO builds.
+          Install Buildx and configure QEMU/binfmt support for cross-architecture builds.
+      - sh: 'case "{{.DOCKER_ARCH}}" in amd64|arm64) exit 0 ;; *) exit 1 ;; esac'
+        msg: "Linux Docker builds support only ARCH=amd64 or ARCH=arm64."
     cmds:
-      - docker run --rm -v "{{.ROOT_DIR}}:/app" {{.GO_CACHE_MOUNT}} {{.REPLACE_MOUNTS}} -e APP_NAME="{{.APP_NAME}}" {{if .EXTRA_TAGS}}-e EXTRA_TAGS="{{.EXTRA_TAGS}}"{{end}} "{{.CROSS_IMAGE}}" linux {{.DOCKER_ARCH}}
+      # Build a single-platform image for the requested Linux architecture. On
+      # cross-architecture hosts Buildx executes its native GCC under QEMU;
+      # Dockerfile.cross independently verifies uname, gcc -dumpmachine, and
+      # the final ELF machine before returning success.
+      - docker buildx build --platform "{{.TARGET_PLATFORM}}" --load -t "{{.TARGET_IMAGE}}" -f build/docker/Dockerfile.cross build/docker/
+      - docker run --rm --platform "{{.TARGET_PLATFORM}}" -v "{{.ROOT_DIR}}:/app" {{.GO_CACHE_MOUNT}} {{.REPLACE_MOUNTS}} -e APP_NAME="{{.APP_NAME}}" -e NOVERA_BUILD_VERSION="{{.NOVERA_BUILD_VERSION | default "0.1.0-dev"}}" -e NOVERA_BUILD_COMMIT="{{.NOVERA_BUILD_COMMIT | default "unknown"}}" -e NOVERA_BUILD_DATE="{{.NOVERA_BUILD_DATE | default "unknown"}}" -e NOVERA_BUILD_CHANNEL="{{.NOVERA_BUILD_CHANNEL | default "development"}}" {{if .EXTRA_TAGS}}-e EXTRA_TAGS="{{.EXTRA_TAGS}}"{{end}} "{{.TARGET_IMAGE}}" linux {{.DOCKER_ARCH}}
       - docker run --rm -v "{{.ROOT_DIR}}:/app" alpine chown -R $(id -u):$(id -g) /app/bin
       - mkdir -p {{.BIN_DIR}}
       - mv "bin/{{.APP_NAME}}-linux-{{.DOCKER_ARCH}}" "{{.OUTPUT}}"
     vars:
-      DOCKER_ARCH: '{{.ARCH | default "amd64"}}'
+      DOCKER_ARCH: '{{if or (eq .ARCH "arm64") (eq .ARCH "aarch64")}}arm64{{else if or (eq .ARCH "amd64") (eq .ARCH "x86_64")}}amd64{{else}}{{.ARCH}}{{end}}'
+      TARGET_PLATFORM: 'linux/{{.DOCKER_ARCH}}'
+      TARGET_IMAGE: '{{.CROSS_IMAGE}}-linux-{{.DOCKER_ARCH}}'
       DEFAULT_OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}'
       OUTPUT: '{{ .OUTPUT | default .DEFAULT_OUTPUT }}'
       # Mount Go module cache for faster builds

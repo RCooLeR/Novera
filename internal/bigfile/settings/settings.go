@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"novera/internal/bigfile/fileio"
 	"novera/internal/bigfile/units"
+	"novera/internal/persistfile"
 )
 
 const (
@@ -61,11 +64,22 @@ const (
 )
 
 const (
-	ConfigDirEnv     = "QUARRY_HOME"
-	ConfigDirName    = ".quarry"
-	SettingsFileName = "settings.json"
-	MaxRecentFiles   = 12
+	// ConfigDirEnv is an explicit override for Novera's large-file state. It is
+	// intentionally separate from the application-wide settings file because
+	// the legacy large-file settings schema is not compatible with it.
+	ConfigDirEnv = "NOVERA_BIGFILE_HOME"
+	// LegacyConfigDirEnv remains read-only migration input. New settings, cache,
+	// and log data are never written through this variable.
+	LegacyConfigDirEnv  = "QUARRY_HOME"
+	ConfigDirName       = "Novera"
+	BigFileDirName      = "bigfile"
+	LegacyConfigDirName = ".quarry"
+	SettingsFileName    = "settings.json"
+	MaxRecentFiles      = 12
+	maxSettingsFileSize = 1 << 20
 )
+
+var persistentMu sync.Mutex
 
 type Store interface {
 	StringWithFallback(key string, fallback string) string
@@ -218,14 +232,38 @@ func ConfigDir() (string, error) {
 	if override := strings.TrimSpace(os.Getenv(ConfigDirEnv)); override != "" {
 		return filepath.Clean(override), nil
 	}
+	if root, err := os.UserConfigDir(); err == nil && strings.TrimSpace(root) != "" {
+		return filepath.Join(root, ConfigDirName, BigFileDirName), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve Novera large-file config directory: %w", err)
 	}
 	if strings.TrimSpace(home) == "" {
 		return "", errors.New("user home directory is empty")
 	}
-	return filepath.Join(home, ConfigDirName), nil
+	return filepath.Join(home, ConfigDirName, BigFileDirName), nil
+}
+
+// LegacyConfigDir returns the former large-file configuration directory as
+// read-only migration input. An explicit NOVERA_BIGFILE_HOME without an
+// explicit QUARRY_HOME is isolated by design, which keeps tests, portable
+// installs, and recovery environments from importing unrelated user state.
+func LegacyConfigDir() (string, bool, error) {
+	if override := strings.TrimSpace(os.Getenv(LegacyConfigDirEnv)); override != "" {
+		return filepath.Clean(override), true, nil
+	}
+	if strings.TrimSpace(os.Getenv(ConfigDirEnv)) != "" {
+		return "", false, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false, fmt.Errorf("resolve legacy large-file config directory: %w", err)
+	}
+	if strings.TrimSpace(home) == "" {
+		return "", false, errors.New("user home directory is empty")
+	}
+	return filepath.Join(home, LegacyConfigDirName), true, nil
 }
 
 func SettingsPath() (string, error) {
@@ -240,7 +278,7 @@ func LoadFile(path string) (AppSettings, error) {
 	if strings.TrimSpace(path) == "" {
 		return AppSettings{}, errors.New("settings path is empty")
 	}
-	data, err := os.ReadFile(path)
+	data, err := persistfile.Read(path, maxSettingsFileSize)
 	if err != nil {
 		return AppSettings{}, err
 	}
@@ -252,6 +290,9 @@ func LoadFile(path string) (AppSettings, error) {
 }
 
 func LoadPersistent(store Store) (AppSettings, error) {
+	persistentMu.Lock()
+	defer persistentMu.Unlock()
+
 	// The JSON settings file is the source of truth when present. Fyne
 	// preferences remain a legacy fallback for first-run and migration cases.
 	path, err := SettingsPath()
@@ -262,10 +303,37 @@ func LoadPersistent(store Store) (AppSettings, error) {
 	if err == nil {
 		return cfg, nil
 	}
-	if errors.Is(err, os.ErrNotExist) {
+	if !errors.Is(err, os.ErrNotExist) {
+		return Load(store), err
+	}
+
+	legacyDir, available, legacyDirErr := LegacyConfigDir()
+	if legacyDirErr != nil {
+		return Load(store), legacyDirErr
+	}
+	if !available {
 		return Load(store), nil
 	}
-	return Load(store), err
+	legacyPath := filepath.Join(legacyDir, SettingsFileName)
+	if samePath(path, legacyPath) {
+		return Load(store), nil
+	}
+	legacy, legacyErr := LoadFile(legacyPath)
+	if errors.Is(legacyErr, os.ErrNotExist) {
+		return Load(store), nil
+	}
+	if legacyErr != nil {
+		return Load(store), fmt.Errorf("load legacy large-file settings for migration: %w", legacyErr)
+	}
+	if err := legacy.saveFile(path, false); err != nil {
+		if errors.Is(err, fileio.ErrExists) {
+			if current, loadErr := LoadFile(path); loadErr == nil {
+				return current, nil
+			}
+		}
+		return legacy, fmt.Errorf("import legacy large-file settings into Novera: %w", err)
+	}
+	return legacy, nil
 }
 
 func (s AppSettings) Save(store Store) error {
@@ -313,6 +381,10 @@ func (s AppSettings) Save(store Store) error {
 }
 
 func (s AppSettings) SaveFile(path string) error {
+	return s.saveFile(path, true)
+}
+
+func (s AppSettings) saveFile(path string, overwrite bool) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("settings path is empty")
 	}
@@ -330,13 +402,16 @@ func (s AppSettings) SaveFile(path string) error {
 	}
 	_, err = fileio.WriteFileAtomic(path, data, fileio.AtomicWriteOptions{
 		Mode:       0o600,
-		Overwrite:  true,
+		Overwrite:  overwrite,
 		TempSuffix: ".settings.tmp",
 	})
 	return err
 }
 
 func (s AppSettings) SavePersistent(store Store) error {
+	persistentMu.Lock()
+	defer persistentMu.Unlock()
+
 	s = s.withSupportedWorkspaceFeatures()
 	if err := s.Validate(); err != nil {
 		return err
@@ -354,6 +429,15 @@ func (s AppSettings) SavePersistent(store Store) error {
 		}
 	}
 	return nil
+}
+
+func samePath(left string, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if left == right {
+		return true
+	}
+	return runtime.GOOS == "windows" && strings.EqualFold(left, right)
 }
 
 func (s AppSettings) Validate() error {

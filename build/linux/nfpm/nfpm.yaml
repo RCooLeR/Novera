@@ -12,8 +12,10 @@ priority: "extra"
 maintainer: ${GIT_COMMITTER_NAME} <${GIT_COMMITTER_EMAIL}>
 description: "Local-first AI workbench"
 vendor: "rcooler"
-homepage: "https://wails.io"
-license: "MIT"
+homepage: "https://github.com/RCooLeR/Novera"
+# No repository-level license grant has been selected yet. Do not publish a
+# third-party framework's license as though it covered this application.
+license: "Proprietary"
 release: "1"
 
 contents:

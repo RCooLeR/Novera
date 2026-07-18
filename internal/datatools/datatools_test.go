@@ -1,9 +1,31 @@
 package datatools
 
 import (
+	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 )
+
+type repeatedByteReader struct {
+	b         byte
+	remaining int64
+}
+
+func (r *repeatedByteReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	for i := range p {
+		p[i] = r.b
+	}
+	r.remaining -= int64(len(p))
+	return len(p), nil
+}
 
 func TestInferCSVSchema(t *testing.T) {
 	csv := "id,price,active,name\n1,9.99,true,alice\n2,3,false,bob\n3,,true,\n"
@@ -58,20 +80,11 @@ func TestConvertCSVToSQL(t *testing.T) {
 	}
 }
 
-func TestPlanDumpRanges(t *testing.T) {
-	sum := DumpSummary{Tables: []DumpTable{
-		{Name: "users", CreateOffset: 100, InsertOffset: 200},
-		{Name: "orders", CreateOffset: 500, InsertOffset: 600},
-	}}
-	ranges := PlanDumpRanges(sum, 1000)
-	if len(ranges) != 2 {
-		t.Fatalf("ranges = %d, want 2", len(ranges))
-	}
-	if ranges[0].Name != "users" || ranges[0].Start != 100 || ranges[0].End != 500 {
-		t.Errorf("users range wrong: %+v", ranges[0])
-	}
-	if ranges[1].Name != "orders" || ranges[1].Start != 500 || ranges[1].End != 1000 {
-		t.Errorf("orders range wrong: %+v", ranges[1])
+func TestSQLStringEscapesMySQLBackslashAndControlSequences(t *testing.T) {
+	input := "slash\\quote'; DROP TABLE users; --\x00\b\t\n\r\x1amultibyte-п»„"
+	want := `'slash\\quote''; DROP TABLE users; --\0\b\t\n\r\Zmultibyte-п»„'`
+	if got := sqlStr(input); got != want {
+		t.Fatalf("sqlStr() = %q, want %q", got, want)
 	}
 }
 
@@ -101,4 +114,28 @@ func TestAnalyzeSQLDump(t *testing.T) {
 		t.Errorf("users table wrong: %+v", sum.Tables[0])
 	}
 	// The commented-out and in-block-comment INSERTs must NOT be counted.
+}
+
+func TestAnalyzeSQLDumpDrainsHugeExtendedInsertWithBoundedPrefix(t *testing.T) {
+	r := io.MultiReader(
+		strings.NewReader("INSERT INTO huge_table VALUES ('"),
+		&repeatedByteReader{b: 'x', remaining: int64(maxSQLLogicalLineBytes) + 1},
+		strings.NewReader("');\nCREATE TABLE next_table (id integer);\n"),
+	)
+	sum, err := AnalyzeSQLDump(r, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.InsertTables != 1 || sum.CreateTables != 1 || len(sum.Tables) != 2 {
+		t.Fatalf("summary = %+v, want one huge INSERT and one CREATE", sum)
+	}
+}
+
+func TestAnalyzeSQLDumpHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := AnalyzeSQLDumpContext(ctx, strings.NewReader("CREATE TABLE t (id integer);\n"), 0)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
 }

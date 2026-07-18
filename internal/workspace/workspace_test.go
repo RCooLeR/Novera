@@ -54,6 +54,69 @@ func TestReadFileRange(t *testing.T) {
 	}
 }
 
+func TestReadFileRangeAlignsUTF8RuneBoundaries(t *testing.T) {
+	root := t.TempDir()
+	data := []byte("A€B😀C")
+	if err := os.WriteFile(filepath.Join(root, "utf8.txt"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	if _, err := s.Open(root); err != nil {
+		t.Fatal(err)
+	}
+	// Start inside € and end inside 😀. The returned source window expands by
+	// bounded overlap to whole runes and reports its actual aligned byte range.
+	c, err := s.ReadFileRange("utf8.txt", 2, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Encoding != encUTF8 || c.Offset != 1 || c.Length != 8 || c.Text != "€B😀" {
+		t.Fatalf("aligned UTF-8 page = %+v", c)
+	}
+}
+
+func TestReadFileRangeAlignsUTF16SurrogatePair(t *testing.T) {
+	root := t.TempDir()
+	data, err := encodeText("A😀B", encUTF16LE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "utf16.txt"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	if _, err := s.Open(root); err != nil {
+		t.Fatal(err)
+	}
+	// Byte 7 is inside the low-surrogate code unit. The page must expand back
+	// through the high surrogate and decode the pair as one scalar value.
+	c, err := s.ReadFileRange("utf16.txt", 7, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Encoding != encUTF16LE || c.Offset != 4 || c.Length != 4 || c.Text != "😀" {
+		t.Fatalf("aligned UTF-16 page = %+v", c)
+	}
+}
+
+func TestReadFileRangeDecodesLatin1Page(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "latin1.txt"), []byte{'c', 'a', 'f', 0xE9}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	if _, err := s.Open(root); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.ReadFileRange("latin1.txt", 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Encoding != encLatin1 || c.Offset != 3 || c.Length != 1 || c.Text != "é" {
+		t.Fatalf("Latin-1 page = %+v", c)
+	}
+}
+
 func writeFixture(t *testing.T, root, rel string) {
 	t.Helper()
 	abs := filepath.Join(root, filepath.FromSlash(rel))

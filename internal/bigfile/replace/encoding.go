@@ -14,7 +14,7 @@ import (
 const encodingDetectSampleSize = 1024 * 1024
 
 // ConvertEncodingFile rewrites a text file into the requested target encoding
-// while preserving Quarry's safe temp-output and optional swap workflow.
+// while preserving Novera's safe temp-output and optional swap workflow.
 func ConvertEncodingFile(ctx context.Context, sourcePath string, outputPath string, target string, opts FileOptions) (FileSummary, error) {
 	same, err := samePath(sourcePath, outputPath)
 	if err != nil {
@@ -183,7 +183,9 @@ func ConvertEncodingFile(ctx context.Context, sourcePath string, outputPath stri
 		writeFailedManifest(summary.ManifestPath, &manifest, err)
 		return summary, err
 	}
-	manifest.Phase = "output_written"
+	if err := writeManifestPhaseOrFail(summary.ManifestPath, &manifest, "output_written"); err != nil {
+		return summary, err
+	}
 
 	if opts.SwapOriginal {
 		if err := verifySourceUnchanged(sourcePath, sourceState); err != nil {
@@ -202,9 +204,11 @@ func ConvertEncodingFile(ctx context.Context, sourcePath string, outputPath stri
 		}
 		manifest.Backup = backupPath
 		manifest.Swapped = true
-		manifest.Phase = "swapped"
 		summary.BackupPath = backupPath
 		summary.Swapped = true
+		if err := writeManifestPhaseOrFail(summary.ManifestPath, &manifest, "swapped"); err != nil {
+			return summary, err
+		}
 	}
 
 	if err := writeCompletedManifestOrFail(summary.ManifestPath, &manifest, st.Size()); err != nil {

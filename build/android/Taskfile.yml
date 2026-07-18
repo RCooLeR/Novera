@@ -21,7 +21,7 @@ tasks:
   build:
     summary: Creates a build of the application for Android
     deps:
-      - task: common:go:mod:tidy
+      - task: common:go:mod:check
       - task: generate:android:bindings
         vars:
           BUILD_FLAGS:
@@ -105,37 +105,57 @@ tasks:
           ARCH: amd64
 
   package:
-    summary: Packages a production build of the application into an APK
+    summary: Production Android packaging (disabled until release signing and verification are configured)
+    preconditions:
+      - sh: 'false'
+        msg: "Production Android packaging is disabled: configure protected release signing and post-build signer/debuggable verification first. Use android:package:debug only for local testing."
+
+  package:fat:
+    summary: Production multi-architecture Android packaging (disabled until release signing is configured)
+    preconditions:
+      - sh: 'false'
+        msg: "Production Android packaging is disabled: configure protected release signing and post-build signer/debuggable verification first. Use android:package:debug:fat only for local testing."
+
+  package:debug:
+    summary: Packages a debug-signed APK for local testing only
     deps:
       - task: build
         vars:
-          PRODUCTION: "true"
+          PRODUCTION: "false"
     cmds:
       - task: assemble:apk
 
-  package:fat:
-    summary: Packages a production build for all architectures (fat APK)
+  package:debug:fat:
+    summary: Packages a debug-signed multi-architecture APK for local testing only
+    deps:
+      - task: build
+        vars:
+          ARCH: arm64
+          PRODUCTION: "false"
     cmds:
-      - task: compile:go:all-archs
+      - task: compile:go:shared
+        vars:
+          ARCH: amd64
       - task: assemble:apk
 
   assemble:apk:
-    summary: Assembles the APK using Gradle
+    internal: true
+    summary: Assembles a debug APK using Gradle
     cmds:
       - |
         cd build/android
         ./gradlew assembleDebug
-        cp app/build/outputs/apk/debug/app-debug.apk "../../{{.BIN_DIR}}/{{.APP_NAME}}.apk"
-        echo "APK created: {{.BIN_DIR}}/{{.APP_NAME}}.apk"
+        cp app/build/outputs/apk/debug/app-debug.apk "../../{{.BIN_DIR}}/{{.APP_NAME}}-debug.apk"
+        echo "Debug APK created for local testing only: {{.BIN_DIR}}/{{.APP_NAME}}-debug.apk"
 
   assemble:apk:release:
-    summary: Assembles a release APK using Gradle
+    summary: Assembles an unsigned release APK for local inspection only
     cmds:
       - |
         cd build/android
         ./gradlew assembleRelease
-        cp app/build/outputs/apk/release/app-release-unsigned.apk "../../{{.BIN_DIR}}/{{.APP_NAME}}-release.apk"
-        echo "Release APK created: {{.BIN_DIR}}/{{.APP_NAME}}-release.apk"
+        cp app/build/outputs/apk/release/app-release-unsigned.apk "../../{{.BIN_DIR}}/{{.APP_NAME}}-release-unsigned.apk"
+        echo "Unsigned release APK created for local inspection only: {{.BIN_DIR}}/{{.APP_NAME}}-release-unsigned.apk"
 
   generate:android:bindings:
     internal: true
@@ -199,10 +219,10 @@ tasks:
 
   deploy-emulator:
     summary: Deploy to Android Emulator
-    deps: [package]
+    deps: [package:debug]
     cmds:
       - adb uninstall {{.APP_ID}} 2>/dev/null || true
-      - adb install "{{.BIN_DIR}}/{{.APP_NAME}}.apk"
+      - adb install "{{.BIN_DIR}}/{{.APP_NAME}}-debug.apk"
       - adb shell am start -n {{.APP_ID}}/.MainActivity
 
   run:
@@ -215,7 +235,7 @@ tasks:
     cmds:
       - task: assemble:apk
       - adb uninstall {{.APP_ID}} 2>/dev/null || true
-      - adb install "{{.BIN_DIR}}/{{.APP_NAME}}.apk"
+      - adb install "{{.BIN_DIR}}/{{.APP_NAME}}-debug.apk"
       - adb shell am start -n {{.APP_ID}}/.MainActivity
 
   logs:

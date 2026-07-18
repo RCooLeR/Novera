@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download, Scissors, X } from "lucide-react";
 import { useStore } from "../state/store";
+import { useDialogFocus } from "../lib/useDialogFocus";
 
 // Shows the result of a Tools-menu utility (CSV schema, CSV→SQL, SQL-dump
 // analysis) and offers the write actions (save SQL, extract/split a dump).
@@ -21,6 +22,8 @@ export default function ToolsModal() {
   const [selected, setSelected] = useState<string[]>([]);
   const [newCol, setNewCol] = useState("");
   const [newVal, setNewVal] = useState("");
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useDialogFocus(!!result, close, closeRef);
   useEffect(() => {
     if (result?.kind === "sql") {
       setTable(result.table);
@@ -33,26 +36,14 @@ export default function ToolsModal() {
   const toggleCol = (name: string) =>
     setSelected((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
 
-  useEffect(() => {
-    if (!result) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        close();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [result, close]);
-
   if (!result) return null;
 
   return (
     <div className="modal-overlay" onMouseDown={close}>
-      <div className="modal toolsmodal" role="dialog" aria-modal="true" aria-label={result.title} onMouseDown={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className="modal toolsmodal" role="dialog" aria-modal="true" aria-label={result.title} onMouseDown={(e) => e.stopPropagation()}>
         <div className="toolsmodal__head">
           <span className="modal__title">{result.title}</span>
-          <button className="icon-btn" title="Close" aria-label="Close" onClick={close}>
+          <button ref={closeRef} className="icon-btn" title="Close" aria-label="Close" onClick={close}>
             <X size={15} aria-hidden focusable={false} />
           </button>
         </div>

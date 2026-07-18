@@ -15,16 +15,29 @@ import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Cr
 import * as $models from "./models.js";
 
 /**
- * Approve resolves a pending mutating-tool approval or step checkpoint. The
- * delivery and de-registration happen atomically under the lock so a waiter
- * that is simultaneously timing out can't miss a decision: whoever takes the
- * lock first wins — either Approve delivers into the (cap-1, send-once) buffer
- * and removes the entry, or the waiter has already removed it and Approve sees
- * nothing to do. The buffered send never blocks because each channel is sent to
- * at most once before its entry is deleted.
+ * AbortWorkspaceTransition reattaches the pre-transition transcript when the
+ * old workspace remained (or was restored). Like End, the opaque token makes a
+ * stale renderer continuation harmless.
+ */
+export function AbortWorkspaceTransition(token: string): $CancellablePromise<void> {
+    return $Call.ByID(997124165, token);
+}
+
+/**
+ * Approve resolves only a non-operation continuation checkpoint. Sensitive
+ * tool operations use ApproveIntent so the decision is bound to exact bytes.
  */
 export function Approve(callID: string, approved: boolean): $CancellablePromise<void> {
     return $Call.ByID(3194368854, callID, approved);
+}
+
+/**
+ * ApproveIntent resolves a pending sensitive operation only when the renderer
+ * returns the digest of the exact canonical intent it displayed. Delivery,
+ * expiry checking, and removal are atomic, so a decision is one-use.
+ */
+export function ApproveIntent(callID: string, digest: string, approved: boolean): $CancellablePromise<void> {
+    return $Call.ByID(1546732532, callID, digest, approved);
 }
 
 /**
@@ -38,16 +51,37 @@ export function AuditLog(limit: number): $CancellablePromise<$models.AuditEntry[
 }
 
 /**
- * Cancel aborts a run.
+ * BeginWorkspaceTransition closes Agent admission before canceling and waiting
+ * for old-workspace work. The returned opaque token must be passed to
+ * EndWorkspaceTransition only after Workspace.Open/Close (including any
+ * rollback) has settled. A newer Begin supersedes older tokens, so a stale
+ * renderer continuation cannot reopen admission during a newer transition.
+ */
+export function BeginWorkspaceTransition(): $CancellablePromise<string> {
+    return $Call.ByID(91515732);
+}
+
+/**
+ * Cancel signals a run to stop. The run finalizer retains and releases the
+ * active-run lease only after in-flight work has actually returned.
  */
 export function Cancel(runID: string): $CancellablePromise<void> {
     return $Call.ByID(1456404415, runID);
 }
 
 /**
- * ResetConversation clears the backend Agent-mode transcript. Use this when the
- * user clears chat or switches workspaces; provider requests are stateless, but
- * Novera keeps this transcript so follow-up messages behave like one session.
+ * EndWorkspaceTransition reopens Agent admission for the current transition.
+ * Stale or duplicate tokens are intentionally ignored.
+ */
+export function EndWorkspaceTransition(token: string): $CancellablePromise<void> {
+    return $Call.ByID(3719486856, token);
+}
+
+/**
+ * ResetConversation cancels and awaits the active run before clearing the
+ * backend transcript. Workspace transitions must propagate a returned timeout:
+ * proceeding while a context-free legacy tool is still running would let work
+ * from the old workspace cross into the new one.
  */
 export function ResetConversation(): $CancellablePromise<void> {
     return $Call.ByID(3646622219);

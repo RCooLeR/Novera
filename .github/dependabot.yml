@@ -1,0 +1,73 @@
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Kyiv
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    groups:
+      go-runtime:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - github.com/wailsapp/wails/v3
+      wails-go:
+        patterns:
+          - github.com/wailsapp/wails/v3
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:15"
+      timezone: Europe/Kyiv
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - frontend
+    groups:
+      frontend-runtime:
+        dependency-type: production
+        exclude-patterns:
+          - "@wailsio/runtime"
+      frontend-tooling:
+        dependency-type: development
+      wails-runtime:
+        patterns:
+          - "@wailsio/runtime"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Europe/Kyiv
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /build/docker
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:45"
+      timezone: Europe/Kyiv
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - build

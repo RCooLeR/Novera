@@ -327,6 +327,8 @@ export function HarvestMatchesViaDialog(fileID: string, pattern: string, caseIns
 
 /**
  * OpenFile opens path, starts background indexing, and returns its metadata.
+ * Opening a file is intentionally non-mutating: adjacent recovery artifacts
+ * are left untouched for an explicit, user-confirmed recovery workflow.
  */
 export function OpenFile(path: string): $CancellablePromise<$models.FileMeta> {
     return $Call.ByID(382069238, path).then(($result: any) => {
@@ -346,9 +348,9 @@ export function OpenViaDialog(): $CancellablePromise<$models.FileMeta> {
 
 /**
  * RefreshFile reloads the file from disk under the same id (fresh size + line
- * index), for following a growing file or picking up external changes. Any
- * staged edits are discarded, so callers should confirm before using it on a
- * file with pending edits.
+ * index), for following a growing file or picking up external changes. It
+ * fails while edits are staged; discarding them requires the explicit
+ * DiscardEdits operation.
  */
 export function RefreshFile(fileID: string): $CancellablePromise<$models.FileMeta> {
     return $Call.ByID(1000304125, fileID).then(($result: any) => {

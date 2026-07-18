@@ -10,5 +10,6 @@ export {
     Agent,
     Editor,
     LLM,
+    LLMAPIKeyStatus,
     Settings
 } from "./models.js";

@@ -13,10 +13,12 @@ import (
 	"novera/internal/bigfile/cachepath"
 	"novera/internal/bigfile/fileio"
 	"novera/internal/bigfile/lineindex"
+	"novera/internal/persistfile"
 )
 
 const indexCacheVersion = 1
 const indexCacheTailSampleSize = 64 * 1024
+const maxIndexCacheFileSize = 128 * 1024 * 1024
 
 type indexCacheFile struct {
 	Version         int                `json:"version"`
@@ -28,15 +30,29 @@ type indexCacheFile struct {
 }
 
 func indexCachePath(path string) string {
-	central, err := cachepath.SourcePath("indexes", path, ".quarry-index.json")
+	central, err := cachepath.SourcePath("indexes", path, ".novera-index.json")
 	if err == nil {
 		return central
 	}
-	return legacyIndexCachePath(path)
+	return fallbackIndexCachePath(path)
 }
 
+func fallbackIndexCachePath(path string) string {
+	return path + ".novera-index.json"
+}
+
+// legacyIndexCachePath is retained as read-only compatibility with recovery
+// sidecars written beside source files by the pre-Novera large-file engine.
 func legacyIndexCachePath(path string) string {
 	return path + ".quarry-index.json"
+}
+
+func legacyCentralIndexCachePath(path string) (string, bool) {
+	legacy, available, err := cachepath.LegacySourcePath("indexes", path, ".quarry-index.json")
+	if err != nil || !available {
+		return "", false
+	}
+	return legacy, true
 }
 
 func computeIndexSampleHash(f *os.File, size int64, head []byte) string {
@@ -65,8 +81,9 @@ func loadIndexCache(path string, size int64, modTime time.Time, sampleHash strin
 	if !persistentIndexCacheEnabled() {
 		return nil, false
 	}
+	canonical := indexCachePath(path)
 	for _, candidate := range indexCacheReadPaths(path) {
-		data, err := os.ReadFile(candidate)
+		data, err := persistfile.Read(candidate, maxIndexCacheFileSize)
 		if err != nil {
 			continue
 		}
@@ -82,6 +99,9 @@ func loadIndexCache(path string, size int64, modTime time.Time, sampleHash strin
 			!cache.Index.Done {
 			continue
 		}
+		if candidate != canonical {
+			migrateValidatedIndexCache(canonical, data)
+		}
 		return lineindex.FromSnapshot(cache.Index), true
 	}
 	return nil, false
@@ -89,11 +109,32 @@ func loadIndexCache(path string, size int64, modTime time.Time, sampleHash strin
 
 func indexCacheReadPaths(path string) []string {
 	central := indexCachePath(path)
-	legacy := legacyIndexCachePath(path)
-	if central == legacy {
-		return []string{legacy}
+	candidates := []string{central}
+	if legacyCentral, ok := legacyCentralIndexCachePath(path); ok {
+		candidates = appendUniquePath(candidates, legacyCentral)
 	}
-	return []string{central, legacy}
+	candidates = appendUniquePath(candidates, legacyIndexCachePath(path))
+	return candidates
+}
+
+func appendUniquePath(paths []string, candidate string) []string {
+	for _, existing := range paths {
+		if filepath.Clean(existing) == filepath.Clean(candidate) {
+			return paths
+		}
+	}
+	return append(paths, candidate)
+}
+
+func migrateValidatedIndexCache(path string, data []byte) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	_, _ = fileio.WriteFileAtomic(path, data, fileio.AtomicWriteOptions{
+		Mode:       0o600,
+		Overwrite:  false,
+		TempSuffix: ".migration.tmp",
+	})
 }
 
 func saveIndexCache(path string, size int64, modTime time.Time, sampleHash string, idx *lineindex.Index) error {

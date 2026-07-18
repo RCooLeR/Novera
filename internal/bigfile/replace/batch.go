@@ -13,7 +13,7 @@ import (
 )
 
 // BatchRule is one plain-text batch replacement rule. When matches overlap,
-// Quarry chooses the earliest match; ties use lower Priority, then longer match,
+// Novera chooses the earliest match; ties use lower Priority, then longer match,
 // then original rule order. Non-winning overlapping matches are counted as
 // conflicts for preview/result reporting.
 type BatchRule struct {
@@ -373,7 +373,9 @@ func ReplaceBatchPlainFile(ctx context.Context, sourcePath string, outputPath st
 		writeFailedManifest(summary.ManifestPath, &manifest, err)
 		return summary, err
 	}
-	manifest.Phase = "output_written"
+	if err := writeManifestPhaseOrFail(summary.ManifestPath, &manifest, "output_written"); err != nil {
+		return summary, err
+	}
 
 	if opts.SwapOriginal {
 		if err := verifySourceUnchanged(sourcePath, sourceState); err != nil {
@@ -392,9 +394,11 @@ func ReplaceBatchPlainFile(ctx context.Context, sourcePath string, outputPath st
 		}
 		manifest.Backup = backupPath
 		manifest.Swapped = true
-		manifest.Phase = "swapped"
 		summary.BackupPath = backupPath
 		summary.Swapped = true
+		if err := writeManifestPhaseOrFail(summary.ManifestPath, &manifest, "swapped"); err != nil {
+			return summary, err
+		}
 	}
 
 	if err := writeCompletedManifestOrFail(summary.ManifestPath, &manifest, st.Size()); err != nil {

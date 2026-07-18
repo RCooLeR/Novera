@@ -163,7 +163,7 @@ func WriteFileAtomic(path string, data []byte, opts AtomicWriteOptions) (AtomicW
 }
 
 // RecoverOverwriteBackup restores the source file when a previous overwrite
-// crashed after moving the old destination to the Quarry backup path but before
+// crashed after moving the old destination to the legacy-compatible backup path but before
 // publishing the new temp file.
 func RecoverOverwriteBackup(path string) (bool, error) {
 	path = strings.TrimSpace(path)

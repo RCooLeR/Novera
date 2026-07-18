@@ -23,7 +23,7 @@ export default function ProblemsView() {
   return (
     <div className="problems">
       <div className="problems__bar">
-        <span className="problems__summary">
+        <span className="problems__summary" role="status" aria-live="polite">
           {loading
             ? "Scanning…"
             : items.length === 0
@@ -36,11 +36,13 @@ export default function ProblemsView() {
       </div>
       <div className="problems__list">
         {items.map((d, i) => (
-          <div
+          <button
+            type="button"
             key={`${d.path}:${d.line}:${d.column}:${d.kind}:${i}`}
             className="problems__item"
             onClick={() => void openFileAt(d.path, d.line, d.column)}
             title={`${d.path}:${d.line}`}
+            aria-label={`Open ${d.severity} ${d.kind} in ${d.path}, line ${d.line}: ${d.message}`}
           >
             {icon(d.severity)}
             <span className="problems__kind">{d.kind}</span>
@@ -48,7 +50,7 @@ export default function ProblemsView() {
             <span className="problems__loc">
               {d.path}:{d.line}
             </span>
-          </div>
+          </button>
         ))}
       </div>
     </div>

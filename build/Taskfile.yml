@@ -7,6 +7,15 @@ tasks:
     cmds:
       - go mod tidy
 
+  go:mod:check:
+    summary: Verifies the scoped project module graph without mutating go.mod or go.sum
+    internal: true
+    cmds:
+      - go mod verify
+      # Scope package discovery so installed frontend dependencies containing
+      # incidental Go fixtures cannot enter the module check.
+      - go list -mod=readonly . ./internal/...
+
   install:frontend:deps:
     summary: Install frontend dependencies
     dir: frontend
@@ -19,7 +28,7 @@ tasks:
       - sh: npm version
         msg: "Looks like npm isn't installed. Npm is part of the Node installer: https://nodejs.org/en/download/"
     cmds:
-      - npm install
+      - npm ci
 
   build:frontend:
     label: build:frontend (DEV={{.DEV}})
@@ -32,10 +41,6 @@ tasks:
       - dist/**/*
     deps:
       - task: install:frontend:deps
-      - task: generate:bindings
-        vars:
-          BUILD_FLAGS:
-            ref: .BUILD_FLAGS
     cmds:
       - npm run {{.BUILD_COMMAND}} -q
     env:
@@ -84,7 +89,7 @@ tasks:
     label: generate:bindings (BUILD_FLAGS={{.BUILD_FLAGS}})
     summary: Generates bindings for the frontend
     deps:
-      - task: go:mod:tidy
+      - task: go:mod:check
     sources:
       - "**/*.[jt]s"
       - exclude: frontend/**/*
@@ -123,63 +128,34 @@ tasks:
     cmds:
       - wails3 update build-assets -name "{{.APP_NAME}}" -binaryname "{{.APP_NAME}}" -config config.yml -dir .
 
+  server:disabled:
+    internal: true
+    preconditions:
+      - sh: 'false'
+        msg: >-
+          Server mode is intentionally disabled. The desktop service graph is not
+          safe or functional as a remote HTTP product. Design a separate authenticated,
+          authorized, rate-limited, sandboxed server entry point before restoring it.
+
   build:server:
-    summary: Builds the application in server mode (no GUI, HTTP server only)
-    desc: |
-      Builds the application with the server build tag enabled.
-      Server mode runs as a pure HTTP server without native GUI dependencies.
-      Usage: task build:server
+    summary: Disabled — server mode requires a separate security and product design
     deps:
-      - task: build:frontend
-        vars:
-          BUILD_FLAGS:
-            ref: .BUILD_FLAGS
-    cmds:
-      - go build -tags server {{.BUILD_FLAGS}} -o {{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}
-    vars:
-      BUILD_FLAGS: "{{.BUILD_FLAGS}}"
+      - task: server:disabled
 
   run:server:
-    summary: Builds and runs the application in server mode
+    summary: Disabled — server mode requires a separate security and product design
     deps:
-      - task: build:server
-    cmds:
-      - ./{{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}
+      - task: server:disabled
 
   build:docker:
-    summary: Builds a Docker image for server mode deployment
-    desc: |
-      Creates a minimal Docker image containing the server mode binary.
-      The image is based on distroless for security and small size.
-      Usage: task build:docker [TAG=myapp:latest]
-    cmds:
-      - docker build -t {{.TAG | default (printf "%s:latest" .APP_NAME)}} -f build/docker/Dockerfile.server .
-    vars:
-      TAG: "{{.TAG}}"
-    preconditions:
-      - sh: docker info > /dev/null 2>&1
-        msg: "Docker is required. Please install Docker first."
-      - sh: test -f build/docker/Dockerfile.server
-        msg: "Dockerfile.server not found. Run 'wails3 update build-assets' to generate it."
+    summary: Disabled — the former image exposed the desktop privilege graph remotely
+    deps:
+      - task: server:disabled
 
   run:docker:
-    summary: Builds and runs the Docker image
-    desc: |
-      Builds the Docker image and runs it, exposing port 8080.
-      Usage: task run:docker [TAG=myapp:latest] [PORT=8080]
-      Note: The internal container port is always 8080. The PORT variable
-      only changes the host port mapping. Ensure your app uses port 8080
-      or modify the Dockerfile to match your ServerOptions.Port setting.
+    summary: Disabled — the former image exposed the desktop privilege graph remotely
     deps:
-      - task: build:docker
-        vars:
-          TAG:
-            ref: .TAG
-    cmds:
-      - docker run --rm -p {{.PORT | default "8080"}}:8080 {{.TAG | default (printf "%s:latest" .APP_NAME)}}
-    vars:
-      TAG: "{{.TAG}}"
-      PORT: "{{.PORT}}"
+      - task: server:disabled
 
   setup:docker:
     summary: Builds Docker image for cross-compilation (~800MB download)

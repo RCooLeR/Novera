@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -384,15 +385,38 @@ func TestValidateRejectsInvalidSmallAutoLoad(t *testing.T) {
 	}
 }
 
-func TestSettingsPathUsesQuarryHome(t *testing.T) {
+func TestSettingsPathUsesNoveraBigFileHome(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(ConfigDirEnv, dir)
+	t.Setenv(LegacyConfigDirEnv, "")
 	got, err := SettingsPath()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := filepath.Join(dir, SettingsFileName); got != want {
 		t.Fatalf("settings path = %q, want %q", got, want)
+	}
+}
+
+func TestConfigDirNeverUsesLegacyOverrideForNewWrites(t *testing.T) {
+	current := filepath.Join(t.TempDir(), "current")
+	legacy := filepath.Join(t.TempDir(), "legacy")
+	t.Setenv(ConfigDirEnv, current)
+	t.Setenv(LegacyConfigDirEnv, legacy)
+
+	got, err := ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != current {
+		t.Fatalf("config dir = %q, want canonical override %q", got, current)
+	}
+	legacyGot, available, err := LegacyConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !available || legacyGot != legacy {
+		t.Fatalf("legacy config dir = %q available=%v, want %q true", legacyGot, available, legacy)
 	}
 }
 
@@ -459,9 +483,28 @@ func TestLoadFileDefaultsMissingEditorFeatureFields(t *testing.T) {
 	}
 }
 
+func TestLoadFileRejectsOversizedOrNonRegularSettings(t *testing.T) {
+	dir := t.TempDir()
+	oversized := filepath.Join(dir, "oversized.json")
+	if err := os.WriteFile(oversized, make([]byte, maxSettingsFileSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(oversized); err == nil {
+		t.Fatal("oversized settings should be rejected")
+	}
+	nonRegular := filepath.Join(dir, "settings-dir")
+	if err := os.Mkdir(nonRegular, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(nonRegular); err == nil {
+		t.Fatal("non-regular settings path should be rejected")
+	}
+}
+
 func TestLoadPersistentFallsBackToStoreWhenFileMissing(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(ConfigDirEnv, dir)
+	t.Setenv(LegacyConfigDirEnv, "")
 	store := newMemStore()
 	store.SetString(keySmallAutoLoadBytes, "4 MiB")
 	store.SetString(keyEditableWindowBytes, "128 MiB")
@@ -478,9 +521,105 @@ func TestLoadPersistentFallsBackToStoreWhenFileMissing(t *testing.T) {
 	}
 }
 
+func TestLoadPersistentCopiesLegacySettingsIntoNovera(t *testing.T) {
+	current := filepath.Join(t.TempDir(), "current")
+	legacy := filepath.Join(t.TempDir(), "legacy")
+	t.Setenv(ConfigDirEnv, current)
+	t.Setenv(LegacyConfigDirEnv, legacy)
+	want := Defaults()
+	want.SmallAutoLoadBytes = "16 MiB"
+	want.EditableWindowBytes = "750 MiB"
+	legacyPath := filepath.Join(legacy, SettingsFileName)
+	if err := want.SaveFile(legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	legacyBefore, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadPersistent(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("migrated settings = %#v, want %#v", got, want)
+	}
+	currentPath := filepath.Join(current, SettingsFileName)
+	currentCfg, err := LoadFile(currentPath)
+	if err != nil {
+		t.Fatalf("load migrated settings: %v", err)
+	}
+	if !reflect.DeepEqual(currentCfg, want) {
+		t.Fatalf("persisted migrated settings = %#v, want %#v", currentCfg, want)
+	}
+	legacyAfter, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(legacyAfter, legacyBefore) {
+		t.Fatal("legacy settings changed during copy-forward migration")
+	}
+}
+
+func TestLoadPersistentCanonicalSettingsWinOverLegacy(t *testing.T) {
+	current := filepath.Join(t.TempDir(), "current")
+	legacy := filepath.Join(t.TempDir(), "legacy")
+	t.Setenv(ConfigDirEnv, current)
+	t.Setenv(LegacyConfigDirEnv, legacy)
+	canonical := Defaults()
+	canonical.EditableWindowBytes = "1 GiB"
+	old := Defaults()
+	old.EditableWindowBytes = "128 MiB"
+	if err := canonical.SaveFile(filepath.Join(current, SettingsFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.SaveFile(filepath.Join(legacy, SettingsFileName)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadPersistent(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EditableWindowBytes != canonical.EditableWindowBytes {
+		t.Fatalf("editable window = %q, want canonical %q", got.EditableWindowBytes, canonical.EditableWindowBytes)
+	}
+}
+
+func TestLoadPersistentLeavesMalformedLegacySettingsUnchanged(t *testing.T) {
+	current := filepath.Join(t.TempDir(), "current")
+	legacy := filepath.Join(t.TempDir(), "legacy")
+	t.Setenv(ConfigDirEnv, current)
+	t.Setenv(LegacyConfigDirEnv, legacy)
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(legacy, SettingsFileName)
+	want := []byte("{not-json")
+	if err := os.WriteFile(legacyPath, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadPersistent(nil); err == nil {
+		t.Fatal("malformed legacy settings should produce a migration error")
+	}
+	if _, err := os.Stat(filepath.Join(current, SettingsFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canonical settings should not be created from malformed input: %v", err)
+	}
+	got, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy settings changed to %q, want %q", got, want)
+	}
+}
+
 func TestSavePersistentWritesConfigDirAndStore(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(ConfigDirEnv, dir)
+	t.Setenv(LegacyConfigDirEnv, "")
 	store := newMemStore()
 	want := Defaults()
 	want.SmallAutoLoadBytes = "16 MiB"

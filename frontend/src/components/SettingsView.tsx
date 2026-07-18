@@ -1,7 +1,13 @@
+import { useState } from "react";
 import { agentConfigFromSettings, useStore } from "../state/store";
+import ConfirmModal from "./ConfirmModal";
 
 export default function SettingsView() {
   const settings = useStore((s) => s.settings);
+  const settingsError = useStore((s) => s.settingsError);
+  const llmAPIKeyAvailable = useStore((s) => s.llmAPIKeyAvailable);
+  const llmAPIKeyStatus = useStore((s) => s.llmAPIKeyStatus);
+  const llmAPIKeyStatusMessage = useStore((s) => s.llmAPIKeyStatusMessage);
   const saveEditorConfig = useStore((s) => s.saveEditorConfig);
   const saveAgentConfig = useStore((s) => s.saveAgentConfig);
   const setUIFontSize = useStore((s) => s.setUIFontSize);
@@ -9,14 +15,23 @@ export default function SettingsView() {
   const setApiKey = useStore((s) => s.setApiKey);
   const loadModels = useStore((s) => s.loadModels);
   const models = useStore((s) => s.models);
+  const [confirmRemoveKey, setConfirmRemoveKey] = useState(false);
 
   if (!settings) return <div className="settingsv__empty">Loading…</div>;
   const ed = settings.editor;
   const llm = settings.llm;
   const agent = agentConfigFromSettings(settings);
+  const llmCredentialPending = llmAPIKeyStatus === "quarantined";
+  const llmCredentialUnavailable = llmAPIKeyStatus === "unavailable";
 
   return (
     <div className="settingsv">
+      {settingsError && (
+        <div className="settingsv__error" role="alert">
+          {settingsError}
+        </div>
+      )}
+      <fieldset className="settingsv__fields" disabled={Boolean(settingsError)}>
       <section className="settingsv__group">
         <h3>Editor</h3>
         <label className="settingsv__row">
@@ -67,13 +82,7 @@ export default function SettingsView() {
           <span>Provider</span>
           <select
             value={llm.provider}
-            onChange={(e) => {
-              const provider = e.target.value;
-              void saveLLMConfig({ provider });
-              // Local Ollama needs no key — clear any stored one so it can't be
-              // sent to a provider that ignores it (and the "stored" badge clears).
-              if (provider === "ollama") void setApiKey("");
-            }}
+            onChange={(e) => void saveLLMConfig({ provider: e.target.value })}
           >
             <option value="ollama">Ollama (local)</option>
             <option value="openai">OpenAI</option>
@@ -98,33 +107,61 @@ export default function SettingsView() {
         </label>
         {llm.provider !== "ollama" && (
         <label className="settingsv__row settingsv__col">
-          <span>API key {llm.apiKeyRef ? <em className="settingsv__set">stored</em> : null}</span>
+          <span>
+            API key {llmAPIKeyAvailable ? <em className="settingsv__set">stored</em> : null}
+            {llmCredentialPending ? <em className="settingsv__pending">re-entry required</em> : null}
+            {llmCredentialUnavailable ? <em className="settingsv__pending">unavailable</em> : null}
+          </span>
           <input
             type="password"
+            disabled={llmCredentialUnavailable}
             spellCheck={false}
-            placeholder={llm.apiKeyRef ? "•••••• (Enter to save, or type to replace)" : "Not needed for local Ollama"}
-            onKeyDown={(e) => {
+            placeholder={
+              llmAPIKeyAvailable
+                ? "•••••• (Enter to save, or type to replace)"
+                : llmCredentialPending
+                  ? "Re-enter the key for this provider origin"
+                  : llmCredentialUnavailable
+                    ? "Credential storage is unavailable"
+                    : "Enter an API key if this provider requires one"
+            }
+            onKeyDown={async (e) => {
               if (e.key === "Enter") {
                 const el = e.currentTarget;
                 if (el.value) {
-                  void setApiKey(el.value);
-                  el.value = "";
-                  el.blur();
+                  const value = el.value;
+                  if (await setApiKey(value)) {
+                    el.value = "";
+                    el.blur();
+                  }
                 }
               }
             }}
-            onBlur={(e) => {
+            onBlur={async (e) => {
               if (e.target.value) {
-                void setApiKey(e.target.value);
-                e.target.value = "";
+                const el = e.currentTarget;
+                const value = el.value;
+                if (await setApiKey(value)) el.value = "";
               }
             }}
           />
+          {llmCredentialUnavailable && llmAPIKeyStatusMessage ? (
+            <span className="settingsv__note" role="alert">
+              {llmAPIKeyStatusMessage}
+            </span>
+          ) : null}
         </label>
         )}
-        <button className="btn" onClick={() => void loadModels()}>
-          Load models
-        </button>
+        <div className="settingsv__actions">
+          <button type="button" className="btn" onClick={() => void loadModels()}>
+            Load models
+          </button>
+          {llmAPIKeyAvailable && !llmCredentialUnavailable && (
+            <button type="button" className="btn btn--danger" onClick={() => setConfirmRemoveKey(true)}>
+              Remove stored key
+            </button>
+          )}
+        </div>
       </section>
 
       <section className="settingsv__group">
@@ -203,6 +240,21 @@ export default function SettingsView() {
         </label>
         <div className="settingsv__note">Scales sidebars, tabs, and panels. Dark theme (more themes coming).</div>
       </section>
+      </fieldset>
+      {confirmRemoveKey && (
+        <ConfirmModal
+          title="Remove stored API key?"
+          body="The key will be deleted from credential storage. The provider and model settings will be kept."
+          confirmLabel="Remove key"
+          danger
+          onCancel={() => setConfirmRemoveKey(false)}
+          onConfirm={() => {
+            void setApiKey("").then((removed) => {
+              if (removed) setConfirmRemoveKey(false);
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

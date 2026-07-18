@@ -1,0 +1,67 @@
+name: Performance
+
+on:
+  schedule:
+    - cron: "31 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26.4"
+  GOTOOLCHAIN: local
+
+jobs:
+  large-file-benchmarks:
+    name: Large-file benchmark evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Verify module inputs
+        run: |
+          go mod verify
+          go mod tidy -diff
+
+      - name: Record benchmark environment
+        run: |
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "runner_image=${ImageOS:-unknown}-${ImageVersion:-unknown}"
+            echo "architecture=$(uname -m)"
+            go version
+            go env GOOS GOARCH GOAMD64 GOTOOLCHAIN
+          } > benchmark-environment.txt
+
+      - name: Run stable large-file benchmarks
+        run: |
+          set -o pipefail
+          go test -run '^$' -bench Benchmark -benchmem -count 5 \
+            ./internal/bigfile/document \
+            ./internal/bigfile/lineindex \
+            ./internal/bigfile/manualedit \
+            ./internal/bigfile/search | tee benchmark-results.txt
+
+      - name: Upload raw benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: large-file-benchmarks-${{ github.sha }}
+          path: |
+            benchmark-environment.txt
+            benchmark-results.txt
+          if-no-files-found: error
+          retention-days: 90

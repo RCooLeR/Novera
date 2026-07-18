@@ -33,8 +33,7 @@ type RollbackEntry struct {
 	Label string   `json:"label"`
 	Files []string `json:"files"`
 
-	snaps      []fileSnap // prior states, restored on rollback (not serialized)
-	incomplete bool       // a touched file was too large to snapshot
+	snaps []fileSnap // prior states, restored on rollback (not serialized)
 }
 
 // rollbackJournal is an in-memory ring of recent mutation snapshots so the agent
@@ -48,24 +47,17 @@ type rollbackJournal struct {
 
 func newRollbackJournal() *rollbackJournal { return &rollbackJournal{} }
 
-// snapshot records the current state of paths as a new undo point and returns
-// it. Call it BEFORE performing the mutation. Best-effort: an unreadable or
-// oversized file is skipped (and the entry flagged incomplete) rather than
-// aborting the mutation.
-func (j *rollbackJournal) snapshot(ws *workspace.Service, tool, label string, paths ...string) RollbackEntry {
+// snapshot records the current state of every path as one undo point. Call it
+// before performing the mutation. Snapshotting is deliberately all-or-nothing:
+// a mutation that promises undo must not proceed when any prior state cannot be
+// captured within the bounded in-memory budget.
+func (j *rollbackJournal) snapshot(ws *workspace.Service, tool, label string, paths ...string) (RollbackEntry, error) {
 	snaps := make([]fileSnap, 0, len(paths))
 	display := make([]string, 0, len(paths))
-	incomplete := false
 	for _, p := range paths {
-		data, existed, err := ws.ReadRaw(p)
+		data, existed, err := workspace.ReadRawBounded(ws, p, rollbackMaxFileBytes)
 		if err != nil {
-			incomplete = true
-			continue
-		}
-		if existed && len(data) > rollbackMaxFileBytes {
-			incomplete = true
-			display = append(display, p)
-			continue // too big to hold for undo
+			return RollbackEntry{}, fmt.Errorf("cannot create undo snapshot for %q: %w; mutation was not performed", p, err)
 		}
 		snaps = append(snaps, fileSnap{path: p, existed: existed, data: data})
 		display = append(display, p)
@@ -74,19 +66,18 @@ func (j *rollbackJournal) snapshot(ws *workspace.Service, tool, label string, pa
 	defer j.mu.Unlock()
 	j.seq++
 	e := RollbackEntry{
-		ID:         fmt.Sprintf("rb-%d", j.seq),
-		Time:       time.Now().Format(time.RFC3339),
-		Tool:       tool,
-		Label:      label,
-		Files:      display,
-		snaps:      snaps,
-		incomplete: incomplete,
+		ID:    fmt.Sprintf("rb-%d", j.seq),
+		Time:  time.Now().Format(time.RFC3339),
+		Tool:  tool,
+		Label: label,
+		Files: display,
+		snaps: snaps,
 	}
 	j.entries = append(j.entries, e)
 	if len(j.entries) > rollbackMaxEntries {
 		j.entries = j.entries[len(j.entries)-rollbackMaxEntries:]
 	}
-	return e
+	return e, nil
 }
 
 // list returns undo points, newest first.
@@ -121,7 +112,7 @@ func (j *rollbackJournal) rollback(ws *workspace.Service, id string) (RollbackEn
 
 	for _, s := range e.snaps {
 		if s.existed {
-			if err := ws.WriteRaw(s.path, s.data); err != nil {
+			if err := workspace.WriteRaw(ws, s.path, s.data); err != nil {
 				return RollbackEntry{}, err
 			}
 		} else if err := ws.Delete(s.path); err != nil && !os.IsNotExist(err) {

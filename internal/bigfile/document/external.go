@@ -26,6 +26,17 @@ func (d *FileDocument) OriginalFileState() FileState {
 	return FileState{Size: d.size, ModTime: d.mtime}
 }
 
+// OpenedFileInfo returns the identity of the exact descriptor backing this
+// document. Output producers use it to reject hard-link and renamed aliases of
+// the opened source, rather than trusting a pathname that may have changed.
+func (d *FileDocument) OpenedFileInfo() (os.FileInfo, error) {
+	if err := d.beginRead(); err != nil {
+		return nil, err
+	}
+	defer d.endRead()
+	return d.file.Stat()
+}
+
 func (d *FileDocument) CurrentFileState() (FileState, error) {
 	st, err := os.Stat(d.path)
 	if err != nil {

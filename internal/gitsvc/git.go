@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,18 +23,25 @@ import (
 )
 
 const (
-	statusTimeout   = 5 * time.Second
-	diffTimeout     = 8 * time.Second
-	mutationTimeout = 20 * time.Second
-	maxDiffBytes    = 2 << 20 // 2 MiB per side before we mark the diff too large
+	statusTimeout    = 5 * time.Second
+	diffTimeout      = 8 * time.Second
+	mutationTimeout  = 20 * time.Second
+	gitWaitDelay     = 2 * time.Second
+	maxDiffBytes     = 2 << 20 // 2 MiB per side before we mark the diff too large
+	maxGitOutput     = 4 << 20 // hard acquisition cap for structured git stdout
+	maxGitStderr     = 64 << 10
+	maxStatusChanges = 50_000
 )
+
+var errGitOutputTooLarge = errors.New("git output exceeds safety limit")
 
 // RootProvider yields the active workspace root (shared with the workspace svc).
 type RootProvider interface{ Root() string }
 
 // Service is the bound Wails git service.
 type Service struct {
-	roots RootProvider
+	roots   RootProvider
+	command func(context.Context, string, ...string) *exec.Cmd
 }
 
 // New constructs the git service sharing the workspace root provider.
@@ -71,30 +79,56 @@ type DiffContent struct {
 
 // CommitResult reports the outcome of a commit and the refreshed status.
 type CommitResult struct {
-	Hash      string `json:"hash"`
-	ShortHash string `json:"shortHash"`
-	Subject   string `json:"subject"`
-	Message   string `json:"message"`
-	Status    Status `json:"status"`
+	Hash         string `json:"hash"`
+	ShortHash    string `json:"shortHash"`
+	Subject      string `json:"subject"`
+	Message      string `json:"message"`
+	Status       Status `json:"status"`
+	Committed    bool   `json:"committed"`
+	RefreshError string `json:"refreshError"`
 }
 
 // Status returns the working-tree status, or Available=false with a message
 // when there is no workspace / not a git repo.
 func (s *Service) Status() (Status, error) {
-	root := s.root()
+	return s.statusAt(s.root())
+}
+
+func (s *Service) statusAt(root string) (Status, error) {
 	if root == "" {
 		return Status{Message: "Open a folder to use source control."}, nil
 	}
-	if _, err := s.git(statusTimeout, "rev-parse", "--is-inside-work-tree"); err != nil {
-		return Status{Message: repoUnavailableMessage(err)}, nil
+	inside, err := s.gitAt(root, statusTimeout, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		if isExpectedRepoUnavailable(err) {
+			return Status{Message: repoUnavailableMessage(err)}, nil
+		}
+		return Status{}, fmt.Errorf("probe git repository: %w", err)
 	}
-	branch := strings.TrimSpace(s.gitOK(statusTimeout, "branch", "--show-current"))
+	if strings.TrimSpace(inside) != "true" {
+		return Status{Message: "This folder is not a Git worktree."}, nil
+	}
+	raw, err := s.gitAt(root, statusTimeout, "-c", "core.quotepath=false", "status", "--porcelain=v1", "-z", "--branch")
+	if err != nil {
+		return Status{}, fmt.Errorf("read git status: %w", err)
+	}
+	branchOut, err := s.gitAt(root, statusTimeout, "branch", "--show-current")
+	if err != nil {
+		return Status{}, fmt.Errorf("read git branch: %w", err)
+	}
+	branch := strings.TrimSpace(branchOut)
 	if branch == "" {
 		branch = "detached"
 	}
-	head := strings.TrimSpace(s.gitOK(statusTimeout, "rev-parse", "--short", "HEAD"))
-	raw := s.gitOK(statusTimeout, "-c", "core.quotepath=false", "status", "--porcelain=v1", "-z", "--branch")
-	changes, aheadBehind := parseStatusZ(raw)
+	headOut, headErr := s.gitAt(root, statusTimeout, "rev-parse", "--short", "HEAD")
+	if headErr != nil && !statusShowsUnbornBranch(raw) {
+		return Status{}, fmt.Errorf("read git head: %w", headErr)
+	}
+	head := strings.TrimSpace(headOut)
+	changes, aheadBehind, err := parseStatusZ(raw)
+	if err != nil {
+		return Status{}, fmt.Errorf("parse git status: %w", err)
+	}
 	staged, unstaged := splitChanges(changes)
 	msg := fmt.Sprintf("%s is clean.", branch)
 	if len(changes) > 0 {
@@ -153,21 +187,50 @@ func (s *Service) Diff(rel, oldRel string, staged bool) (DiffContent, error) {
 		// HEAD vs index. "HEAD:./" / ":./" are resolved relative to cwd so this
 		// works whether the workspace is the repo root or a subdirectory.
 		var err1, err2 error
-		oldText, _, err1 = s.gitShow("HEAD:./" + headPath) // empty == newly added at HEAD (normal)
-		newText, _, err2 = s.gitShow(":./" + clean)
+		oldText, _, err1 = s.gitShow(root, "HEAD:./"+headPath) // empty == newly added at HEAD (normal)
+		newText, _, err2 = s.gitShow(root, ":./"+clean)
+		if errors.Is(err1, errGitOutputTooLarge) || errors.Is(err2, errGitOutputTooLarge) {
+			out.Message = "File too large to diff."
+			return out, nil
+		}
 		if errors.Is(err1, context.DeadlineExceeded) || errors.Is(err2, context.DeadlineExceeded) {
 			out.Message = "Couldn't load the diff — git timed out. Try again."
 			return out, nil
 		}
+		if err1 != nil {
+			return out, fmt.Errorf("load committed file: %w", err1)
+		}
+		if err2 != nil {
+			return out, fmt.Errorf("load staged file: %w", err2)
+		}
 	} else {
 		// index vs working tree (fall back to HEAD when the path isn't staged).
-		if idx, ok, _ := s.gitShow(":./" + clean); ok {
-			oldText = idx
-		} else if head, _, herr := s.gitShow("HEAD:./" + headPath); herr == nil {
-			oldText = head
-		} else if errors.Is(herr, context.DeadlineExceeded) {
+		idx, ok, idxErr := s.gitShow(root, ":./"+clean)
+		switch {
+		case errors.Is(idxErr, errGitOutputTooLarge):
+			out.Message = "File too large to diff."
+			return out, nil
+		case errors.Is(idxErr, context.DeadlineExceeded):
 			out.Message = "Couldn't load the previous version — git timed out. Try again."
 			return out, nil
+		case idxErr != nil:
+			return out, fmt.Errorf("load index file: %w", idxErr)
+		case ok:
+			oldText = idx
+		default:
+			head, headExists, headErr := s.gitShow(root, "HEAD:./"+headPath)
+			switch {
+			case errors.Is(headErr, errGitOutputTooLarge):
+				out.Message = "File too large to diff."
+				return out, nil
+			case errors.Is(headErr, context.DeadlineExceeded):
+				out.Message = "Couldn't load the previous version — git timed out. Try again."
+				return out, nil
+			case headErr != nil:
+				return out, fmt.Errorf("load committed file: %w", headErr)
+			case headExists:
+				oldText = head
+			}
 		}
 		// Resolve the working-tree path through securejoin so a symlinked entry
 		// can't make us read a file outside the workspace.
@@ -175,8 +238,15 @@ func (s *Service) Diff(rel, oldRel string, staged bool) (DiffContent, error) {
 		if rerr != nil {
 			return out, rerr
 		}
-		if data, readErr := os.ReadFile(abs); readErr == nil { // empty if deleted
+		data, tooLarge, readErr := readFileLimited(abs, maxDiffBytes)
+		if tooLarge {
+			out.Message = "File too large to diff."
+			return out, nil
+		}
+		if readErr == nil { // empty if deleted
 			newText = string(data)
+		} else if !errors.Is(readErr, os.ErrNotExist) {
+			return out, readErr
 		}
 	}
 
@@ -197,10 +267,16 @@ func (s *Service) Diff(rel, oldRel string, staged bool) (DiffContent, error) {
 // the committed version, ":./x" for the staged/index version), whether it exists
 // there, and the underlying error (so a timeout can be told apart from a path
 // that simply isn't present at that ref).
-func (s *Service) gitShow(spec string) (string, bool, error) {
-	out, err := s.git(diffTimeout, "show", spec)
+func (s *Service) gitShow(root, spec string) (string, bool, error) {
+	out, truncated, err := s.gitOutputAt(root, diffTimeout, maxDiffBytes, "show", spec)
 	if err != nil {
+		if isMissingGitObjectError(err) {
+			return "", false, nil
+		}
 		return "", false, err
+	}
+	if truncated {
+		return "", false, errGitOutputTooLarge
 	}
 	return out, true, nil
 }
@@ -209,12 +285,22 @@ func (s *Service) gitShow(spec string) (string, bool, error) {
 // when rel is empty), capped. Used by the agent's git_diff tool and available
 // to the UI.
 func (s *Service) UnifiedDiff(rel string) (string, error) {
-	if s.root() == "" {
+	root := s.root()
+	if root == "" {
 		return "", errors.New("open a folder first")
 	}
 	// -c core.quotepath=false so non-ASCII paths in the diff header aren't
 	// octal-escaped (matches the status parser).
-	args := []string{"-c", "core.quotepath=false", "--no-pager", "diff", "HEAD"}
+	args := []string{"-c", "core.quotepath=false", "--no-pager", "diff"}
+	if _, headErr := s.gitAt(root, statusTimeout, "rev-parse", "--verify", "--quiet", "HEAD"); headErr == nil {
+		args = append(args, "HEAD")
+	} else if isUnbornHeadError(headErr) {
+		// An unborn repository has no HEAD. Git's cached diff compares the index
+		// to the empty tree and remains useful instead of failing with exit 128.
+		args = append(args, "--cached")
+	} else {
+		return "", headErr
+	}
 	if strings.TrimSpace(rel) != "" {
 		clean, err := cleanRelPath(rel)
 		if err != nil {
@@ -222,18 +308,12 @@ func (s *Service) UnifiedDiff(rel string) (string, error) {
 		}
 		args = append(args, "--", clean)
 	}
-	out, err := s.git(diffTimeout, args...)
+	out, truncated, err := s.gitOutputAt(root, diffTimeout, maxDiffBytes, args...)
 	if err != nil {
 		return "", err
 	}
-	if len(out) > maxDiffBytes {
-		// Back up to a rune boundary so truncation can't split a multi-byte
-		// character and produce invalid UTF-8.
-		cut := maxDiffBytes
-		for cut > 0 && !utf8.RuneStart(out[cut]) {
-			cut--
-		}
-		out = out[:cut] + "\n…(diff truncated)"
+	if truncated {
+		out = trimTruncatedUTF8(out) + "\n…(diff truncated)"
 	}
 	return out, nil
 }
@@ -246,17 +326,19 @@ func (s *Service) Unstage(rel string) (Status, error) { return s.fileAction(rel,
 
 // StageAll stages every change (tracked + untracked).
 func (s *Service) StageAll() (Status, error) {
-	if s.root() == "" {
+	root := s.root()
+	if root == "" {
 		return Status{Message: "Open a folder first."}, nil
 	}
-	if _, err := s.git(mutationTimeout, "add", "-A"); err != nil {
+	if err := s.gitRunAt(root, mutationTimeout, "add", "-A"); err != nil {
 		return Status{}, err
 	}
-	return s.Status()
+	return s.statusAt(root)
 }
 
 func (s *Service) fileAction(rel, action string) (Status, error) {
-	if s.root() == "" {
+	root := s.root()
+	if root == "" {
 		return Status{Message: "Open a folder first."}, nil
 	}
 	clean, err := cleanRelPath(rel)
@@ -265,29 +347,34 @@ func (s *Service) fileAction(rel, action string) (Status, error) {
 	}
 	switch action {
 	case "stage":
-		_, err = s.git(mutationTimeout, "add", "--", clean)
+		err = s.gitRunAt(root, mutationTimeout, "add", "--", clean)
 	case "unstage":
-		_, err = s.git(mutationTimeout, "restore", "--staged", "--", clean)
+		err = s.gitRunAt(root, mutationTimeout, "restore", "--staged", "--", clean)
 	default:
 		return Status{}, fmt.Errorf("unsupported action %q", action)
 	}
 	if err != nil {
 		return Status{}, err
 	}
-	return s.Status()
+	return s.statusAt(root)
 }
 
 // Commit commits the staged changes with the given subject/body.
 func (s *Service) Commit(subject, body string) (CommitResult, error) {
 	subject = strings.TrimSpace(subject)
 	body = strings.TrimSpace(body)
-	if s.root() == "" {
+	root := s.root()
+	if root == "" {
 		return CommitResult{Message: "Open a folder first."}, nil
 	}
 	if subject == "" {
 		return CommitResult{Message: "A commit message is required."}, nil
 	}
-	stat := strings.TrimSpace(s.gitOK(diffTimeout, "diff", "--cached", "--stat"))
+	statOut, err := s.gitAt(root, diffTimeout, "diff", "--cached", "--stat")
+	if err != nil {
+		return CommitResult{}, fmt.Errorf("inspect staged changes: %w", err)
+	}
+	stat := strings.TrimSpace(statOut)
 	if stat == "" {
 		return CommitResult{Message: "No staged changes to commit."}, nil
 	}
@@ -295,19 +382,36 @@ func (s *Service) Commit(subject, body string) (CommitResult, error) {
 	if body != "" {
 		args = append(args, "-m", body)
 	}
-	if _, err := s.git(mutationTimeout, args...); err != nil {
+	if err := s.gitRunAt(root, mutationTimeout, args...); err != nil {
 		return CommitResult{}, err
 	}
-	hash := strings.TrimSpace(s.gitOK(statusTimeout, "rev-parse", "HEAD"))
-	status, err := s.Status()
+	result := CommitResult{Committed: true, Subject: subject, Message: "Committed."}
+	hashOut, err := s.gitAt(root, statusTimeout, "rev-parse", "HEAD")
 	if err != nil {
-		return CommitResult{}, err
+		result.RefreshError = fmt.Sprintf("read committed revision: %v", err)
+		result.Message = "Commit succeeded, but its revision could not be refreshed."
+		return result, nil
+	}
+	hash := strings.TrimSpace(hashOut)
+	status, err := s.statusAt(root)
+	if err != nil {
+		result.Hash = hash
+		result.ShortHash = hash
+		if len(result.ShortHash) > 8 {
+			result.ShortHash = result.ShortHash[:8]
+		}
+		result.RefreshError = fmt.Sprintf("refresh status: %v", err)
+		result.Message = "Commit succeeded, but repository status could not be refreshed."
+		return result, nil
 	}
 	short := hash
 	if len(short) > 8 {
 		short = short[:8]
 	}
-	return CommitResult{Hash: hash, ShortHash: short, Subject: subject, Message: "Committed.", Status: status}, nil
+	result.Hash = hash
+	result.ShortHash = short
+	result.Status = status
+	return result, nil
 }
 
 // --- git execution ---
@@ -320,39 +424,166 @@ func (s *Service) root() string {
 }
 
 func (s *Service) git(timeout time.Duration, args ...string) (string, error) {
-	if err := rejectNetworkGit(args); err != nil {
+	return s.gitAt(s.root(), timeout, args...)
+}
+
+func (s *Service) gitAt(root string, timeout time.Duration, args ...string) (string, error) {
+	out, truncated, err := s.gitOutputAt(root, timeout, maxGitOutput, args...)
+	if err != nil {
 		return "", err
+	}
+	if truncated {
+		return "", errGitOutputTooLarge
+	}
+	return out, nil
+}
+
+// gitRun is for mutating commands whose stdout is informational. It still
+// bounds acquisition, but a successful mutation is not misreported as failed
+// merely because its informational output exceeded the display budget.
+func (s *Service) gitRun(timeout time.Duration, args ...string) error {
+	return s.gitRunAt(s.root(), timeout, args...)
+}
+
+func (s *Service) gitRunAt(root string, timeout time.Duration, args ...string) error {
+	_, _, err := s.gitOutputAt(root, timeout, maxGitOutput, args...)
+	return err
+}
+
+func (s *Service) gitOutput(timeout time.Duration, stdoutLimit int, args ...string) (string, bool, error) {
+	return s.gitOutputAt(s.root(), timeout, stdoutLimit, args...)
+}
+
+func (s *Service) gitOutputAt(root string, timeout time.Duration, stdoutLimit int, args ...string) (string, bool, error) {
+	if err := rejectNetworkGit(args); err != nil {
+		return "", false, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = s.root()
+	command := s.command
+	if command == nil {
+		command = exec.CommandContext
+	}
+	cmd := command(ctx, "git", args...)
+	cmd.Dir = root
 	cmd.Env = nonInteractiveEnv(os.Environ())
+	cmd.WaitDelay = gitWaitDelay
 	hideWindow(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if ctx.Err() == context.DeadlineExceeded {
+	stdout := newCappedBuffer(stdoutLimit)
+	stderr := newCappedBuffer(maxGitStderr)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		// Wrap the sentinel so callers can distinguish a timeout from a normal
 		// non-zero exit (e.g. "path absent at HEAD") via errors.Is.
-		return "", fmt.Errorf("git %s timed out: %w", firstArg(args), context.DeadlineExceeded)
+		return "", stdout.truncated, fmt.Errorf("git %s timed out: %w", firstArg(args), context.DeadlineExceeded)
 	}
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
+		msg := strings.TrimSpace(trimTruncatedUTF8(stderr.String()))
 		if msg == "" {
 			msg = err.Error()
+		} else if stderr.truncated {
+			msg += "\n...(git error output truncated)"
 		}
-		return "", errors.New(msg)
+		return "", stdout.truncated, fmt.Errorf("%s: %w", msg, err)
 	}
-	return string(out), nil
+	return stdout.String(), stdout.truncated, nil
 }
 
-func (s *Service) gitOK(timeout time.Duration, args ...string) string {
-	out, err := s.git(timeout, args...)
-	if err != nil {
-		return ""
+type cappedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func newCappedBuffer(limit int) *cappedBuffer {
+	if limit < 0 {
+		limit = 0
 	}
-	return out
+	return &cappedBuffer{limit: limit}
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	remaining := b.limit - b.buf.Len()
+	if remaining > 0 {
+		keep := len(p)
+		if keep > remaining {
+			keep = remaining
+		}
+		_, _ = b.buf.Write(p[:keep])
+	}
+	if len(p) > remaining {
+		b.truncated = true
+	}
+	return written, nil
+}
+
+func (b *cappedBuffer) String() string { return b.buf.String() }
+
+func readFileLimited(path string, limit int) ([]byte, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, false, err
+	}
+	if info.Size() > int64(limit) {
+		f.Close()
+		return nil, true, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	closeErr := f.Close()
+	if err != nil {
+		return nil, false, err
+	}
+	if closeErr != nil {
+		return nil, false, closeErr
+	}
+	if len(data) > limit {
+		return nil, true, nil
+	}
+	return data, false, nil
+}
+
+func statusShowsUnbornBranch(raw string) bool {
+	return strings.Contains(raw, "## No commits yet on ") || strings.Contains(raw, "## Initial commit on ")
+}
+
+func isUnbornHeadError(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
+}
+
+func isMissingGitObjectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "exists on disk, but not in") ||
+		strings.Contains(text, "does not exist in") ||
+		strings.Contains(text, "path not in the working tree") ||
+		strings.Contains(text, "invalid object name 'head'") ||
+		strings.Contains(text, "not a valid object name head")
+}
+
+func trimTruncatedUTF8(value string) string {
+	if utf8.ValidString(value) {
+		return value
+	}
+	// A cap can split only the final rune. Try removing at most one UTF-8
+	// sequence before falling back to replacement for pre-existing invalid data.
+	for remove := 1; remove <= utf8.UTFMax && remove <= len(value); remove++ {
+		candidate := value[:len(value)-remove]
+		if utf8.ValidString(candidate) {
+			return candidate
+		}
+	}
+	return strings.ToValidUTF8(value, "�")
 }
 
 func firstArg(args []string) string {
@@ -432,6 +663,17 @@ func repoUnavailableMessage(err error) string {
 	return "This folder is not a Git repository."
 }
 
+func isExpectedRepoUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "not a git repository") ||
+		strings.Contains(text, "not a gitdir") ||
+		strings.Contains(text, "dubious ownership") ||
+		strings.Contains(text, "safe.directory")
+}
+
 func isBinary(data []byte) bool {
 	n := len(data)
 	if n > 8000 {
@@ -442,7 +684,13 @@ func isBinary(data []byte) bool {
 
 // --- porcelain parsing (ported, -z aware) ---
 
-func parseStatusZ(output string) ([]FileChange, string) {
+func parseStatusZ(output string) ([]FileChange, string, error) {
+	// A rename consumes two records. Reject before strings.Split so a bounded
+	// byte response containing hundreds of thousands of tiny records cannot
+	// amplify into an unbounded slice/DTO graph.
+	if strings.Count(output, "\x00") > maxStatusChanges*2+1 {
+		return nil, "", errGitOutputTooLarge
+	}
 	records := strings.Split(output, "\x00")
 	changes := []FileChange{}
 	aheadBehind := ""
@@ -469,6 +717,9 @@ func parseStatusZ(output string) ([]FileChange, string) {
 			i++
 			oldPath = records[i]
 		}
+		if len(changes) >= maxStatusChanges {
+			return nil, "", errGitOutputTooLarge
+		}
 		changes = append(changes, FileChange{
 			Path:     path,
 			OldPath:  oldPath,
@@ -477,7 +728,7 @@ func parseStatusZ(output string) ([]FileChange, string) {
 			Summary:  changeSummary(index, worktree, oldPath),
 		})
 	}
-	return changes, aheadBehind
+	return changes, aheadBehind, nil
 }
 
 // isRenameOrCopy reports whether a porcelain v1 -z record is followed by a

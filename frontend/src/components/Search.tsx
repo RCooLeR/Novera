@@ -61,7 +61,7 @@ export default function Search() {
       </div>
 
       {searchResults && (
-        <div className="search__summary">
+        <div className="search__summary" role="status" aria-live="polite">
           {searchResults.matches.length === 0
             ? "No results"
             : `${searchResults.matches.length} result${searchResults.matches.length === 1 ? "" : "s"} in ${searchResults.fileCount} file${searchResults.fileCount === 1 ? "" : "s"}${searchResults.truncated ? " (truncated)" : ""}`}
@@ -73,27 +73,31 @@ export default function Search() {
           const isCollapsed = collapsed[path];
           return (
             <div key={path}>
-              <div
+              <button
+                type="button"
                 className="search__file"
                 onClick={() => setCollapsed((c) => ({ ...c, [path]: !c[path] }))}
                 title={path}
+                aria-expanded={!isCollapsed}
               >
                 {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                 <span className="search__filename">{baseName(path)}</span>
                 <span className="search__filedir">{dirName(path)}</span>
                 <span className="search__count">{matches.length}</span>
-              </div>
+              </button>
               {!isCollapsed &&
                 matches.map((m, i) => (
-                  <div
+                  <button
+                    type="button"
                     key={`${m.line}:${m.column}:${i}`}
                     className="search__match"
                     onClick={() => void openFileAt(m.path, m.line, m.column)}
                     title={`${m.path}:${m.line}`}
+                    aria-label={`Open ${baseName(m.path)}, line ${m.line}: ${m.text.trim()}`}
                   >
                     <span className="search__line">{m.line}</span>
                     <span className="search__text">{m.text.trim()}</span>
-                  </div>
+                  </button>
                 ))}
             </div>
           );

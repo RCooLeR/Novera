@@ -5,7 +5,6 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 )
 
@@ -27,7 +26,40 @@ type SQLConvertSummary struct {
 }
 
 func sqlIdent(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
-func sqlStr(s string) string   { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+// sqlStr emits a MySQL-compatible string literal. Escaping backslashes before
+// quotes is essential: under MySQL's default SQL mode, an input backslash can
+// otherwise consume the first quote of a doubled-quote escape and let the
+// remainder of an untrusted CSV value escape the literal.
+func sqlStr(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('\'')
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 0:
+			b.WriteString(`\0`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case 0x1a:
+			b.WriteString(`\Z`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\'':
+			b.WriteString("''")
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
+}
 
 type countWriter struct {
 	w io.Writer
@@ -42,8 +74,8 @@ func (c *countWriter) Write(p []byte) (int, error) {
 
 // ConvertCSVToSQL streams a CSV/TSV into CREATE TABLE + batched INSERT
 // statements. The header row is skipped (opts.Columns is authoritative). All
-// values are emitted as quoted strings except NULLs, which keeps generation
-// dialect-safe; the column TYPES still come from inference for the CREATE.
+// values are emitted as MySQL-escaped strings except NULLs; the column TYPES
+// still come from inference for the CREATE.
 func ConvertCSVToSQL(r io.Reader, w io.Writer, opts SQLConvertOptions) (SQLConvertSummary, error) {
 	return writeCSVAsSQL(r, w, opts, 0)
 }
@@ -125,7 +157,7 @@ func writeCSVAsSQL(r io.Reader, w io.Writer, opts SQLConvertOptions, maxRows int
 			break
 		}
 		if e != nil {
-			break // tolerate a malformed tail
+			return SQLConvertSummary{}, fmt.Errorf("read CSV data record %d: %w", rows+1, e)
 		}
 		if !open {
 			fmt.Fprintf(bw, "INSERT INTO %s %s VALUES\n", table, colClause)
@@ -164,44 +196,4 @@ func writeCSVAsSQL(r io.Reader, w io.Writer, opts SQLConvertOptions, maxRows int
 		return SQLConvertSummary{}, err
 	}
 	return SQLConvertSummary{Rows: rows, Bytes: cw.n}, nil
-}
-
-// DumpTableRange is a byte range [Start,End) holding one table's statements.
-type DumpTableRange struct {
-	Name  string `json:"name"`
-	Start int64  `json:"start"`
-	End   int64  `json:"end"`
-}
-
-// PlanDumpRanges turns a DumpSummary into contiguous per-table byte ranges: each
-// table runs from its first statement to the start of the next table (the last
-// to end-of-file), so a table can be extracted by copying its byte range.
-func PlanDumpRanges(sum DumpSummary, sourceSize int64) []DumpTableRange {
-	type start struct {
-		name string
-		off  int64
-	}
-	starts := make([]start, 0, len(sum.Tables))
-	for _, t := range sum.Tables {
-		off := t.CreateOffset
-		if off < 0 || (t.InsertOffset >= 0 && t.InsertOffset < off) {
-			if t.InsertOffset >= 0 {
-				off = t.InsertOffset
-			}
-		}
-		if off < 0 {
-			continue
-		}
-		starts = append(starts, start{t.Name, off})
-	}
-	sort.Slice(starts, func(i, j int) bool { return starts[i].off < starts[j].off })
-	out := make([]DumpTableRange, len(starts))
-	for i, s := range starts {
-		end := sourceSize
-		if i+1 < len(starts) {
-			end = starts[i+1].off
-		}
-		out[i] = DumpTableRange{Name: s.name, Start: s.off, End: end}
-	}
-	return out
 }

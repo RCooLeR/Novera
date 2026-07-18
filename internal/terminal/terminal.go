@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,7 @@ type session struct {
 	id        string
 	pty       pty.Pty
 	cmd       *pty.Cmd
+	tree      *terminalProcessTree
 	closeOnce sync.Once
 }
 
@@ -63,6 +65,17 @@ func New(roots RootProvider) *Service {
 // Start launches a shell on a new pseudo-terminal sized to cols×rows and returns
 // the session id. Output arrives via the "term:data" event.
 func (s *Service) Start(cols, rows int) (string, error) {
+	root := strings.TrimSpace(s.root())
+	if root == "" {
+		return "", errors.New("open a folder before starting a terminal")
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", fmt.Errorf("terminal workspace root: %w", err)
+	}
+	if !info.IsDir() {
+		return "", errors.New("terminal workspace root is not a directory")
+	}
 	p, err := pty.New()
 	if err != nil {
 		return "", err
@@ -72,17 +85,25 @@ func (s *Service) Start(cols, rows int) (string, error) {
 	}
 	name, args := defaultShell()
 	cmd := p.Command(name, args...)
-	cmd.Dir = s.root()
+	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	prepareTerminalCommand(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = p.Close()
 		return "", err
+	}
+	tree, err := ownTerminalProcessTree(cmd)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = p.Close()
+		_ = cmd.Wait()
+		return "", fmt.Errorf("terminal process-tree ownership: %w", err)
 	}
 
 	s.mu.Lock()
 	s.seq++
 	id := fmt.Sprintf("term-%d", s.seq)
-	sess := &session{id: id, pty: p, cmd: cmd}
+	sess := &session{id: id, pty: p, cmd: cmd, tree: tree}
 	s.sessions[id] = sess
 	s.mu.Unlock()
 
@@ -149,13 +170,20 @@ func (s *Service) Close(id string) error {
 func (s *Service) shutdown(sess *session, emitExit bool) {
 	sess.closeOnce.Do(func() {
 		s.remove(sess.id)
-		if sess.cmd.Process != nil {
+		if sess.tree != nil {
+			if err := sess.tree.kill(); err != nil && sess.cmd.Process != nil {
+				_ = sess.cmd.Process.Kill()
+			}
+		} else if sess.cmd.Process != nil {
 			_ = sess.cmd.Process.Kill()
 		}
 		_ = sess.pty.Close()
 		// Reap exactly here (once, guarded by closeOnce) so there's no separate
 		// goroutine racing Wait against the Kill above.
 		waitErr := sess.cmd.Wait()
+		if sess.tree != nil {
+			_ = sess.tree.close()
+		}
 		if emitExit {
 			// emitExit is true only on a natural shell exit (the Kill above was a
 			// no-op for an already-gone process), so the Wait result reflects the

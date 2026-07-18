@@ -1,45 +1,48 @@
 import { Application } from "@wailsio/runtime";
-import { useStore } from "../state/store";
+import { isUnsavedResourceTab, useStore } from "../state/store";
 import type { ViewId } from "../state/store";
 import { Shell } from "./services";
 import { formatActiveDocument, runActiveEditorAction } from "./editorBridge";
 
 const REPO_URL = "https://github.com/RCooLeR/Novera";
 
-export type AppMenuAction =
-  | "open_folder"
-  | "new_file"
-  | "new_folder"
-  | "save"
-  | "quit"
-  | "edit_undo"
-  | "edit_redo"
-  | "edit_cut"
-  | "edit_copy"
-  | "edit_paste"
-  | "edit_select_all"
-  | "format_document"
-  | "palette"
-  | "quickopen"
-  | "view_explorer"
-  | "view_search"
-  | "view_git"
-  | "view_db"
-  | "view_artifacts"
-  | "view_settings"
-  | "view_problems"
-  | "toggle_sidebar"
-  | "toggle_panel"
-  | "toggle_assistant"
-  | "tool_csv_schema"
-  | "tool_csv_to_sql"
-  | "tool_dump_analyze"
-  | "tool_clean_dump"
-  | "tool_data_tools"
-  | "tool_save_artifact"
-  | "help_about"
-  | "help_docs"
-  | "help_issues";
+export const APP_MENU_ACTIONS = [
+  "open_folder",
+  "new_file",
+  "new_folder",
+  "save",
+  "quit",
+  "edit_undo",
+  "edit_redo",
+  "edit_cut",
+  "edit_copy",
+  "edit_paste",
+  "edit_select_all",
+  "format_document",
+  "palette",
+  "quickopen",
+  "view_explorer",
+  "view_search",
+  "view_git",
+  "view_db",
+  "view_artifacts",
+  "view_settings",
+  "view_problems",
+  "toggle_sidebar",
+  "toggle_panel",
+  "toggle_assistant",
+  "tool_csv_schema",
+  "tool_csv_to_sql",
+  "tool_dump_analyze",
+  "tool_clean_dump",
+  "tool_data_tools",
+  "tool_save_artifact",
+  "help_about",
+  "help_docs",
+  "help_issues",
+] as const;
+
+export type AppMenuAction = (typeof APP_MENU_ACTIONS)[number];
 
 const editorActionForCommand: Record<string, string> = {
   undo: "undo",
@@ -90,6 +93,10 @@ export function runMenuAction(action: AppMenuAction) {
       void g.saveActive();
       break;
     case "quit":
+			if (g.tabs.some(isUnsavedResourceTab)) {
+				g.setStatus("Save or explicitly discard all unsaved changes before quitting.", "error");
+				break;
+			}
       void Application.Quit();
       break;
     case "edit_undo":
