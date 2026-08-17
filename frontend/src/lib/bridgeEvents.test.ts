@@ -67,19 +67,24 @@ describe("bridge event validation", () => {
   });
 
   it("validates big-file job lifecycle events", () => {
-    expect(parseBigFileJobStart([{ id: "job1", title: "CSV filter" }])).toEqual({
+    const payload = {
       id: "job1",
+      sequence: 1,
       title: "CSV filter",
-    });
-    expect(parseBigFileJobProgress({ id: "job1", records: 1200, note: "reading" })).toEqual({
-      id: "job1",
+      kind: "transform",
+      fileId: "f1",
+      completed: 1200,
+      total: 2000,
       records: 1200,
       note: "reading",
-    });
-    expect(parseBigFileJobEnd({ id: "job1" })).toEqual({ id: "job1" });
-    expect(parseBigFileJobStart({ id: "job1", title: 4 })).toBeNull();
-    expect(parseBigFileJobProgress({ id: "job1", records: -1, note: "bad" })).toBeNull();
-    expect(parseBigFileJobProgress({ id: "job1", records: 1, note: null })).toBeNull();
-    expect(parseBigFileJobEnd({ id: "" })).toBeNull();
+    };
+    expect(parseBigFileJobStart([payload])).toEqual(payload);
+    expect(parseBigFileJobProgress(payload)).toEqual(payload);
+    expect(parseBigFileJobEnd({ ...payload, status: "completed" })).toEqual({ ...payload, status: "completed" });
+    expect(parseBigFileJobStart({ ...payload, sequence: 0 })).toBeNull();
+    expect(parseBigFileJobStart({ ...payload, title: 4 })).toBeNull();
+    expect(parseBigFileJobProgress({ ...payload, records: -1 })).toBeNull();
+    expect(parseBigFileJobProgress({ ...payload, note: null })).toBeNull();
+    expect(parseBigFileJobEnd({ ...payload, status: "unknown" })).toBeNull();
   });
 });

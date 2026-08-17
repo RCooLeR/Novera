@@ -51,13 +51,16 @@ export default function Search() {
     <div className="search">
       <div className="search__box">
         <input
+          type="search"
           className="search__input"
           value={searchQuery}
           spellCheck={false}
+          aria-label="Search workspace"
+          aria-busy={searching}
           placeholder="Search workspace…"
           onChange={(e) => onChange(e.target.value)}
         />
-        {searching && <Loader2 size={14} className="spin search__spin" />}
+        {searching && <Loader2 size={14} className="spin search__spin" aria-hidden="true" />}
       </div>
 
       {searchResults && (
@@ -68,11 +71,11 @@ export default function Search() {
         </div>
       )}
 
-      <div className="search__results">
+      <div className="search__results" role="list" aria-label="Workspace search results">
         {groups.map(([path, matches]) => {
           const isCollapsed = collapsed[path];
           return (
-            <div key={path}>
+            <div key={path} role="listitem">
               <button
                 type="button"
                 className="search__file"

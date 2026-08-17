@@ -139,3 +139,14 @@ func (c *chunkCache) setMaxBytes(maxBytes int) {
 	c.evict()
 	c.mu.Unlock()
 }
+
+func (c *chunkCache) clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.bytes = 0
+	c.order.Init()
+	clear(c.chunks)
+	c.mu.Unlock()
+}

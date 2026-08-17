@@ -3,6 +3,7 @@ package lineindex
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -32,8 +33,19 @@ func TestBuildRecordsSparseEntries(t *testing.T) {
 }
 
 func TestEveryLinesForSizeKeepsSmallFilesAtDefault(t *testing.T) {
-	if got := EveryLinesForSize(1 << 30); got != defaultEveryLines {
-		t.Fatalf("EveryLinesForSize(1GiB) = %d, want default %d", got, defaultEveryLines)
+	if got := EveryLinesForSize(512 << 20); got != defaultEveryLines {
+		t.Fatalf("EveryLinesForSize(512MiB) = %d, want default %d", got, defaultEveryLines)
+	}
+}
+
+func TestEveryLinesForSizeUsesOneByteLineWorstCase(t *testing.T) {
+	got := EveryLinesForSize(1 << 30)
+	if got != 8192 {
+		t.Fatalf("EveryLinesForSize(1GiB) = %d, want 8192", got)
+	}
+	anchors := (int64(1)<<30)/got + 1
+	if anchors > MaxIndexEntries {
+		t.Fatalf("worst-case anchors = %d, limit %d", anchors, MaxIndexEntries)
 	}
 }
 
@@ -44,6 +56,68 @@ func TestEveryLinesForSizeScalesHugeShortLineFiles(t *testing.T) {
 	}
 	if got&(got-1) != 0 {
 		t.Fatalf("EveryLinesForSize(500GiB) = %d, want power-of-two stride", got)
+	}
+}
+
+func TestValidateSnapshotRejectsMalformedAnchors(t *testing.T) {
+	valid := Snapshot{
+		EveryLines: 2,
+		Entries:    []Entry{{Line: 1, Offset: 0}, {Line: 3, Offset: 4}},
+		Lines:      3,
+		Bytes:      8,
+		Done:       true,
+	}
+	if err := ValidateSnapshot(valid, 8); err != nil {
+		t.Fatalf("valid snapshot: %v", err)
+	}
+	tests := map[string]Snapshot{
+		"zero stride":      {EveryLines: 0, Entries: valid.Entries, Lines: 3, Bytes: 8, Done: true},
+		"wrong totals":     {EveryLines: 2, Entries: valid.Entries, Lines: 3, Bytes: 9, Done: true},
+		"missing first":    {EveryLines: 2, Entries: []Entry{{Line: 3, Offset: 4}}, Lines: 3, Bytes: 8, Done: true},
+		"negative offset":  {EveryLines: 2, Entries: []Entry{{Line: 1, Offset: 0}, {Line: 3, Offset: -1}}, Lines: 3, Bytes: 8, Done: true},
+		"offset past EOF":  {EveryLines: 2, Entries: []Entry{{Line: 1, Offset: 0}, {Line: 3, Offset: 9}}, Lines: 3, Bytes: 8, Done: true},
+		"stride violation": {EveryLines: 2, Entries: []Entry{{Line: 1, Offset: 0}, {Line: 2, Offset: 4}}, Lines: 3, Bytes: 8, Done: true},
+		"reverse offset":   {EveryLines: 2, Entries: []Entry{{Line: 1, Offset: 0}, {Line: 3, Offset: 6}, {Line: 5, Offset: 4}}, Lines: 5, Bytes: 8, Done: true},
+	}
+	for name, snapshot := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateSnapshot(snapshot, 8); err == nil {
+				t.Fatalf("snapshot unexpectedly accepted: %#v", snapshot)
+			}
+		})
+	}
+}
+
+func TestRestoreSnapshotKeepsIndexPointerAndCopiesEntries(t *testing.T) {
+	idx := New(2)
+	snapshot := Snapshot{
+		EveryLines: 2,
+		Entries:    []Entry{{Line: 1, Offset: 0}, {Line: 3, Offset: 4}},
+		Lines:      3,
+		Bytes:      8,
+		Done:       true,
+	}
+	if err := idx.RestoreSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Entries[1] = Entry{Line: 99, Offset: 99}
+	if got := idx.Entries()[1]; got != (Entry{Line: 3, Offset: 4}) {
+		t.Fatalf("restored entry mutated through caller slice: %#v", got)
+	}
+}
+
+func TestBuildStopsAtHardAnchorLimit(t *testing.T) {
+	idx := New(1)
+	data := bytes.Repeat([]byte{'\n'}, MaxIndexEntries+16)
+	err := idx.Build(context.Background(), bytes.NewReader(data))
+	if !errors.Is(err, ErrIndexEntryLimit) {
+		t.Fatalf("error = %v, want ErrIndexEntryLimit", err)
+	}
+	if got := len(idx.Entries()); got != MaxIndexEntries {
+		t.Fatalf("entries = %d, want hard limit %d", got, MaxIndexEntries)
+	}
+	if idx.Done() {
+		t.Fatal("entry-limited index must not be marked complete")
 	}
 }
 

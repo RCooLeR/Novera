@@ -148,8 +148,8 @@ func LabelForSample(sample string) string {
 
 func descriptors() []plugins.Descriptor {
 	return []plugins.Descriptor{
-		{ID: "sql", FilePatterns: plugins.SQLFilePatterns},
-		{ID: "csv", FilePatterns: plugins.CSVFilePatterns},
+		{ID: "sql", FilePatterns: plugins.SQLPatterns()},
+		{ID: "csv", FilePatterns: plugins.CSVPatterns()},
 		{ID: "log", FilePatterns: plugins.LogFilePatterns},
 		{ID: "yaml", FilePatterns: plugins.YAMLFilePatterns},
 		{ID: "config", FilePatterns: plugins.ConfigFilePatterns},

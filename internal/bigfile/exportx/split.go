@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -37,6 +37,26 @@ type SplitSummary struct {
 	ChecksumAlgorithm string
 }
 
+// SplitIncompleteError reports a split that did not publish its completion
+// manifest. Already committed, complete parts are preserved for explicit user
+// recovery; they are never rolled back through mutable pathnames.
+type SplitIncompleteError struct {
+	Outputs      []string
+	ManifestPath string
+	Err          error
+}
+
+func (e *SplitIncompleteError) Error() string {
+	return fmt.Sprintf(
+		"split incomplete; %d complete part(s) preserved and manifest %q is not confirmed: %v",
+		len(e.Outputs),
+		e.ManifestPath,
+		e.Err,
+	)
+}
+
+func (e *SplitIncompleteError) Unwrap() error { return e.Err }
+
 type OutputChecksum struct {
 	Path   string
 	SHA256 string
@@ -54,6 +74,9 @@ func SplitBySize(ctx context.Context, doc document.ReaderAtSize, sourcePath stri
 	if bytesPerPart <= 0 {
 		return SplitSummary{}, errors.New("bytes per part must be positive")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	total := doc.Size()
 	summary := SplitSummary{
@@ -65,11 +88,11 @@ func SplitBySize(ctx context.Context, doc document.ReaderAtSize, sourcePath stri
 	if opts.ComputeSHA256 {
 		summary.ChecksumAlgorithm = "sha256"
 	}
-	if err := ensureSplitManifestAvailable(summary.ManifestPath); err != nil {
+	if err := ensureSplitManifestAvailable(summary.ManifestPath, sourcePath); err != nil {
 		return summary, err
 	}
 	if total == 0 {
-		return summary, writeSplitManifest(summary)
+		return summary, writeSplitManifest(ctx, summary, sourcePath)
 	}
 
 	partCount := int(math.Ceil(float64(total) / float64(bytesPerPart)))
@@ -81,6 +104,9 @@ func SplitBySize(ctx context.Context, doc document.ReaderAtSize, sourcePath stri
 			end = total
 		}
 		outputPath := partPath(outputBasePath, i+1)
+		if err := ensureSplitManifestPartDistinct(summary.ManifestPath, outputPath); err != nil {
+			return failSplit(summary, err)
+		}
 		baseDone := done
 		partSummary, err := ExportByteRange(ctx, doc, sourcePath, outputPath, start, end, Options{
 			ComputeSHA256: opts.ComputeSHA256,
@@ -105,7 +131,7 @@ func SplitBySize(ctx context.Context, doc document.ReaderAtSize, sourcePath stri
 		}
 	}
 
-	if err := writeSplitManifest(summary); err != nil {
+	if err := writeSplitManifest(ctx, summary, sourcePath); err != nil {
 		return failSplit(summary, err)
 	}
 	return summary, nil
@@ -121,6 +147,9 @@ func SplitByLineCount(ctx context.Context, doc *document.FileDocument, sourcePat
 	if linesPerPart <= 0 {
 		return SplitSummary{}, errors.New("lines per part must be positive")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	total := doc.Size()
 	summary := SplitSummary{
@@ -132,11 +161,11 @@ func SplitByLineCount(ctx context.Context, doc *document.FileDocument, sourcePat
 	if opts.ComputeSHA256 {
 		summary.ChecksumAlgorithm = "sha256"
 	}
-	if err := ensureSplitManifestAvailable(summary.ManifestPath); err != nil {
+	if err := ensureSplitManifestAvailable(summary.ManifestPath, sourcePath); err != nil {
 		return summary, err
 	}
 	if total == 0 {
-		return summary, writeSplitManifest(summary)
+		return summary, writeSplitManifest(ctx, summary, sourcePath)
 	}
 
 	// Carry the running byte offset forward instead of re-resolving the part's
@@ -150,7 +179,7 @@ func SplitByLineCount(ctx context.Context, doc *document.FileDocument, sourcePat
 		return failSplit(summary, err)
 	}
 	if !ok {
-		return summary, writeSplitManifest(summary)
+		return summary, writeSplitManifest(ctx, summary, sourcePath)
 	}
 	done := int64(0)
 	for part := 1; ; part++ {
@@ -171,6 +200,9 @@ func SplitByLineCount(ctx context.Context, doc *document.FileDocument, sourcePat
 		}
 
 		outputPath := partPath(outputBasePath, part)
+		if err := ensureSplitManifestPartDistinct(summary.ManifestPath, outputPath); err != nil {
+			return failSplit(summary, err)
+		}
 		baseDone := done
 		partSummary, err := ExportByteRange(ctx, doc, sourcePath, outputPath, startOffset, endOffset, Options{
 			ComputeSHA256: opts.ComputeSHA256,
@@ -201,25 +233,35 @@ func SplitByLineCount(ctx context.Context, doc *document.FileDocument, sourcePat
 		startLine = nextStartLine
 	}
 
-	if err := writeSplitManifest(summary); err != nil {
+	if err := writeSplitManifest(ctx, summary, sourcePath); err != nil {
 		return failSplit(summary, err)
 	}
 	return summary, nil
 }
 
 func splitManifestPathFor(basePath string, override string) string {
-	override = strings.TrimSpace(override)
-	if override != "" {
+	if strings.TrimSpace(override) != "" {
 		return override
 	}
 	return basePath + defaultSplitManifestSuffix
 }
 
-func ensureSplitManifestAvailable(path string) error {
-	return ensureManifestAvailable("split", path)
+func ensureSplitManifestAvailable(path string, protectedPaths ...string) error {
+	return ensureManifestAvailable("split", path, protectedPaths...)
 }
 
-func writeSplitManifest(summary SplitSummary) error {
+func ensureSplitManifestPartDistinct(manifestPath string, partPath string) error {
+	same, err := fileio.SamePath(manifestPath, partPath)
+	if err != nil {
+		return err
+	}
+	if same {
+		return fmt.Errorf("%w: split manifest aliases part output %s", fileio.ErrSourceAlias, partPath)
+	}
+	return nil
+}
+
+func writeSplitManifest(ctx context.Context, summary SplitSummary, protectedPaths ...string) (retErr error) {
 	if strings.TrimSpace(summary.ManifestPath) == "" {
 		return errors.New("split manifest path is required")
 	}
@@ -228,8 +270,18 @@ func writeSplitManifest(summary SplitSummary) error {
 		return err
 	}
 	data = append(data, '\n')
-	_, err = fileio.WriteFileAtomic(summary.ManifestPath, data, fileio.AtomicWriteOptions{Mode: 0o600})
-	return err
+	protectedPaths = append(protectedPaths, summary.Outputs...)
+	manifest, err := fileio.OpenAtomicOutput(summary.ManifestPath, protectedPaths, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, manifest.Cleanup()) }()
+	if n, err := manifest.Write(data); err != nil {
+		return err
+	} else if n != len(data) {
+		return io.ErrShortWrite
+	}
+	return manifest.CommitContext(ctx)
 }
 
 func partPath(basePath string, part int) string {
@@ -245,18 +297,10 @@ func partPath(basePath string, part int) string {
 }
 
 func failSplit(summary SplitSummary, err error) (SplitSummary, error) {
-	if cleanupErr := cleanupSplitOutputs(summary.Outputs); cleanupErr != nil {
-		return summary, errors.Join(err, cleanupErr)
+	preserved := append([]string(nil), summary.Outputs...)
+	return summary, &SplitIncompleteError{
+		Outputs:      preserved,
+		ManifestPath: summary.ManifestPath,
+		Err:          err,
 	}
-	return summary, err
-}
-
-func cleanupSplitOutputs(paths []string) error {
-	var cleanupErr error
-	for _, path := range paths {
-		if err := removeFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove split output %q: %w", path, err))
-		}
-	}
-	return cleanupErr
 }

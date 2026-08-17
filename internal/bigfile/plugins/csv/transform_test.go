@@ -124,6 +124,38 @@ func TestDedupeRaggedRowsNotCollapsed(t *testing.T) {
 	}
 }
 
+func TestDedupeRowsWithEmbeddedNULDoNotCollide(t *testing.T) {
+	tests := []struct {
+		name      string
+		keyColumn int
+	}{
+		{name: "whole row", keyColumn: -1},
+		{name: "missing key column", keyColumn: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// These two rows have the same NUL-joined spelling but different
+			// field boundaries. Both must survive deduplication.
+			input := "a\x00b,c\na,b\x00c\n"
+			src := writeTemp(t, "in.csv", input)
+			dst := filepath.Join(t.TempDir(), "out.csv")
+
+			sum, err := DedupeRowsFile(context.Background(), src, dst, DedupeOptions{
+				Delimiter: ',', KeyColumn: test.keyColumn,
+			})
+			if err != nil {
+				t.Fatalf("DedupeRowsFile() error = %v", err)
+			}
+			if sum.RecordsWritten != 2 {
+				t.Fatalf("records written = %d, want 2", sum.RecordsWritten)
+			}
+			if got := readAll(t, dst); got != input {
+				t.Fatalf("output = %q, want both distinct rows %q", got, input)
+			}
+		})
+	}
+}
+
 func TestSampleRowsFile(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString("n\n")
@@ -150,6 +182,59 @@ func TestTransformRejectsSamePath(t *testing.T) {
 	_, err := FilterRowsFile(context.Background(), src, src, FilterOptions{Op: "nonempty", Column: 0})
 	if err == nil {
 		t.Fatal("expected error for same input/output path")
+	}
+}
+
+func TestStreamingTransformsDoNotClobberPredictableScratchPath(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(src, dst string) error
+	}{
+		{
+			name: "row transform",
+			run: func(src, dst string) error {
+				_, err := FilterRowsFile(context.Background(), src, dst, FilterOptions{
+					Column: 0, Op: "nonempty",
+				})
+				return err
+			},
+		},
+		{
+			name: "JSONL export",
+			run: func(src, dst string) error {
+				_, err := ExportJSONLFile(context.Background(), src, dst, JSONLOptions{})
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "in.csv")
+			dst := filepath.Join(dir, "out")
+			if err := os.WriteFile(src, []byte("value\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			legacyScratch := tempOutputPath(dst)
+			const sentinel = "unowned scratch"
+			if err := os.WriteFile(legacyScratch, []byte(sentinel), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := test.run(src, dst); err != nil {
+				t.Fatal(err)
+			}
+			if got := readAll(t, legacyScratch); got != sentinel {
+				t.Fatalf("predictable scratch changed to %q", got)
+			}
+			pattern := filepath.Join(dir, "."+filepath.Base(dst)+".quarry-part-*")
+			if matches, err := filepath.Glob(pattern); err != nil {
+				t.Fatal(err)
+			} else if len(matches) != 0 {
+				t.Fatalf("owned scratch files remain after publish: %v", matches)
+			}
+		})
 	}
 }
 

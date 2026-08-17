@@ -74,13 +74,11 @@ func run() error {
 		Name:        "Novera",
 		Description: "Local-first AI workbench",
 		ShouldQuit: func() bool {
-			if !shell.hasUnsavedResources() {
-				return true
+			authorized, request := shell.requestNativeClose()
+			if request != nil && mainWindow != nil {
+				mainWindow.EmitEvent("app:close-requested", request)
 			}
-			if mainWindow != nil {
-				mainWindow.EmitEvent("app:close-blocked")
-			}
-			return false
+			return authorized
 		},
 		// Only one Novera may run at a time — a second launch refocuses the first
 		// instead of opening a duplicate window with its own service state.
@@ -148,17 +146,39 @@ func run() error {
 	})
 	mainWindow = win
 
+	// Renderer decisions arrive as window-scoped events, so only the main
+	// renderer can answer its nonce. A current dirty answer stays closed; a
+	// matching clean answer briefly authorizes this immediate Quit replay.
+	app.Event.On("app:close-decision", func(event *application.CustomEvent) {
+		if event == nil || event.Sender != "main" {
+			return
+		}
+		nonce, hasUnsavedResources, ok := parseNativeCloseDecision(event.Data)
+		if !ok {
+			return
+		}
+		switch shell.resolveNativeClose(nonce, hasUnsavedResources) {
+		case nativeCloseAuthorized:
+			app.Quit()
+		case nativeCloseBlocked:
+			win.EmitEvent("app:close-blocked")
+		}
+	})
+
 	// Native title-bar/window-manager close requests do not reliably honour a
-	// WebView beforeunload handler on every platform. Keep the close decision in
-	// the native event path as well: while any renderer resource is dirty, cancel
-	// the close and tell the UI why. After the user saves or explicitly discards
-	// those resources, the next close request proceeds normally.
+	// WebView beforeunload handler on every platform. Always cancel the first
+	// native request and ask the renderer to inspect its live store. This cannot
+	// be bypassed by a delayed SetUnsavedResources call: only the matching clean
+	// nonce response permits the replay initiated above.
 	win.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
-		if !shell.hasUnsavedResources() {
+		authorized, request := shell.requestNativeClose()
+		if authorized {
 			return
 		}
 		event.Cancel()
-		win.EmitEvent("app:close-blocked")
+		if request != nil {
+			win.EmitEvent("app:close-requested", request)
+		}
 	})
 
 	// app.Run blocks until the app quits; returning the error lets main log it

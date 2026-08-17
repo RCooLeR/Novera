@@ -138,7 +138,7 @@ func TestWriteFileAtomicRefusesExistingOverwriteBackup(t *testing.T) {
 	}
 }
 
-func TestWriteFileAtomicRecoversOrphanedOverwriteBackup(t *testing.T) {
+func TestWriteFileAtomicPreservesOrphanedOverwriteBackupForInspection(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.txt")
 	backupPath := path + ".quarry.overwrite.bak"
@@ -151,18 +151,14 @@ func TestWriteFileAtomicRecoversOrphanedOverwriteBackup(t *testing.T) {
 	}
 
 	_, err := WriteFileAtomic(path, []byte("new"), AtomicWriteOptions{Overwrite: true})
-	if !errors.Is(err, ErrBackupRecovered) {
-		t.Fatalf("err = %v, want ErrBackupRecovered", err)
+	if !errors.Is(err, ErrBackupExists) {
+		t.Fatalf("err = %v, want ErrBackupExists", err)
 	}
-	got, readErr := os.ReadFile(path)
-	if readErr != nil {
-		t.Fatal(readErr)
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("destination stat error = %v, want absent", statErr)
 	}
-	if string(got) != "original" {
-		t.Fatalf("restored output = %q, want original", got)
-	}
-	if _, err := os.Stat(backupPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("backup stat err = %v, want removed by restore", err)
+	if got, readErr := os.ReadFile(backupPath); readErr != nil || string(got) != "original" {
+		t.Fatalf("backup changed: %q, %v", got, readErr)
 	}
 	if got, err := os.ReadFile(tempPath); err != nil || string(got) != "partial-new" {
 		t.Fatalf("temp should remain for inspection: %q, %v", got, err)

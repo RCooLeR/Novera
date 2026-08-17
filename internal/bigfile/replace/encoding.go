@@ -16,6 +16,9 @@ const encodingDetectSampleSize = 1024 * 1024
 // ConvertEncodingFile rewrites a text file into the requested target encoding
 // while preserving Novera's safe temp-output and optional swap workflow.
 func ConvertEncodingFile(ctx context.Context, sourcePath string, outputPath string, target string, opts FileOptions) (FileSummary, error) {
+	if opts.SwapOriginal {
+		return FileSummary{}, ErrSwapOriginalDisabled
+	}
 	same, err := samePath(sourcePath, outputPath)
 	if err != nil {
 		return FileSummary{}, err

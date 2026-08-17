@@ -3,7 +3,6 @@ package csv
 import (
 	"bytes"
 	"context"
-	stdcsv "encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -35,7 +34,10 @@ type ProfileReport struct {
 	Warnings        []string        `json:"warnings"`
 }
 
-const profileDistinctCap = 50000
+const (
+	profileDistinctCap          = 50_000
+	profileAggregateDistinctCap = 100_000
+)
 
 type colAcc struct {
 	counts  map[string]int
@@ -49,7 +51,7 @@ type colAcc struct {
 }
 
 // ProfileColumns scans a bounded sample and returns per-column stats: null %,
-// distinct estimate, lexicographic min/max, and top values — plus a ragged-row
+// distinct estimate, lexicographic min/max, and top values вЂ” plus a ragged-row
 // count for the dump linter.
 func ProfileColumns(ctx context.Context, r io.Reader, opts SchemaOptions) (ProfileReport, error) {
 	if r == nil {
@@ -59,31 +61,37 @@ func ProfileColumns(ctx context.Context, r io.Reader, opts SchemaOptions) (Profi
 	if err != nil {
 		return ProfileReport{}, err
 	}
-	data, err := readBoundedSample(ctx, r, opts.MaxBytes)
+	sample, err := readBoundedSampleResult(ctx, r, opts.MaxBytes)
 	if err != nil {
 		return ProfileReport{}, err
 	}
-	truncated := int64(len(data)) > opts.MaxBytes
-	if truncated {
-		data = data[:opts.MaxBytes]
+	data := sample.Data
+	partialOmitted := false
+	if sample.Truncated {
+		data, partialOmitted, err = CompleteRecordPrefix(ctx, data, opts.Delimiter, opts.MaxRecordBytes, true)
+		if err != nil {
+			return ProfileReport{}, err
+		}
 	}
-	report := ProfileReport{TruncatedSample: truncated}
+	report := ProfileReport{TruncatedSample: sample.Truncated}
 	if len(bytes.TrimSpace(data)) == 0 {
 		report.Warnings = append(report.Warnings, "sample is empty")
 		return report, nil
 	}
 
-	reader := stdcsv.NewReader(bytes.NewReader(data))
-	reader.Comma = opts.Delimiter
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-	reader.TrimLeadingSpace = true
-	reader.ReuseRecord = false
+	reader, err := newBoundedCSVReader(ctx, bytes.NewReader(data), csvReaderConfig{
+		Delimiter: opts.Delimiter, MaxRecordBytes: opts.MaxRecordBytes,
+		FieldsPerRecord: -1, LazyQuotes: false,
+	})
+	if err != nil {
+		return report, err
+	}
 
 	nulls := makeSQLNullSet(opts.NullValues)
 	var names []string
 	var accs []*colAcc
 	expected := 0
+	distinctEntries := 0
 
 	ensure := func(n int) {
 		for len(accs) < n {
@@ -145,12 +153,16 @@ func ProfileColumns(ctx context.Context, r io.Reader, opts SchemaOptions) (Profi
 					a.max = value
 				}
 			}
-			if a.capped {
-				if _, ok := a.counts[value]; ok {
-					a.counts[value]++
-				}
-			} else {
+			if _, exists := a.counts[value]; exists {
 				a.counts[value]++
+			} else if a.capped || distinctEntries >= profileAggregateDistinctCap {
+				// The aggregate ceiling prevents the per-column cap from
+				// multiplying by MaxCSVFieldsPerRecord. Mark only columns for
+				// which a value was actually omitted as approximate.
+				a.capped = true
+			} else {
+				a.counts[value] = 1
+				distinctEntries++
 				if len(a.counts) >= profileDistinctCap {
 					a.capped = true
 				}
@@ -189,8 +201,11 @@ func ProfileColumns(ctx context.Context, r io.Reader, opts SchemaOptions) (Profi
 			Top:            top,
 		}
 	}
-	if truncated {
+	if sample.Truncated {
 		report.Warnings = append(report.Warnings, fmt.Sprintf("profile from first %d bytes", opts.MaxBytes))
+	}
+	if partialOmitted {
+		report.Warnings = append(report.Warnings, "trailing partial logical record omitted from profile")
 	}
 	return report, nil
 }

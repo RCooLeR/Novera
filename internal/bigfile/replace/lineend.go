@@ -15,6 +15,9 @@ const lineEndingDetectSampleSize = 1024 * 1024
 // ConvertLineEndingsFile rewrites a text file with the requested line-ending style
 // while preserving the detected encoding and the original-only safety model.
 func ConvertLineEndingsFile(ctx context.Context, sourcePath string, outputPath string, target string, opts FileOptions) (FileSummary, error) {
+	if opts.SwapOriginal {
+		return FileSummary{}, ErrSwapOriginalDisabled
+	}
 	same, err := samePath(sourcePath, outputPath)
 	if err != nil {
 		return FileSummary{}, err

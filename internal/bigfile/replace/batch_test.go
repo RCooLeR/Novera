@@ -560,7 +560,7 @@ func TestReplaceBatchPlainFileCancelKeepsPartialWhenConfigured(t *testing.T) {
 func TestPreviewBatchRegexp(t *testing.T) {
 	r := memReaderAt{data: []byte("alpha hello-42 world and abcde")}
 	rules := []BatchRule{
-		{Name: "Greeting", Find: []byte(`hello-(\d+)`), Replace: []byte(`bye-$1`), Priority: 0},
+		{Name: "Greeting", Find: []byte(`hello-(\d{2})`), Replace: []byte(`bye-$1`), Priority: 0},
 		{Name: "Prefix", Find: []byte(`abc`), Replace: []byte("X"), Priority: 0},
 		{Name: "Longer", Find: []byte(`abcde`), Replace: []byte("Y"), Priority: 1},
 	}
@@ -705,7 +705,7 @@ func TestReplaceBatchRegexpCaptureGroupsAcrossBoundary(t *testing.T) {
 	}
 
 	rules := []BatchRule{
-		{Name: "Rule 1", Find: []byte(`id=(\d+)`), Replace: []byte(`row-$1`), Priority: 0},
+		{Name: "Rule 1", Find: []byte(`id=(\d{2})`), Replace: []byte(`row-$1`), Priority: 0},
 	}
 	matches, conflicts, err := ReplaceBatchRegexp(context.Background(), src, dst, rules, RegexOptions{
 		ChunkSize:      5,
@@ -739,7 +739,7 @@ func TestReplaceBatchRegexpFileWritesOutputAndManifest(t *testing.T) {
 	}
 
 	rules := []BatchRule{
-		{Name: "Rule 1", Find: []byte(`id=(\d+)`), Replace: []byte(`row-$1`), Priority: 0},
+		{Name: "Rule 1", Find: []byte(`id=(\d{2})`), Replace: []byte(`row-$1`), Priority: 0},
 	}
 	summary, err := ReplaceBatchRegexpFile(context.Background(), srcPath, outPath, rules, FileOptions{
 		ChunkSize: 5,
@@ -780,7 +780,7 @@ func TestReplaceBatchRegexpFileCancelDeletesPartialWhenRequested(t *testing.T) {
 	}
 
 	rules := []BatchRule{
-		{Name: "Rule 1", Find: []byte(`id=(\d+)`), Replace: []byte(`row-$1`), Priority: 0},
+		{Name: "Rule 1", Find: []byte(`id=(\d{2})`), Replace: []byte(`row-$1`), Priority: 0},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var canceled bool
@@ -822,7 +822,7 @@ func TestReplaceBatchRegexpFileCancelKeepsPartialWhenConfigured(t *testing.T) {
 	}
 
 	rules := []BatchRule{
-		{Name: "Rule 1", Find: []byte(`id=(\d+)`), Replace: []byte(`row-$1`), Priority: 0},
+		{Name: "Rule 1", Find: []byte(`id=(\d{2})`), Replace: []byte(`row-$1`), Priority: 0},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var canceled bool

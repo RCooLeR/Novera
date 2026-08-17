@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Clipboard, Download, History, Loader2, Play } from "lucide-react";
 import { Db, Shell, errMessage } from "../lib/services";
 import type { DbQueryResult } from "../lib/services";
 import { toCsv, sortIndices, nextSort, type Sort } from "../lib/grid";
 import { useStore } from "../state/store";
 import VirtualGrid from "./VirtualGrid";
+import { DbQueryRequestOwner } from "./dbQueryRequest";
 
 function truncationLabel(reason: string): string {
   if (reason === "row_limit") return "row limit reached";
@@ -24,6 +25,9 @@ export default function DbQueryView({ connId }: { connId: string }) {
   const [limit, setLimit] = useState(1000);
   const [sort, setSort] = useState<Sort>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const queryRequests = useRef(new DbQueryRequestOwner());
+
+  useEffect(() => () => queryRequests.current.invalidate(), []);
 
   // Reorder rows and the NULL mask through one permutation so they stay aligned.
   const order = useMemo(() => (result ? sortIndices(result.rows, sort) : []), [result, sort]);
@@ -31,19 +35,25 @@ export default function DbQueryView({ connId }: { connId: string }) {
   const nulls = useMemo(() => (result ? order.map((i) => result.nulls?.[i] ?? []) : []), [order, result]);
 
   const run = async () => {
-    if (!sql.trim() || running) return;
+    const requestedSql = sql;
+    if (!requestedSql.trim()) return;
+    const request = queryRequests.current.tryBegin();
+    if (request === null) return;
+    const requestedLimit = limit;
     setRunning(true);
     setError("");
     setSort(null);
     try {
-      const r = await Db.Query(connId, sql, limit);
+      const r = await Db.Query(connId, requestedSql, requestedLimit);
+      if (!queryRequests.current.isCurrent(request)) return;
       setResult(r);
-      pushDbHistory(connId, sql);
+      pushDbHistory(connId, requestedSql);
     } catch (e) {
+      if (!queryRequests.current.isCurrent(request)) return;
       setError(errMessage(e));
       setResult(null);
     } finally {
-      setRunning(false);
+      if (queryRequests.current.finish(request)) setRunning(false);
     }
   };
 

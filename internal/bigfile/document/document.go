@@ -42,12 +42,14 @@ type VisibleLineOptions struct {
 
 // Metadata describes detected file properties.
 type Metadata struct {
-	Path               string
-	Size               int64
-	Encoding           string
-	EncodingConfidence float64
-	LineEnding         string
-	FileType           string
-	Binary             bool
-	BinaryConfidence   float64
+	Path                         string
+	Size                         int64
+	Encoding                     string
+	EncodingConfidence           float64
+	EncodingRequiresConfirmation bool
+	HasBOM                       bool
+	LineEnding                   string
+	FileType                     string
+	Binary                       bool
+	BinaryConfidence             float64
 }

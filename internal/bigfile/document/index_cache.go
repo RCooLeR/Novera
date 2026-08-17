@@ -1,10 +1,12 @@
 package document
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,8 +19,8 @@ import (
 )
 
 const indexCacheVersion = 1
-const indexCacheTailSampleSize = 64 * 1024
-const maxIndexCacheFileSize = 128 * 1024 * 1024
+const maxIndexCacheFileSize = 32 * 1024 * 1024
+const indexCacheFingerprintChunkSize = 1024 * 1024
 
 type indexCacheFile struct {
 	Version         int                `json:"version"`
@@ -56,30 +58,60 @@ func legacyCentralIndexCachePath(path string) (string, bool) {
 }
 
 func computeIndexSampleHash(f *os.File, size int64, head []byte) string {
-	hash := sha256.New()
-	_, _ = hash.Write(head)
-	if size > int64(len(head)) {
-		start := size - indexCacheTailSampleSize
-		if start < int64(len(head)) {
-			start = int64(len(head))
-		}
-		if start < size {
-			tail := make([]byte, size-start)
-			n, err := f.ReadAt(tail, start)
-			if err == nil || errors.Is(err, io.EOF) {
-				_, _ = hash.Write(tail[:n])
-			}
-		}
-	}
-	return hex.EncodeToString(hash.Sum(nil))
+	_ = head
+	digest, _ := computeIndexSourceHashContext(context.Background(), f, size)
+	return digest
 }
 
-// loadIndexCache treats stable size, mtime, and bounded head/tail hashes as a
-// cache-validity signal, not a tamper-proof integrity proof. Deliberate
-// middle-of-file edits that preserve those signals can evade the cache check.
-func loadIndexCache(path string, size int64, modTime time.Time, sampleHash string) (*lineindex.Index, bool) {
+// computeIndexSourceHashContext fingerprints the complete retained source.
+// Size/mtime plus head/tail samples are not sufficient for exact sparse
+// anchors: a middle-only rewrite with restored metadata must invalidate them.
+func computeIndexSourceHashContext(ctx context.Context, f *os.File, size int64) (string, error) {
+	if f == nil {
+		return "", errors.New("index-cache source is required")
+	}
+	if size < 0 {
+		return "", errors.New("index-cache source size is negative")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	hash := sha256.New()
+	buffer := make([]byte, indexCacheFingerprintChunkSize)
+	for offset := int64(0); offset < size; {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		want := int64(len(buffer))
+		if remaining := size - offset; want > remaining {
+			want = remaining
+		}
+		n, readErr := f.ReadAt(buffer[:int(want)], offset)
+		if n > 0 {
+			_, _ = hash.Write(buffer[:n])
+			offset += int64(n)
+		}
+		if n != int(want) {
+			if readErr == nil {
+				readErr = io.ErrUnexpectedEOF
+			}
+			return "", fmt.Errorf("index-cache fingerprint read %d of %d bytes: %w", n, want, readErr)
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return "", readErr
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// loadIndexCacheSnapshot requires a full source digest in addition to stable
+// metadata and returns an owned, validated snapshot for in-place restoration.
+func loadIndexCacheSnapshot(path string, size int64, modTime time.Time, sampleHash string, expectedStride int64) (lineindex.Snapshot, bool) {
 	if !persistentIndexCacheEnabled() {
-		return nil, false
+		return lineindex.Snapshot{}, false
 	}
 	canonical := indexCachePath(path)
 	for _, candidate := range indexCacheReadPaths(path) {
@@ -96,15 +128,19 @@ func loadIndexCache(path string, size int64, modTime time.Time, sampleHash strin
 			cache.Size != size ||
 			cache.ModTimeUnixNano != modTime.UnixNano() ||
 			cache.SampleHash != sampleHash ||
+			cache.Index.EveryLines != expectedStride ||
 			!cache.Index.Done {
+			continue
+		}
+		if err := lineindex.ValidateSnapshot(cache.Index, size); err != nil {
 			continue
 		}
 		if candidate != canonical {
 			migrateValidatedIndexCache(canonical, data)
 		}
-		return lineindex.FromSnapshot(cache.Index), true
+		return cache.Index, true
 	}
-	return nil, false
+	return lineindex.Snapshot{}, false
 }
 
 func indexCacheReadPaths(path string) []string {
@@ -115,6 +151,19 @@ func indexCacheReadPaths(path string) []string {
 	}
 	candidates = appendUniquePath(candidates, legacyIndexCachePath(path))
 	return candidates
+}
+
+func indexCacheCandidateExists(path string) bool {
+	if !persistentIndexCacheEnabled() {
+		return false
+	}
+	for _, candidate := range indexCacheReadPaths(path) {
+		info, err := os.Lstat(candidate)
+		if err == nil && info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
 }
 
 func appendUniquePath(paths []string, candidate string) []string {

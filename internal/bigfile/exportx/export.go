@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"os"
 
 	"novera/internal/bigfile/document"
 	"novera/internal/bigfile/fileio"
@@ -17,6 +16,9 @@ type Options struct {
 	ComputeSHA256 bool
 	WriteManifest bool
 	ManifestPath  string
+	// ValidateSource runs after the complete output has been synced and
+	// immediately before its no-clobber publication.
+	ValidateSource func(context.Context) error
 }
 
 type Summary struct {
@@ -55,12 +57,15 @@ func ExportLineRange(ctx context.Context, doc *document.FileDocument, sourcePath
 	return exportByteRangeCore(ctx, doc, sourcePath, outputPath, startOffset, endOffset, "line-range", startLine, endLine, true, opts)
 }
 
-func exportByteRangeCore(ctx context.Context, doc document.ReaderAtSize, sourcePath string, outputPath string, start int64, end int64, mode string, startLine int64, endLine int64, usedLineRange bool, opts Options) (Summary, error) {
+func exportByteRangeCore(ctx context.Context, doc document.ReaderAtSize, sourcePath string, outputPath string, start int64, end int64, mode string, startLine int64, endLine int64, usedLineRange bool, opts Options) (_ Summary, retErr error) {
 	if doc == nil {
 		return Summary{}, errors.New("document is required")
 	}
-	if outputPath == "" {
-		return Summary{}, errors.New("output path is required")
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := fileio.ValidateExactOutputPath(outputPath); err != nil {
+		return Summary{}, err
 	}
 	if start < 0 {
 		start = 0
@@ -71,16 +76,6 @@ func exportByteRangeCore(ctx context.Context, doc document.ReaderAtSize, sourceP
 	}
 	if end < start {
 		return Summary{}, errors.New("end offset must be greater than or equal to start offset")
-	}
-	if same, err := samePath(sourcePath, outputPath); err != nil {
-		return Summary{}, err
-	} else if same {
-		return Summary{}, errors.New("output path must be different from source path")
-	}
-	if _, err := os.Stat(outputPath); err == nil {
-		return Summary{}, errors.New("output file already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return Summary{}, err
 	}
 	summary := Summary{
 		SourcePath:    sourcePath,
@@ -97,21 +92,19 @@ func exportByteRangeCore(ctx context.Context, doc document.ReaderAtSize, sourceP
 	}
 	if shouldWriteExportManifest(opts) {
 		summary.ManifestPath = exportManifestPathFor(outputPath, opts.ManifestPath)
-		if err := ensureExportManifestAvailable(summary.ManifestPath); err != nil {
+		if err := ensureExportManifestAvailable(summary.ManifestPath, sourcePath, outputPath); err != nil {
 			return summary, err
 		}
 	}
 
-	dst, err := openCreatedOutput(outputPath)
+	if err := ctx.Err(); err != nil {
+		return summary, err
+	}
+	dst, err := openCreatedOutput(outputPath, sourcePath)
 	if err != nil {
 		return summary, err
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = dst.Cleanup()
-		}
-	}()
+	defer func() { retErr = errors.Join(retErr, dst.Cleanup()) }()
 
 	total := end - start
 	reader := io.NewSectionReader(doc, start, total)
@@ -122,11 +115,9 @@ func exportByteRangeCore(ctx context.Context, doc document.ReaderAtSize, sourceP
 		checksum = sha256.New()
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return summary, ctx.Err()
-		default:
+	for written < total {
+		if err := ctx.Err(); err != nil {
+			return summary, err
 		}
 
 		n, readErr := reader.Read(buf)
@@ -146,28 +137,39 @@ func exportByteRangeCore(ctx context.Context, doc document.ReaderAtSize, sourceP
 				return summary, io.ErrShortWrite
 			}
 		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
-		if readErr != nil {
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return summary, readErr
 		}
+		if written == total {
+			break
+		}
+		if errors.Is(readErr, io.EOF) {
+			return summary, io.ErrUnexpectedEOF
+		}
+		if n == 0 {
+			return summary, io.ErrNoProgress
+		}
 	}
-	if err := dst.Sync(); err != nil {
-		return summary, err
+	if written != total {
+		return summary, io.ErrUnexpectedEOF
 	}
-	if err := dst.Close(); err != nil {
-		return summary, err
-	}
-	cleanup = false
 
 	summary.BytesWritten = written
 	if checksum != nil {
 		summary.SHA256 = hex.EncodeToString(checksum.Sum(nil))
 	}
+	var commitErr error
+	if opts.ValidateSource != nil {
+		commitErr = dst.CommitContextValidated(ctx, opts.ValidateSource)
+	} else {
+		commitErr = dst.CommitContext(ctx)
+	}
+	if commitErr != nil {
+		return summary, commitErr
+	}
 	if shouldWriteExportManifest(opts) {
-		if err := writeExportManifest(summary); err != nil {
-			return summary, cleanupOutputAfterManifestFailure(outputPath, err)
+		if err := writeExportManifest(ctx, summary); err != nil {
+			return summary, exportManifestPublicationError(summary, err)
 		}
 	}
 	return summary, nil

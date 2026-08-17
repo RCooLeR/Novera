@@ -25,20 +25,24 @@ func replaceIsWordRuneBefore(data []byte) bool {
 	if len(data) == 0 {
 		return false
 	}
-	r, _ := utf8.DecodeLastRune(data)
-	if r == utf8.RuneError {
-		return false
+	r, width := utf8.DecodeLastRune(data)
+	if r == utf8.RuneError && width == 1 {
+		return true
 	}
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+	return replaceIsWordRune(r)
 }
 
 func replaceIsWordRuneAt(data []byte) bool {
 	if len(data) == 0 {
 		return false
 	}
-	r, _ := utf8.DecodeRune(data)
-	if r == utf8.RuneError {
-		return false
+	r, width := utf8.DecodeRune(data)
+	if r == utf8.RuneError && width == 1 {
+		return true
 	}
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+	return replaceIsWordRune(r)
+}
+
+func replaceIsWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) || r == '_'
 }

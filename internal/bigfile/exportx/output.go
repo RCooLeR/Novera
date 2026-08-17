@@ -1,15 +1,9 @@
 package exportx
 
-import (
-	"os"
+import "novera/internal/bigfile/fileio"
 
-	"novera/internal/bigfile/fileio"
-)
+type createdOutput = fileio.AtomicOutput
 
-var removeFile = os.Remove
-
-type createdOutput = fileio.ExclusiveOutput
-
-func openCreatedOutput(path string) (*createdOutput, error) {
-	return fileio.OpenExclusiveOutput(path, 0o600)
+func openCreatedOutput(path string, sourcePaths ...string) (*createdOutput, error) {
+	return fileio.OpenAtomicOutput(path, sourcePaths, 0o600)
 }

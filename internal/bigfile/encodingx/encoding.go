@@ -14,15 +14,28 @@ import (
 	"golang.org/x/text/transform"
 )
 
+var ErrEncodingConfirmationRequired = errors.New("source encoding is ambiguous; choose the source encoding explicitly before transforming")
+
 // Info describes a detected encoding.
 type Info struct {
-	Name       string
-	HasBOM     bool
-	Confidence float64
+	Name                 string
+	HasBOM               bool
+	Confidence           float64
+	RequiresConfirmation bool
 }
 
 // DetectSample performs bounded encoding detection for common text encodings.
 func DetectSample(sample []byte) Info {
+	return detectSample(sample, false)
+}
+
+// DetectPrefixSample accepts a valid UTF-8 prefix whose final bytes may be an
+// incomplete rune. Callers must use it only when more source bytes exist.
+func DetectPrefixSample(sample []byte) Info {
+	return detectSample(sample, true)
+}
+
+func detectSample(sample []byte, allowIncompleteUTF8Tail bool) Info {
 	if len(sample) == 0 {
 		return Info{Name: "UTF-8", Confidence: 0.5}
 	}
@@ -35,19 +48,105 @@ func DetectSample(sample []byte) Info {
 	if len(sample) >= 2 && sample[0] == 0xFE && sample[1] == 0xFF {
 		return Info{Name: "UTF-16BE", HasBOM: true, Confidence: 1.0}
 	}
-	if looksLikeUTF16LE(sample) {
-		return Info{Name: "UTF-16LE", Confidence: 0.82}
+	if ordinaryUTF8Sample(sample, allowIncompleteUTF8Tail) {
+		return Info{Name: "UTF-8", Confidence: 0.95}
 	}
-	if looksLikeUTF16BE(sample) {
-		return Info{Name: "UTF-16BE", Confidence: 0.82}
+	if utf16Info, detected := detectBOMlessUTF16(sample, allowIncompleteUTF8Tail); detected {
+		return utf16Info
 	}
-	if utf8.Valid(sample) {
+	if utf8.Valid(sample) || (allowIncompleteUTF8Tail && ValidUTF8Prefix(sample)) {
 		return Info{Name: "UTF-8", Confidence: 0.95}
 	}
 	if likelyWindows1251(sample) {
 		return Info{Name: "Windows-1251", Confidence: 0.74}
 	}
 	return Info{Name: "Windows-1252", Confidence: 0.58}
+}
+
+func ordinaryUTF8Sample(sample []byte, allowIncompleteTail bool) bool {
+	if !utf8.Valid(sample) && !(allowIncompleteTail && ValidUTF8Prefix(sample)) {
+		return false
+	}
+	for _, value := range sample {
+		if value == 0 || value < 0x09 || (value > 0x0D && value < 0x20) {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidUTF8Prefix reports whether sample is valid UTF-8 or differs only by a
+// truncated final rune prefix. Invalid leaders, continuations, overlong forms,
+// surrogate encodings, and out-of-range code points remain rejected.
+func ValidUTF8Prefix(sample []byte) bool {
+	if utf8.Valid(sample) {
+		return true
+	}
+	firstCandidate := len(sample) - 3
+	if firstCandidate < 0 {
+		firstCandidate = 0
+	}
+	for start := len(sample) - 1; start >= firstCandidate; start-- {
+		width := utf8SequenceWidth(sample[start])
+		if width == 0 {
+			continue
+		}
+		tail := sample[start:]
+		if len(tail) >= width || !utf8.Valid(sample[:start]) {
+			continue
+		}
+		if validIncompleteUTF8Sequence(tail, width) {
+			return true
+		}
+	}
+	return false
+}
+
+func utf8SequenceWidth(lead byte) int {
+	switch {
+	case lead >= 0xC2 && lead <= 0xDF:
+		return 2
+	case lead >= 0xE0 && lead <= 0xEF:
+		return 3
+	case lead >= 0xF0 && lead <= 0xF4:
+		return 4
+	default:
+		return 0
+	}
+}
+
+func validIncompleteUTF8Sequence(tail []byte, width int) bool {
+	if len(tail) == 0 || utf8SequenceWidth(tail[0]) != width || len(tail) >= width {
+		return false
+	}
+	for i := 1; i < len(tail); i++ {
+		continuation := tail[i]
+		if continuation < 0x80 || continuation > 0xBF {
+			return false
+		}
+		if i != 1 {
+			continue
+		}
+		switch tail[0] {
+		case 0xE0:
+			if continuation < 0xA0 {
+				return false
+			}
+		case 0xED:
+			if continuation > 0x9F {
+				return false
+			}
+		case 0xF0:
+			if continuation < 0x90 {
+				return false
+			}
+		case 0xF4:
+			if continuation > 0x8F {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // DecodeBytes decodes bytes using a supported encoding name.
@@ -167,36 +266,6 @@ func stripLeadingBOM(name string, data []byte) []byte {
 		}
 	}
 	return data
-}
-
-func looksLikeUTF16LE(sample []byte) bool {
-	if len(sample) < 4 {
-		return false
-	}
-	zeros := 0
-	checked := 0
-	for i := 1; i < len(sample); i += 2 {
-		checked++
-		if sample[i] == 0 {
-			zeros++
-		}
-	}
-	return checked >= 4 && float64(zeros)/float64(checked) > 0.6
-}
-
-func looksLikeUTF16BE(sample []byte) bool {
-	if len(sample) < 4 {
-		return false
-	}
-	zeros := 0
-	checked := 0
-	for i := 0; i < len(sample); i += 2 {
-		checked++
-		if sample[i] == 0 {
-			zeros++
-		}
-	}
-	return checked >= 4 && float64(zeros)/float64(checked) > 0.6
 }
 
 func likelyWindows1251(sample []byte) bool {

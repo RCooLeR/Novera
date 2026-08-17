@@ -87,20 +87,34 @@ export class CsvDelimiterOption {
 }
 
 export class CsvGridResult {
+    "fileId": string;
+    "generation": number;
+    "encoding": string;
     "startByte": number;
     "nextByte": number;
 
     /**
-     * approx global row of the first row
+     * approximate physical line of the first record
      */
     "startRow": number;
     "rows": string[][];
     "columns": number;
+    "sourceBytes": number;
+    "decodedBytes": number;
     "atBof": boolean;
     "atEof": boolean;
 
     /** Creates a new CsvGridResult instance. */
     constructor($$source: Partial<CsvGridResult> = {}) {
+        if (!("fileId" in $$source)) {
+            this["fileId"] = "";
+        }
+        if (!("generation" in $$source)) {
+            this["generation"] = 0;
+        }
+        if (!("encoding" in $$source)) {
+            this["encoding"] = "";
+        }
         if (!("startByte" in $$source)) {
             this["startByte"] = 0;
         }
@@ -116,6 +130,12 @@ export class CsvGridResult {
         if (!("columns" in $$source)) {
             this["columns"] = 0;
         }
+        if (!("sourceBytes" in $$source)) {
+            this["sourceBytes"] = 0;
+        }
+        if (!("decodedBytes" in $$source)) {
+            this["decodedBytes"] = 0;
+        }
         if (!("atBof" in $$source)) {
             this["atBof"] = false;
         }
@@ -130,16 +150,17 @@ export class CsvGridResult {
      * Creates a new CsvGridResult instance from a string or object.
      */
     static createFrom($$source: any = {}): CsvGridResult {
-        const $$createField3_0 = $$createType1;
+        const $$createField6_0 = $$createType1;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("rows" in $$parsedSource) {
-            $$parsedSource["rows"] = $$createField3_0($$parsedSource["rows"]);
+            $$parsedSource["rows"] = $$createField6_0($$parsedSource["rows"]);
         }
         return new CsvGridResult($$parsedSource as Partial<CsvGridResult>);
     }
 }
 
 export class CsvInspectResult {
+    "generation": number;
     "delimiter": string;
     "delimiterName": string;
     "confidence": string;
@@ -150,6 +171,9 @@ export class CsvInspectResult {
 
     /** Creates a new CsvInspectResult instance. */
     constructor($$source: Partial<CsvInspectResult> = {}) {
+        if (!("generation" in $$source)) {
+            this["generation"] = 0;
+        }
         if (!("delimiter" in $$source)) {
             this["delimiter"] = "";
         }
@@ -179,26 +203,30 @@ export class CsvInspectResult {
      * Creates a new CsvInspectResult instance from a string or object.
      */
     static createFrom($$source: any = {}): CsvInspectResult {
-        const $$createField5_0 = $$createType3;
-        const $$createField6_0 = $$createType0;
+        const $$createField6_0 = $$createType3;
+        const $$createField7_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("candidates" in $$parsedSource) {
-            $$parsedSource["candidates"] = $$createField5_0($$parsedSource["candidates"]);
+            $$parsedSource["candidates"] = $$createField6_0($$parsedSource["candidates"]);
         }
         if ("warnings" in $$parsedSource) {
-            $$parsedSource["warnings"] = $$createField6_0($$parsedSource["warnings"]);
+            $$parsedSource["warnings"] = $$createField7_0($$parsedSource["warnings"]);
         }
         return new CsvInspectResult($$parsedSource as Partial<CsvInspectResult>);
     }
 }
 
 export class CsvPreviewResult {
+    "generation": number;
     "header": string[];
     "rows": string[][];
     "warnings": string[];
 
     /** Creates a new CsvPreviewResult instance. */
     constructor($$source: Partial<CsvPreviewResult> = {}) {
+        if (!("generation" in $$source)) {
+            this["generation"] = 0;
+        }
         if (!("header" in $$source)) {
             this["header"] = [];
         }
@@ -216,18 +244,18 @@ export class CsvPreviewResult {
      * Creates a new CsvPreviewResult instance from a string or object.
      */
     static createFrom($$source: any = {}): CsvPreviewResult {
-        const $$createField0_0 = $$createType0;
-        const $$createField1_0 = $$createType1;
-        const $$createField2_0 = $$createType0;
+        const $$createField1_0 = $$createType0;
+        const $$createField2_0 = $$createType1;
+        const $$createField3_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("header" in $$parsedSource) {
-            $$parsedSource["header"] = $$createField0_0($$parsedSource["header"]);
+            $$parsedSource["header"] = $$createField1_0($$parsedSource["header"]);
         }
         if ("rows" in $$parsedSource) {
-            $$parsedSource["rows"] = $$createField1_0($$parsedSource["rows"]);
+            $$parsedSource["rows"] = $$createField2_0($$parsedSource["rows"]);
         }
         if ("warnings" in $$parsedSource) {
-            $$parsedSource["warnings"] = $$createField2_0($$parsedSource["warnings"]);
+            $$parsedSource["warnings"] = $$createField3_0($$parsedSource["warnings"]);
         }
         return new CsvPreviewResult($$parsedSource as Partial<CsvPreviewResult>);
     }
@@ -237,6 +265,7 @@ export class CsvPreviewResult {
  * CsvProfileResult is a per-column data profile over a bounded sample.
  */
 export class CsvProfileResult {
+    "generation": number;
     "columns": csv$0.ColumnProfile[];
     "recordsScanned": number;
     "raggedRows": number;
@@ -244,6 +273,9 @@ export class CsvProfileResult {
 
     /** Creates a new CsvProfileResult instance. */
     constructor($$source: Partial<CsvProfileResult> = {}) {
+        if (!("generation" in $$source)) {
+            this["generation"] = 0;
+        }
         if (!("columns" in $$source)) {
             this["columns"] = [];
         }
@@ -264,10 +296,10 @@ export class CsvProfileResult {
      * Creates a new CsvProfileResult instance from a string or object.
      */
     static createFrom($$source: any = {}): CsvProfileResult {
-        const $$createField0_0 = $$createType5;
+        const $$createField1_0 = $$createType5;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("columns" in $$parsedSource) {
-            $$parsedSource["columns"] = $$createField0_0($$parsedSource["columns"]);
+            $$parsedSource["columns"] = $$createField1_0($$parsedSource["columns"]);
         }
         return new CsvProfileResult($$parsedSource as Partial<CsvProfileResult>);
     }
@@ -306,12 +338,16 @@ export class CsvRedactColumn {
 }
 
 export class CsvSchemaResult {
+    "generation": number;
     "columns": CsvColumn[];
     "hasHeader": boolean;
     "warnings": string[];
 
     /** Creates a new CsvSchemaResult instance. */
     constructor($$source: Partial<CsvSchemaResult> = {}) {
+        if (!("generation" in $$source)) {
+            this["generation"] = 0;
+        }
         if (!("columns" in $$source)) {
             this["columns"] = [];
         }
@@ -329,14 +365,14 @@ export class CsvSchemaResult {
      * Creates a new CsvSchemaResult instance from a string or object.
      */
     static createFrom($$source: any = {}): CsvSchemaResult {
-        const $$createField0_0 = $$createType7;
-        const $$createField2_0 = $$createType0;
+        const $$createField1_0 = $$createType7;
+        const $$createField3_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("columns" in $$parsedSource) {
-            $$parsedSource["columns"] = $$createField0_0($$parsedSource["columns"]);
+            $$parsedSource["columns"] = $$createField1_0($$parsedSource["columns"]);
         }
         if ("warnings" in $$parsedSource) {
-            $$parsedSource["warnings"] = $$createField2_0($$parsedSource["warnings"]);
+            $$parsedSource["warnings"] = $$createField3_0($$parsedSource["warnings"]);
         }
         return new CsvSchemaResult($$parsedSource as Partial<CsvSchemaResult>);
     }
@@ -357,7 +393,7 @@ export class CsvSqlColumnConfig {
     "name": string;
 
     /**
-     * SQL type (used only when includeCreate)
+     * SQL type; BOOLEAN also controls value validation/emission
      */
     "type": string;
 
@@ -466,13 +502,46 @@ export class CsvSqlConfig {
 }
 
 /**
- * DiffWindow holds the original vs edited text for a window, for side-by-side
- * review. (Offsets align exactly for length-preserving edits; for
- * length-changing edits the diff is still computed but may show a tail.)
+ * CsvTextPreviewResult binds rendered preview text to the exact open session
+ * generation that supplied its bytes. Callers must echo that generation in a
+ * later artifact request.
+ */
+export class CsvTextPreviewResult {
+    "generation": number;
+    "text": string;
+
+    /** Creates a new CsvTextPreviewResult instance. */
+    constructor($$source: Partial<CsvTextPreviewResult> = {}) {
+        if (!("generation" in $$source)) {
+            this["generation"] = 0;
+        }
+        if (!("text" in $$source)) {
+            this["text"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new CsvTextPreviewResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): CsvTextPreviewResult {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new CsvTextPreviewResult($$parsedSource as Partial<CsvTextPreviewResult>);
+    }
+}
+
+/**
+ * DiffWindow holds corresponding original and edited spans. StartByte and
+ * NextByte remain edited-coordinate aliases for bridge compatibility.
  */
 export class DiffWindow {
     "startByte": number;
     "nextByte": number;
+    "editedStartByte": number;
+    "editedNextByte": number;
+    "originalStartByte": number;
+    "originalNextByte": number;
     "original": string;
     "edited": string;
     "atBof": boolean;
@@ -485,6 +554,18 @@ export class DiffWindow {
         }
         if (!("nextByte" in $$source)) {
             this["nextByte"] = 0;
+        }
+        if (!("editedStartByte" in $$source)) {
+            this["editedStartByte"] = 0;
+        }
+        if (!("editedNextByte" in $$source)) {
+            this["editedNextByte"] = 0;
+        }
+        if (!("originalStartByte" in $$source)) {
+            this["originalStartByte"] = 0;
+        }
+        if (!("originalNextByte" in $$source)) {
+            this["originalNextByte"] = 0;
         }
         if (!("original" in $$source)) {
             this["original"] = "";
@@ -564,6 +645,43 @@ export class FileMeta {
 }
 
 /**
+ * FileStateResult is a cheap follow-tail poll. Milliseconds (rather than Unix
+ * nanoseconds) keep the timestamp exactly representable by JavaScript.
+ */
+export class FileStateResult {
+    "size": number;
+    "modTimeUnixMillis": number;
+    "sameOpenedFile": boolean;
+    "changedFromOpen": boolean;
+
+    /** Creates a new FileStateResult instance. */
+    constructor($$source: Partial<FileStateResult> = {}) {
+        if (!("size" in $$source)) {
+            this["size"] = 0;
+        }
+        if (!("modTimeUnixMillis" in $$source)) {
+            this["modTimeUnixMillis"] = 0;
+        }
+        if (!("sameOpenedFile" in $$source)) {
+            this["sameOpenedFile"] = false;
+        }
+        if (!("changedFromOpen" in $$source)) {
+            this["changedFromOpen"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new FileStateResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): FileStateResult {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new FileStateResult($$parsedSource as Partial<FileStateResult>);
+    }
+}
+
+/**
  * HexLine is one 16-byte row: global offset, space-grouped hex, and ASCII.
  */
 export class HexLine {
@@ -599,6 +717,7 @@ export class HexLine {
  * HexWindow is a bounded, 16-byte-aligned slice rendered as hex+ASCII.
  */
 export class HexWindow {
+    "fileId": string;
     "startByte": number;
     "nextByte": number;
     "lines": HexLine[];
@@ -607,6 +726,9 @@ export class HexWindow {
 
     /** Creates a new HexWindow instance. */
     constructor($$source: Partial<HexWindow> = {}) {
+        if (!("fileId" in $$source)) {
+            this["fileId"] = "";
+        }
         if (!("startByte" in $$source)) {
             this["startByte"] = 0;
         }
@@ -630,12 +752,100 @@ export class HexWindow {
      * Creates a new HexWindow instance from a string or object.
      */
     static createFrom($$source: any = {}): HexWindow {
-        const $$createField2_0 = $$createType11;
+        const $$createField3_0 = $$createType11;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("lines" in $$parsedSource) {
-            $$parsedSource["lines"] = $$createField2_0($$parsedSource["lines"]);
+            $$parsedSource["lines"] = $$createField3_0($$parsedSource["lines"]);
         }
         return new HexWindow($$parsedSource as Partial<HexWindow>);
+    }
+}
+
+/**
+ * LineResolution distinguishes a real offset zero, an approximate known line
+ * start, a line proven absent, an incomplete index, and a bounded-scan fallback.
+ * When Exact is false and Found is true, ResolvedLine is the actual line at
+ * Offset; it must not be mistaken for proof that the requested line was found.
+ */
+export class LineResolution {
+    "offset": number;
+    "resolvedLine": number;
+    "exact": boolean;
+    "found": boolean;
+    "indexComplete": boolean;
+    "limited": boolean;
+
+    /** Creates a new LineResolution instance. */
+    constructor($$source: Partial<LineResolution> = {}) {
+        if (!("offset" in $$source)) {
+            this["offset"] = 0;
+        }
+        if (!("resolvedLine" in $$source)) {
+            this["resolvedLine"] = 0;
+        }
+        if (!("exact" in $$source)) {
+            this["exact"] = false;
+        }
+        if (!("found" in $$source)) {
+            this["found"] = false;
+        }
+        if (!("indexComplete" in $$source)) {
+            this["indexComplete"] = false;
+        }
+        if (!("limited" in $$source)) {
+            this["limited"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new LineResolution instance from a string or object.
+     */
+    static createFrom($$source: any = {}): LineResolution {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new LineResolution($$parsedSource as Partial<LineResolution>);
+    }
+}
+
+/**
+ * MatchWindow resolves a raw search match to exact CodeMirror UTF-16 code-unit
+ * coordinates in one bounded decoded window.
+ */
+export class MatchWindow {
+    "window": Window;
+    "found": boolean;
+    "from": number;
+    "to": number;
+
+    /** Creates a new MatchWindow instance. */
+    constructor($$source: Partial<MatchWindow> = {}) {
+        if (!("window" in $$source)) {
+            this["window"] = (new Window());
+        }
+        if (!("found" in $$source)) {
+            this["found"] = false;
+        }
+        if (!("from" in $$source)) {
+            this["from"] = 0;
+        }
+        if (!("to" in $$source)) {
+            this["to"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new MatchWindow instance from a string or object.
+     */
+    static createFrom($$source: any = {}): MatchWindow {
+        const $$createField0_0 = $$createType12;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("window" in $$parsedSource) {
+            $$parsedSource["window"] = $$createField0_0($$parsedSource["window"]);
+        }
+        return new MatchWindow($$parsedSource as Partial<MatchWindow>);
     }
 }
 
@@ -745,7 +955,7 @@ export class SearchAllResult {
      * Creates a new SearchAllResult instance from a string or object.
      */
     static createFrom($$source: any = {}): SearchAllResult {
-        const $$createField0_0 = $$createType13;
+        const $$createField0_0 = $$createType14;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("hits" in $$parsedSource) {
             $$parsedSource["hits"] = $$createField0_0($$parsedSource["hits"]);
@@ -870,7 +1080,7 @@ export class SqlLintResult {
      * Creates a new SqlLintResult instance from a string or object.
      */
     static createFrom($$source: any = {}): SqlLintResult {
-        const $$createField0_0 = $$createType15;
+        const $$createField0_0 = $$createType16;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("findings" in $$parsedSource) {
             $$parsedSource["findings"] = $$createField0_0($$parsedSource["findings"]);
@@ -920,7 +1130,7 @@ export class SqlSchemaDiffResult {
     static createFrom($$source: any = {}): SqlSchemaDiffResult {
         const $$createField2_0 = $$createType0;
         const $$createField3_0 = $$createType0;
-        const $$createField4_0 = $$createType17;
+        const $$createField4_0 = $$createType18;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("addedTables" in $$parsedSource) {
             $$parsedSource["addedTables"] = $$createField2_0($$parsedSource["addedTables"]);
@@ -970,7 +1180,7 @@ export class SqlSummaryResult {
      * Creates a new SqlSummaryResult instance from a string or object.
      */
     static createFrom($$source: any = {}): SqlSummaryResult {
-        const $$createField0_0 = $$createType19;
+        const $$createField0_0 = $$createType20;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("tables" in $$parsedSource) {
             $$parsedSource["tables"] = $$createField0_0($$parsedSource["tables"]);
@@ -1213,8 +1423,8 @@ export class Window {
      * Creates a new Window instance from a string or object.
      */
     static createFrom($$source: any = {}): Window {
-        const $$createField4_0 = $$createType20;
-        const $$createField5_0 = $$createType20;
+        const $$createField4_0 = $$createType21;
+        const $$createField5_0 = $$createType21;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("lineOffsets" in $$parsedSource) {
             $$parsedSource["lineOffsets"] = $$createField4_0($$parsedSource["lineOffsets"]);
@@ -1239,12 +1449,13 @@ const $$createType8 = CsvSqlColumnConfig.createFrom;
 const $$createType9 = $Create.Array($$createType8);
 const $$createType10 = HexLine.createFrom;
 const $$createType11 = $Create.Array($$createType10);
-const $$createType12 = SearchAllHit.createFrom;
-const $$createType13 = $Create.Array($$createType12);
-const $$createType14 = SqlLintFinding.createFrom;
-const $$createType15 = $Create.Array($$createType14);
-const $$createType16 = schemadiff$0.TableDiff.createFrom;
-const $$createType17 = $Create.Array($$createType16);
-const $$createType18 = SqlTable.createFrom;
-const $$createType19 = $Create.Array($$createType18);
-const $$createType20 = $Create.Array($Create.Any);
+const $$createType12 = Window.createFrom;
+const $$createType13 = SearchAllHit.createFrom;
+const $$createType14 = $Create.Array($$createType13);
+const $$createType15 = SqlLintFinding.createFrom;
+const $$createType16 = $Create.Array($$createType15);
+const $$createType17 = schemadiff$0.TableDiff.createFrom;
+const $$createType18 = $Create.Array($$createType17);
+const $$createType19 = SqlTable.createFrom;
+const $$createType20 = $Create.Array($$createType19);
+const $$createType21 = $Create.Array($Create.Any);

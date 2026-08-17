@@ -1,15 +1,14 @@
 package replace
 
 import (
+	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"strings"
 	"time"
-
-	"novera/internal/bigfile/asciifold"
+	"unicode/utf8"
 )
 
 // BatchRule is one plain-text batch replacement rule. When matches overlap,
@@ -26,6 +25,7 @@ type BatchRule struct {
 // BatchOptions controls plain batch replacement.
 type BatchOptions struct {
 	ChunkSize       int
+	WriteBufferSize int
 	CaseInsensitive bool
 	WholeWord       bool
 	Progress        func(Progress)
@@ -48,8 +48,7 @@ type BatchRuleSet struct {
 
 type compiledBatchRule struct {
 	BatchRule
-	order  int
-	needle []byte
+	order int
 }
 
 type batchCandidate struct {
@@ -64,63 +63,10 @@ type batchCandidate struct {
 //   - leading `!` disables a rule without deleting it
 //   - `Name :: find => replace` assigns a custom rule name
 func ParseBatchRuleSet(text string) (BatchRuleSet, error) {
-	lines := strings.Split(text, "\n")
-	rules := make([]BatchRule, 0, len(lines))
-	disabled := 0
-	for i, raw := range lines {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		disabledRule := false
-		if strings.HasPrefix(line, "!") {
-			disabledRule = true
-			line = strings.TrimSpace(strings.TrimPrefix(line, "!"))
-			if line == "" || strings.HasPrefix(line, "#") {
-				disabled++
-				continue
-			}
-		}
-		sep := "=>"
-		idx := strings.Index(line, sep)
-		if idx < 0 {
-			sep = "->"
-			idx = strings.Index(line, sep)
-		}
-		if idx < 0 {
-			return BatchRuleSet{}, fmt.Errorf("line %d: expected `find => replace`", i+1)
-		}
-		find := strings.TrimSpace(line[:idx])
-		repl := strings.TrimSpace(line[idx+len(sep):])
-		name := ""
-		if nameIdx := strings.Index(find, "::"); nameIdx >= 0 {
-			name = strings.TrimSpace(find[:nameIdx])
-			find = strings.TrimSpace(find[nameIdx+2:])
-		}
-		if find == "" {
-			return BatchRuleSet{}, fmt.Errorf("line %d: empty search text", i+1)
-		}
-		if disabledRule {
-			disabled++
-			continue
-		}
-		if name == "" {
-			name = fmt.Sprintf("Rule %d", len(rules)+1)
-		}
-		rules = append(rules, BatchRule{
-			Name:     name,
-			Find:     []byte(find),
-			Replace:  []byte(repl),
-			Priority: len(rules),
-		})
+	if len(text) > MaxBatchRuleFileBytes {
+		return BatchRuleSet{}, batchRuleLimit("rule text bytes", len(text), MaxBatchRuleFileBytes)
 	}
-	if len(rules) == 0 {
-		if disabled > 0 {
-			return BatchRuleSet{}, errors.New("no enabled batch rules")
-		}
-		return BatchRuleSet{}, errors.New("no batch rules")
-	}
-	return BatchRuleSet{Rules: rules, DisabledRules: disabled}, nil
+	return parseBatchRuleReader(context.Background(), strings.NewReader(text))
 }
 
 // ParseBatchPlainRules parses plain batch rules from line-oriented text.
@@ -134,16 +80,27 @@ func ParseBatchPlainRules(text string) ([]BatchRule, error) {
 
 // ReplaceBatchPlain streams src to dst while applying plain-text rules in one pass.
 func ReplaceBatchPlain(ctx context.Context, src *os.File, dst syncWriter, rules []BatchRule, opts BatchOptions) (int64, int64, error) {
+	writeBufferSize, err := batchWriteBufferSize(opts.WriteBufferSize)
+	if err != nil {
+		return 0, 0, err
+	}
+	chunkSize, err := normalizedPlainChunkSize(opts.ChunkSize, 64*1024*1024, 1)
+	if err != nil {
+		return 0, 0, err
+	}
 	compiled, maxPattern, err := compileBatchRules(rules, opts.CaseInsensitive)
 	if err != nil {
 		return 0, 0, err
 	}
-	if opts.ChunkSize <= 0 {
-		opts.ChunkSize = 64 * 1024 * 1024
+	minimumChunk := 1
+	if opts.WholeWord {
+		minimumChunk = maxPattern + utf8.UTFMax
 	}
-	if opts.WholeWord && opts.ChunkSize < maxPattern+2 {
-		opts.ChunkSize = maxPattern + 2
+	chunkSize, err = normalizedPlainChunkSize(chunkSize, 64*1024*1024, minimumChunk)
+	if err != nil {
+		return 0, 0, err
 	}
+	opts.ChunkSize = chunkSize
 
 	st, err := src.Stat()
 	if err != nil {
@@ -152,9 +109,10 @@ func ReplaceBatchPlain(ctx context.Context, src *os.File, dst syncWriter, rules 
 
 	total := st.Size()
 	buf := make([]byte, opts.ChunkSize)
+	bufferedDst := bufio.NewWriterSize(dst, writeBufferSize)
 	keepSize := maxPattern - 1
 	if opts.WholeWord {
-		keepSize = maxPattern + 2
+		keepSize = maxPattern + utf8.UTFMax
 	}
 	carry := make([]byte, 0, keepSize)
 	window := make([]byte, 0, opts.ChunkSize+keepSize)
@@ -183,7 +141,7 @@ func ReplaceBatchPlain(ctx context.Context, src *os.File, dst syncWriter, rules 
 				processLimit = 0
 			}
 
-			consumed, count, conflictCount, err := writeBatchPrefix(dst, window, processLimit, total, processed-int64(len(carry)), compiled, opts.CaseInsensitive, opts.WholeWord)
+			consumed, count, conflictCount, err := writeBatchPrefix(ctx, bufferedDst, window, processLimit, total, processed-int64(len(carry)), compiled, opts.WholeWord)
 			if err != nil {
 				return matches, conflicts, err
 			}
@@ -204,14 +162,14 @@ func ReplaceBatchPlain(ctx context.Context, src *os.File, dst syncWriter, rules 
 
 		if errors.Is(readErr, io.EOF) {
 			if len(carry) > 0 {
-				_, count, conflictCount, err := writeBatchPrefix(dst, carry, len(carry), total, processed-int64(len(carry)), compiled, opts.CaseInsensitive, opts.WholeWord)
+				_, count, conflictCount, err := writeBatchPrefix(ctx, bufferedDst, carry, len(carry), total, processed-int64(len(carry)), compiled, opts.WholeWord)
 				if err != nil {
 					return matches, conflicts, err
 				}
 				matches += int64(count)
 				conflicts += int64(conflictCount)
 			}
-			return matches, conflicts, dst.Sync()
+			return matches, conflicts, finishRegexOutput(ctx, bufferedDst, dst)
 		}
 		if readErr != nil {
 			return matches, conflicts, readErr
@@ -221,22 +179,29 @@ func ReplaceBatchPlain(ctx context.Context, src *os.File, dst syncWriter, rules 
 
 // PreviewBatchPlain returns bounded previews for the first batch matches.
 func PreviewBatchPlain(ctx context.Context, r ReaderAtSize, rules []BatchRule, opts PreviewOptions) ([]BatchPreview, int64, error) {
+	radius, err := validatePreviewBase(opts.ChunkSize, opts.MaxHits, opts.PreviewBytes)
+	if err != nil {
+		return nil, 0, err
+	}
 	compiled, maxPattern, err := compileBatchRules(rules, opts.CaseInsensitive)
 	if err != nil {
 		return nil, 0, err
 	}
-	if opts.ChunkSize <= 0 {
-		opts.ChunkSize = 32 * 1024 * 1024
+	_, maxReplacement := maxBatchPreviewDimensions(rules)
+	if err := validatePreviewBudget(opts.MaxHits, radius, maxPattern, maxReplacement, 0); err != nil {
+		return nil, 0, err
 	}
-	if opts.WholeWord && opts.ChunkSize < maxPattern+2 {
-		opts.ChunkSize = maxPattern + 2
+	minimumChunk := 1
+	if opts.WholeWord {
+		minimumChunk = maxPattern + utf8.UTFMax
 	}
-	radius := opts.PreviewBytes
-	if radius <= 0 {
-		radius = 48
+	chunkSize, err := normalizedPlainChunkSize(opts.ChunkSize, 32*1024*1024, minimumChunk)
+	if err != nil {
+		return nil, 0, err
 	}
+	opts.ChunkSize = chunkSize
 
-	matches, conflicts, err := collectBatchMatches(ctx, r, compiled, opts.MaxHits, opts.ChunkSize, opts.CaseInsensitive, opts.WholeWord, maxPattern)
+	matches, conflicts, err := collectBatchMatches(ctx, r, compiled, opts.MaxHits, opts.ChunkSize, opts.WholeWord, maxPattern)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -260,6 +225,18 @@ func PreviewBatchPlain(ctx context.Context, r ReaderAtSize, rules []BatchRule, o
 
 // ReplaceBatchPlainFile streams sourcePath into outputPath while applying batch rules.
 func ReplaceBatchPlainFile(ctx context.Context, sourcePath string, outputPath string, rules []BatchRule, opts FileOptions, batchOpts BatchOptions) (FileSummary, error) {
+	if opts.SwapOriginal {
+		return FileSummary{}, ErrSwapOriginalDisabled
+	}
+	if _, err := batchWriteBufferSize(batchOpts.WriteBufferSize); err != nil {
+		return FileSummary{OutputPath: outputPath}, err
+	}
+	if _, err := normalizedPlainChunkSize(batchOpts.ChunkSize, 64*1024*1024, 1); err != nil {
+		return FileSummary{OutputPath: outputPath}, err
+	}
+	if _, _, err := compileBatchRules(rules, batchOpts.CaseInsensitive); err != nil {
+		return FileSummary{OutputPath: outputPath}, err
+	}
 	same, err := samePath(sourcePath, outputPath)
 	if err != nil {
 		return FileSummary{}, err
@@ -417,17 +394,30 @@ type batchMatch struct {
 	Conflicts int
 }
 
-func collectBatchMatches(ctx context.Context, r ReaderAtSize, rules []compiledBatchRule, maxHits int, chunkSize int, caseInsensitive bool, wholeWord bool, maxPattern int) ([]batchMatch, int64, error) {
+func collectBatchMatches(ctx context.Context, r ReaderAtSize, rules *compiledBatchSet, maxHits int, chunkSize int, wholeWord bool, maxPattern int) ([]batchMatch, int64, error) {
+	if maxHits <= 0 || maxHits > MaxPreviewHits {
+		return nil, 0, replaceLimit("maximum preview hits must be between 1 and %d", MaxPreviewHits)
+	}
+	if chunkSize <= 0 || chunkSize > MaxPlainChunkBytes {
+		return nil, 0, replaceLimit("preview chunk size must be between 1 and %d bytes", MaxPlainChunkBytes)
+	}
 	keepSize := maxPattern - 1
 	if wholeWord {
-		keepSize = maxPattern + 2
+		keepSize = maxPattern + utf8.UTFMax
 	}
 	buf := make([]byte, chunkSize)
 	carry := make([]byte, 0, keepSize)
 	window := make([]byte, 0, chunkSize+keepSize)
 	processed := int64(0)
 	size := r.Size()
-	results := make([]batchMatch, 0, maxHits)
+	if size < 0 {
+		return nil, 0, errors.New("source size must not be negative")
+	}
+	resultCapacity := maxHits
+	if resultCapacity < 0 {
+		resultCapacity = 0
+	}
+	results := make([]batchMatch, 0, resultCapacity)
 	var conflicts int64
 
 	for processed < size {
@@ -445,15 +435,19 @@ func collectBatchMatches(ctx context.Context, r ReaderAtSize, rules []compiledBa
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return nil, conflicts, readErr
 		}
-		if n == 0 {
-			break
+		if n != want {
+			return nil, conflicts, io.ErrUnexpectedEOF
+		}
+		atEnd := processed+int64(n) == size
+		if errors.Is(readErr, io.EOF) && !atEnd {
+			return nil, conflicts, io.ErrUnexpectedEOF
 		}
 
 		window = window[:0]
 		window = append(window, carry...)
 		window = append(window, buf[:n]...)
 		processLimit := len(window) - keepSize
-		if errors.Is(readErr, io.EOF) {
+		if atEnd {
 			processLimit = len(window)
 		}
 		if processLimit < 0 {
@@ -461,7 +455,10 @@ func collectBatchMatches(ctx context.Context, r ReaderAtSize, rules []compiledBa
 		}
 
 		windowStart := processed - int64(len(carry))
-		consumed, foundMatches, conflictCount := collectBatchPrefix(window, processLimit, rules, caseInsensitive, wholeWord, windowStart, size, maxHits-len(results))
+		consumed, foundMatches, conflictCount, collectErr := collectBatchPrefix(ctx, window, processLimit, rules, wholeWord, windowStart, size, maxHits-len(results))
+		if collectErr != nil {
+			return nil, conflicts, collectErr
+		}
 		conflicts += int64(conflictCount)
 		results = append(results, foundMatches...)
 		if maxHits > 0 && len(results) >= maxHits {
@@ -473,7 +470,10 @@ func collectBatchMatches(ctx context.Context, r ReaderAtSize, rules []compiledBa
 
 	if len(carry) > 0 {
 		windowStart := processed - int64(len(carry))
-		_, foundMatches, conflictCount := collectBatchPrefix(carry, len(carry), rules, caseInsensitive, wholeWord, windowStart, size, maxHits-len(results))
+		_, foundMatches, conflictCount, collectErr := collectBatchPrefix(ctx, carry, len(carry), rules, wholeWord, windowStart, size, maxHits-len(results))
+		if collectErr != nil {
+			return nil, conflicts, collectErr
+		}
 		conflicts += int64(conflictCount)
 		results = append(results, foundMatches...)
 	}
@@ -481,121 +481,61 @@ func collectBatchMatches(ctx context.Context, r ReaderAtSize, rules []compiledBa
 	return results, conflicts, nil
 }
 
-func collectBatchPrefix(window []byte, processLimit int, rules []compiledBatchRule, caseInsensitive bool, wholeWord bool, windowStart int64, size int64, remaining int) (int, []batchMatch, int) {
-	cursor := 0
-	consumed := processLimit
-	conflicts := 0
-	found := make([]batchMatch, 0, max(remaining, 0))
-	for cursor < processLimit {
-		candidate, ok := nextBatchCandidate(window, rules, cursor, processLimit, caseInsensitive, wholeWord, windowStart, size)
-		if !ok {
-			break
-		}
-		if candidate.start >= processLimit {
-			break
-		}
-		if candidate.end > processLimit {
-			safeStart := candidate.start
-			if wholeWord && safeStart > 0 {
-				safeStart--
-			}
-			consumed = safeStart
-			break
-		}
-		conflictCount := countBatchConflicts(window, rules, candidate, caseInsensitive, wholeWord, windowStart, size)
-		conflicts += conflictCount
+func collectBatchPrefix(ctx context.Context, window []byte, processLimit int, rules *compiledBatchSet, wholeWord bool, windowStart int64, size int64, remaining int) (int, []batchMatch, int, error) {
+	capacity := remaining
+	if capacity < 0 {
+		capacity = 0
+	}
+	found := make([]batchMatch, 0, capacity)
+	consumed, _, conflicts, err := arbitrateBatchPrefix(ctx, window, processLimit, size, windowStart, rules, wholeWord, remaining, func(candidate batchCandidate, conflictCount int) error {
 		found = append(found, batchMatch{
 			Offset:    windowStart + int64(candidate.start),
 			Length:    len(candidate.rule.Find),
 			Rule:      candidate.rule,
 			Conflicts: conflictCount,
 		})
-		if remaining > 0 && len(found) >= remaining {
-			return candidate.end, found, conflicts
-		}
-		cursor = candidate.end
-	}
-	if cursor > consumed {
-		consumed = cursor
-	}
-	return consumed, found, conflicts
+		return nil
+	})
+	return consumed, found, conflicts, err
 }
 
-func writeBatchPrefix(dst io.Writer, window []byte, processLimit int, size int64, windowStart int64, rules []compiledBatchRule, caseInsensitive bool, wholeWord bool) (int, int, int, error) {
-	cursor := 0
-	matches := 0
-	conflicts := 0
-	for cursor < processLimit {
-		candidate, found := nextBatchCandidate(window, rules, cursor, processLimit, caseInsensitive, wholeWord, windowStart, size)
-		if !found {
-			break
-		}
-		if candidate.start >= processLimit {
-			break
-		}
-		if candidate.end > processLimit {
-			safeStart := candidate.start
-			if wholeWord && safeStart > 0 {
-				safeStart--
-			}
-			if safeStart > cursor {
-				if _, err := dst.Write(window[cursor:safeStart]); err != nil {
-					return 0, matches, conflicts, err
-				}
-			}
-			return safeStart, matches, conflicts, nil
-		}
-		if candidate.start > cursor {
-			if _, err := dst.Write(window[cursor:candidate.start]); err != nil {
-				return 0, matches, conflicts, err
+func writeBatchPrefix(ctx context.Context, dst io.Writer, window []byte, processLimit int, size int64, windowStart int64, rules *compiledBatchSet, wholeWord bool) (int, int, int, error) {
+	writeAt := 0
+	consumed, matches, conflicts, err := arbitrateBatchPrefix(ctx, window, processLimit, size, windowStart, rules, wholeWord, 0, func(candidate batchCandidate, _ int) error {
+		if candidate.start > writeAt {
+			if err := writeBatchBytes(dst, window[writeAt:candidate.start]); err != nil {
+				return err
 			}
 		}
-		if _, err := dst.Write(candidate.rule.Replace); err != nil {
+		if err := writeBatchBytes(dst, candidate.rule.Replace); err != nil {
+			return err
+		}
+		writeAt = candidate.end
+		return nil
+	})
+	if err != nil {
+		return 0, matches, conflicts, err
+	}
+	if consumed > writeAt {
+		if err := writeBatchBytes(dst, window[writeAt:consumed]); err != nil {
 			return 0, matches, conflicts, err
 		}
-		conflicts += countBatchConflicts(window, rules, candidate, caseInsensitive, wholeWord, windowStart, size)
-		matches++
-		cursor = candidate.end
 	}
-	if cursor < processLimit {
-		if _, err := dst.Write(window[cursor:processLimit]); err != nil {
-			return 0, matches, conflicts, err
-		}
-		cursor = processLimit
-	}
-	return cursor, matches, conflicts, nil
+	return consumed, matches, conflicts, nil
 }
 
-func nextBatchCandidate(window []byte, rules []compiledBatchRule, start int, processLimit int, caseInsensitive bool, wholeWord bool, windowStart int64, size int64) (batchCandidate, bool) {
-	var chosen batchCandidate
-	found := false
-	for _, rule := range rules {
-		pos := start
-		for pos < len(window) {
-			idx := indexPlain(window[pos:], rule.needle, caseInsensitive)
-			if idx < 0 {
-				break
-			}
-			matchStart := pos + idx
-			matchEnd := matchStart + len(rule.Find)
-			if replaceWordBoundaryOK(window, matchStart, len(rule.Find), windowStart, size, wholeWord) {
-				candidate := batchCandidate{start: matchStart, end: matchEnd, rule: rule}
-				if !found || betterBatchCandidate(candidate, chosen) {
-					chosen = candidate
-					found = true
-				}
-				break
-			}
-			pos = matchStart + 1
-		}
+func writeBatchBytes(dst io.Writer, data []byte) error {
+	if len(data) == 0 {
+		return nil
 	}
-	if !found {
-		return batchCandidate{}, false
+	n, err := dst.Write(data)
+	if err != nil {
+		return err
 	}
-	if chosen.start < processLimit && chosen.end > processLimit {
-		return chosen, true
+	if n != len(data) {
+		return io.ErrShortWrite
 	}
-	return chosen, true
+	return nil
 }
 
 func betterBatchCandidate(a batchCandidate, b batchCandidate) bool {
@@ -609,64 +549,4 @@ func betterBatchCandidate(a batchCandidate, b batchCandidate) bool {
 		return (a.end - a.start) > (b.end - b.start)
 	}
 	return a.rule.order < b.rule.order
-}
-
-func countBatchConflicts(window []byte, rules []compiledBatchRule, chosen batchCandidate, caseInsensitive bool, wholeWord bool, windowStart int64, size int64) int {
-	conflicts := 0
-	for _, rule := range rules {
-		pos := chosen.start
-		for pos < len(window) {
-			idx := indexPlain(window[pos:], rule.needle, caseInsensitive)
-			if idx < 0 {
-				break
-			}
-			matchStart := pos + idx
-			matchEnd := matchStart + len(rule.Find)
-			if matchStart >= chosen.end {
-				break
-			}
-			if !replaceWordBoundaryOK(window, matchStart, len(rule.Find), windowStart, size, wholeWord) {
-				pos = matchStart + 1
-				continue
-			}
-			sameMatch := matchStart == chosen.start && matchEnd == chosen.end && rule.order == chosen.rule.order
-			if !sameMatch && matchEnd > chosen.start {
-				conflicts++
-			}
-			pos = matchStart + 1
-		}
-	}
-	return conflicts
-}
-
-func compileBatchRules(rules []BatchRule, caseInsensitive bool) ([]compiledBatchRule, int, error) {
-	if len(rules) == 0 {
-		return nil, 0, errors.New("no batch rules")
-	}
-	compiled := make([]compiledBatchRule, 0, len(rules))
-	maxPattern := 0
-	for i, rule := range rules {
-		if len(rule.Find) == 0 {
-			return nil, 0, fmt.Errorf("rule %d has empty search text", i+1)
-		}
-		if rule.Name == "" {
-			rule.Name = fmt.Sprintf("Rule %d", i+1)
-		}
-		if rule.Priority == 0 && i > 0 {
-			rule.Priority = i
-		}
-		needle := rule.Find
-		if caseInsensitive {
-			needle = asciifold.Fold(rule.Find)
-		}
-		compiled = append(compiled, compiledBatchRule{
-			BatchRule: rule,
-			order:     i,
-			needle:    needle,
-		})
-		if len(rule.Find) > maxPattern {
-			maxPattern = len(rule.Find)
-		}
-	}
-	return compiled, maxPattern, nil
 }

@@ -11,6 +11,7 @@ import Splitter from "./Splitter";
 export default function SideBar() {
   const view = useStore((s) => s.view);
   const wsName = useStore((s) => s.wsName);
+  const root = useStore((s) => s.root);
   const refreshTree = useStore((s) => s.refreshTree);
   const loadGitStatus = useStore((s) => s.loadGitStatus);
   const startNewFile = useStore((s) => s.startNewFile);
@@ -58,7 +59,10 @@ export default function SideBar() {
       </div>
       <div className="sidebar__body">
         {view === "explorer" && <FileTree />}
-        {view === "git" && <SourceControl />}
+        {/* Commit text is an unsubmitted workspace-scoped intent. Remount only
+            after the authoritative root changes so it cannot carry into a
+            different repository (and a failed switch does not erase it). */}
+        {view === "git" && <SourceControl key={root} />}
         {view === "db" && <DatabasePanel />}
         {view === "search" && <Search />}
         {view === "artifacts" && <ArtifactsView />}

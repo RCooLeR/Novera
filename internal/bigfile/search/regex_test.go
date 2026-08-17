@@ -1,10 +1,33 @@
 package search
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"testing"
 )
+
+type shortRegexReaderAt struct{ size int64 }
+
+func (r shortRegexReaderAt) Size() int64 { return r.size }
+func (shortRegexReaderAt) ReadAt([]byte, int64) (int, error) {
+	return 0, io.EOF
+}
+
+func TestFindRegexpRejectsUnexpectedShortSource(t *testing.T) {
+	re, err := CompileRegexpForTesting([]byte("x"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := shortRegexReaderAt{size: 1024}
+	if err := FindRegexp(context.Background(), r, re, RegexOptions{}, func(Match) error { return nil }); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("forward error = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if err := FindRegexpBackward(context.Background(), r, re, RegexOptions{}, func(Match) error { return nil }); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("backward error = %v, want io.ErrUnexpectedEOF", err)
+	}
+}
 
 func TestCollectRegexpResultsWithPreview(t *testing.T) {
 	r := memReaderAt{data: []byte("alpha h.llo bravo\ncharlie heLLo delta")}
@@ -41,8 +64,8 @@ func TestFindRegexpBoundaryAcrossChunks(t *testing.T) {
 
 	var offsets []int64
 	err = FindRegexp(context.Background(), r, re, RegexOptions{
-		ChunkSize:      6,
-		MaxMatchWindow: 6,
+		ChunkSize:      8,
+		MaxMatchWindow: 8,
 	}, func(m Match) error {
 		offsets = append(offsets, m.Offset)
 		return nil
@@ -81,6 +104,30 @@ func TestFindRegexpBackwardOrder(t *testing.T) {
 		if offsets[i] != want[i] {
 			t.Fatalf("offsets = %#v, want %#v", offsets, want)
 		}
+	}
+}
+
+func TestFindRegexpBackwardDenseMaxOneRetainsOnlyNearestMatch(t *testing.T) {
+	const size = 256 * 1024
+	r := memReaderAt{data: bytes.Repeat([]byte("a"), size)}
+	re, err := CompileRegexpForTesting([]byte("a"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var offsets []int64
+	err = FindRegexpBackward(context.Background(), r, re, RegexOptions{
+		ChunkSize:      size,
+		MaxMatchWindow: 1,
+		MaxHits:        1,
+	}, func(m Match) error {
+		offsets = append(offsets, m.Offset)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offsets) != 1 || offsets[0] != size-1 {
+		t.Fatalf("offsets = %#v, want [%d]", offsets, size-1)
 	}
 }
 

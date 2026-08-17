@@ -40,7 +40,7 @@ func TestApplyFileEditWritesNewOutput(t *testing.T) {
 	}
 }
 
-func TestApplyFileEditSwapOriginalCreatesBackup(t *testing.T) {
+func TestApplyFileEditSwapOriginalFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "source.txt")
 	outPath := filepath.Join(dir, "edited.txt")
@@ -57,27 +57,24 @@ func TestApplyFileEditSwapOriginalCreatesBackup(t *testing.T) {
 		SwapOriginal: true,
 		BackupPath:   backupPath,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrSwapOriginalDisabled) {
+		t.Fatalf("err = %v, want ErrSwapOriginalDisabled", err)
 	}
-	if !summary.Swapped {
-		t.Fatal("expected swapped summary")
+	if summary.OutputPath != outPath || summary.Swapped {
+		t.Fatalf("summary = %+v", summary)
 	}
 
 	current, err := os.ReadFile(srcPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(current) != "hello brave world" {
+	if string(current) != "hello world" {
 		t.Fatalf("source = %q", string(current))
 	}
-
-	backup, err := os.ReadFile(backupPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(backup) != "hello world" {
-		t.Fatalf("backup = %q", string(backup))
+	for _, path := range []string{outPath, backupPath, outPath + ".quarry.tmp", outPath + ".quarry.manifest.json"} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("disabled swap created %q: %v", path, statErr)
+		}
 	}
 }
 
@@ -218,8 +215,8 @@ func TestManualEditSaveRejectsBackupPathMatchingSource(t *testing.T) {
 		SwapOriginal: true,
 		BackupPath:   srcPath,
 	})
-	if err == nil || !strings.Contains(err.Error(), "backup path must be different") {
-		t.Fatalf("ApplyFileEdit err = %v, want backup path rejection", err)
+	if !errors.Is(err, ErrSwapOriginalDisabled) {
+		t.Fatalf("ApplyFileEdit err = %v, want ErrSwapOriginalDisabled", err)
 	}
 
 	session := NewSession(int64(len("alpha bravo charlie")), DefaultMaxInsertedBytes)
@@ -230,8 +227,8 @@ func TestManualEditSaveRejectsBackupPathMatchingSource(t *testing.T) {
 		SwapOriginal: true,
 		BackupPath:   srcPath,
 	})
-	if err == nil || !strings.Contains(err.Error(), "backup path must be different") {
-		t.Fatalf("WriteSessionToFile err = %v, want backup path rejection", err)
+	if !errors.Is(err, ErrSwapOriginalDisabled) {
+		t.Fatalf("WriteSessionToFile err = %v, want ErrSwapOriginalDisabled", err)
 	}
 }
 
@@ -405,7 +402,7 @@ func TestWriteSessionToFileRenameFailureLeavesTempAndFailedManifest(t *testing.T
 	}
 }
 
-func TestWriteSessionToFileSwapSourceModifiedLeavesSourceAndOutput(t *testing.T) {
+func TestWriteSessionToFileSwapOriginalFailsBeforeFilesystemMutation(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "source.txt")
 	outPath := filepath.Join(dir, "session.txt")
@@ -419,40 +416,22 @@ func TestWriteSessionToFileSwapSourceModifiedLeavesSourceAndOutput(t *testing.T)
 		t.Fatal(err)
 	}
 
-	oldStatPath := statPath
-	statPath = func(path string) (os.FileInfo, error) {
-		info, err := oldStatPath(path)
-		if err != nil {
-			return nil, err
-		}
-		if path == srcPath {
-			return fileInfoWithModTime{FileInfo: info, modTime: info.ModTime().Add(time.Hour)}, nil
-		}
-		return info, nil
-	}
-	t.Cleanup(func() {
-		statPath = oldStatPath
-	})
-
 	summary, err := WriteSessionToFile(context.Background(), srcPath, outPath, session, FileOptions{
 		SwapOriginal: true,
 		BackupPath:   backupPath,
 	})
-	if !errors.Is(err, ErrSourceModifiedDuringOperation) {
-		t.Fatalf("err = %v, want ErrSourceModifiedDuringOperation", err)
+	if !errors.Is(err, ErrSwapOriginalDisabled) {
+		t.Fatalf("err = %v, want ErrSwapOriginalDisabled", err)
 	}
 	if summary.Swapped {
-		t.Fatal("summary should not report swapped after source modification")
+		t.Fatal("summary should not report swapped")
 	}
 	assertFileContent(t, srcPath, "alpha bravo charlie")
-	assertFileContent(t, outPath, "alpha delta charlie")
-	if _, err := os.Stat(backupPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("backup should not exist before a safe swap, stat err = %v", err)
+	if _, err := os.Stat(outPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("output should not exist, stat err = %v", err)
 	}
-
-	manifest := readManualEditManifest(t, summary.ManifestPath)
-	if manifest.Status != "failed" || !strings.Contains(manifest.Error, ErrSourceModifiedDuringOperation.Error()) {
-		t.Fatalf("manifest status/error = %q/%q, want source-modified failure", manifest.Status, manifest.Error)
+	if _, err := os.Stat(backupPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("backup should not exist, stat err = %v", err)
 	}
 }
 

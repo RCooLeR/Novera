@@ -26,7 +26,7 @@ func TestRegistryValidatesAndFindsPlugins(t *testing.T) {
 }
 
 func TestRegistryRejectsDuplicateIDs(t *testing.T) {
-	descriptor := Descriptor{ID: "sql", DisplayName: "SQL", Category: "data", Modes: []Mode{ModeStreaming}}
+	descriptor := Descriptor{ID: "sql", DisplayName: "SQL", Category: "data", FilePatterns: []string{"*.sql"}, Modes: []Mode{ModeStreaming}}
 	_, err := NewRegistry(NewStaticPlugin(descriptor), NewStaticPlugin(descriptor))
 	if err == nil {
 		t.Fatal("expected duplicate id error")
@@ -148,10 +148,7 @@ func TestRegistryRoutesSymbolHooksForPath(t *testing.T) {
 		Category:     "data",
 		FilePatterns: []string{"*.sql"},
 		Capabilities: []Capability{CapabilitySyntax},
-		Symbols: []SymbolHook{
-			{ID: "sql-table-symbols", DisplayName: "SQL table symbols", Strategy: "streaming table analyzer"},
-		},
-		Modes: []Mode{ModeStreaming},
+		Modes:        []Mode{ModeStreaming},
 	})
 	registry, err := NewRegistry(goPlugin, sqlPlugin)
 	if err != nil {
@@ -234,10 +231,7 @@ func TestRegistryRoutesCompletionHooksForPath(t *testing.T) {
 		Category:     "data",
 		FilePatterns: []string{"*.sql"},
 		Capabilities: []Capability{CapabilitySyntax},
-		Completions: []CompletionHook{
-			{ID: "sql-completions", DisplayName: "SQL completions", Strategy: "table analyzer suggestions"},
-		},
-		Modes: []Mode{ModeStreaming},
+		Modes:        []Mode{ModeStreaming},
 	})
 	registry, err := NewRegistry(goPlugin, sqlPlugin)
 	if err != nil {

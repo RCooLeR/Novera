@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, CircleSlash, Loader2, Square, Trash2, XCircle } from "lucide-react";
 import { useStore } from "../state/store";
 import { Jobs } from "../lib/services";
@@ -25,13 +25,21 @@ export default function JobsView() {
   const loadJobs = useStore((s) => s.loadJobs);
   const cancelJob = useStore((s) => s.cancelJob);
   const clearFinishedJobs = useStore((s) => s.clearFinishedJobs);
+  const workspaceInstanceId = useStore((s) => s.workspaceInstanceId);
+  const workspaceTransitioning = useStore((s) => s.workspaceTransitioning);
   const [openId, setOpenId] = useState<string | null>(null);
   const [logState, setLogState] = useState<JobLogState>({ jobId: "", lines: [], loading: false, error: "" });
+  const [cancelingIds, setCancelingIds] = useState<Set<string>>(new Set());
+  const cancelingIdsRef = useRef(new Set<string>());
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     void loadJobs();
-  }, [loadJobs]);
+  }, [loadJobs, workspaceInstanceId, workspaceTransitioning]);
+
+  useEffect(() => {
+    setOpenId(null);
+  }, [workspaceInstanceId]);
 
   // Load the selected job's log; refresh it whenever the jobs list changes (so a
   // running job's log keeps growing in the open panel).
@@ -76,15 +84,26 @@ export default function JobsView() {
 
   const hasFinished = jobs.some((j) => j.status !== "running");
   const selectedLog = openId ? visibleJobLog(openId, logState) : null;
+  const requestCancel = async (jobId: string) => {
+    if (cancelingIdsRef.current.has(jobId)) return;
+    cancelingIdsRef.current.add(jobId);
+    setCancelingIds(new Set(cancelingIdsRef.current));
+    try {
+      await cancelJob(jobId);
+    } finally {
+      cancelingIdsRef.current.delete(jobId);
+      setCancelingIds(new Set(cancelingIdsRef.current));
+    }
+  };
 
   return (
     <div className="jobs">
       <div className="jobs__bar">
-        <span className="jobs__count">
+        <span className="jobs__count" role="status" aria-live="polite">
           {jobs.filter((j) => j.status === "running").length} running · {jobs.length} total
         </span>
         <span style={{ flex: 1 }} />
-        <button className="icon-btn" title="Clear finished" disabled={!hasFinished} onClick={() => void clearFinishedJobs()}>
+        <button type="button" className="icon-btn" aria-label="Clear finished jobs" title="Clear finished" disabled={!hasFinished || workspaceTransitioning} onClick={() => void clearFinishedJobs()}>
           <Trash2 size={13} />
         </button>
       </div>
@@ -95,22 +114,33 @@ export default function JobsView() {
           {jobs.map((j) => (
             <div key={j.id} className="jobs__item">
               <button
+                type="button"
                 className="jobs__row"
                 onClick={() => setOpenId((id) => (id === j.id ? null : j.id))}
                 title="Show log"
+                aria-expanded={openId === j.id}
+                aria-controls={openId === j.id ? `job-log-${j.id}` : undefined}
               >
                 <StatusIcon status={j.status} />
+                <span className="sr-only">Status: {j.status}.</span>
                 <span className="jobs__kind">{j.kind}</span>
                 <span className="jobs__title">{j.title || "(untitled)"}</span>
                 <span className="jobs__dur">{durationAt(j, now)}</span>
               </button>
               {j.status === "running" && (
-                <button className="icon-btn jobs__cancel" title="Cancel job" onClick={() => void cancelJob(j.id)}>
+                <button
+                  type="button"
+                  className="icon-btn jobs__cancel"
+                  aria-label={`Cancel ${j.title || j.kind || "job"}`}
+                  title="Cancel job"
+                  disabled={workspaceTransitioning || cancelingIds.has(j.id)}
+                  onClick={() => void requestCancel(j.id)}
+                >
                   <Square size={12} />
                 </button>
               )}
               {openId === j.id && selectedLog && (
-                <div className="jobs__detail" aria-busy={selectedLog.loading}>
+                <div id={`job-log-${j.id}`} className="jobs__detail" aria-busy={selectedLog.loading}>
                   {j.error && <div className="jobs__error">{j.error}</div>}
                   {selectedLog.error && (
                     <div className="jobs__error" role="alert">

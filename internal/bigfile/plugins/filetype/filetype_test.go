@@ -8,6 +8,7 @@ func TestDetectUsesPluginPathLabels(t *testing.T) {
 		want string
 	}{
 		{"dump.sql", "SQL"},
+		{"database.dump", "SQL"},
 		{"users.tsv", "TSV"},
 		{"users.csv", "CSV"},
 		{"events.jsonl", "JSONL"},

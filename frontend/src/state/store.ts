@@ -36,6 +36,14 @@ import { languageForPath, isTabular } from "../lib/lang";
 import { activeResourceCapabilities } from "../lib/resourceCapabilities";
 import { validateFileName } from "../lib/validate";
 import { ExclusiveOperation } from "../lib/exclusiveOperation";
+import {
+  reduceBigFileJobEvent,
+  type ActiveBigFileJob,
+  type BigFileJobEventType,
+} from "../lib/bigFileJobState";
+import { LatestRequest } from "../lib/latestRequest";
+import { watchRecovery } from "../lib/watchRecovery";
+import { stripUrlCredentials } from "../lib/urlCredentials";
 
 // Result of a Tools-menu utility, shown in the ToolsModal.
 export type ToolResult =
@@ -277,6 +285,10 @@ const activeFileMutationPaths = new Map<string, { workspaceInstanceId: number; r
 let directoryLoadAttemptCounter = 0;
 const latestDirectoryLoadAttempts = new Map<string, number>();
 const toolOperation = new ExclusiveOperation();
+const workspaceSearchRequests = new LatestRequest();
+const jobsListRequests = new LatestRequest();
+const artifactListRequests = new LatestRequest();
+const auditLogRequests = new LatestRequest();
 
 function enqueueFileOperation<T>(operation: () => Promise<T>): Promise<T> {
   const result = fileOperationQueue.then(operation, operation);
@@ -524,7 +536,7 @@ interface AuthoritativeDatabaseState {
 
 async function loadAuthoritativeDatabaseState(): Promise<AuthoritativeDatabaseState> {
   const profiles = await Db.ListProfiles();
-  let loadError: string | null = null;
+  let loadError: string | null;
   let credentialStatusError: string | null = null;
   const credentialStatuses: Record<string, DbCredentialStatus> = {};
   try {
@@ -602,23 +614,6 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
 
 function applyUIFont(px: number) {
   document.documentElement.style.setProperty("--ui-base", `${px || 13}px`);
-}
-
-// Strip any embedded "user:pass@" credentials from a provider base URL so they
-// are never persisted in cleartext settings — the API key belongs in the secret
-// store, not the URL.
-function stripUrlCreds(raw: string): string {
-  try {
-    const u = new URL(raw);
-    if (u.username || u.password) {
-      u.username = "";
-      u.password = "";
-      return u.toString();
-    }
-  } catch {
-    /* not a full URL yet (still being typed) — leave as-is */
-  }
-  return raw;
 }
 
 export function agentConfigFromSettings(settings: SettingsModel | null): AgentConfig {
@@ -725,7 +720,6 @@ export interface Tab {
   tooLarge: boolean;
 	largeFileSessionId?: string;
 	largeFileDirty?: boolean;
-	largeFileInPlaceEligible?: boolean;
   encoding?: string; // detected on-disk encoding (utf-8, utf-16le, latin-1, …); save round-trips it
   staleOnDisk?: boolean; // changed on disk by another program
   staleRevision?: string; // exact external revision observed for explicit conflict overwrite
@@ -819,6 +813,7 @@ interface State {
   toolBusy: boolean;
   cleanDump: { rel: string } | null; // active "Clean SQL dump" form target
   dataTools: { rel: string } | null; // active "Data tools" (big-file CSV/SQL toolset) target
+  bigFileJob: ActiveBigFileJob | null;
   aboutOpen: boolean; // Help → About Novera dialog
 
   // ui
@@ -867,7 +862,7 @@ interface State {
   requestCloseTab: (path: string) => void;
 	setLargeFileState: (
 		path: string,
-		state: { sessionId?: string; dirty?: boolean; inPlaceEligible?: boolean },
+		state: { sessionId?: string; dirty?: boolean },
 	) => void;
   confirmCloseTab: (save: boolean) => Promise<void>;
   cancelCloseTab: () => void;
@@ -883,6 +878,7 @@ interface State {
   openCleanDump: () => void;
   openDataTools: () => void;
   closeDataTools: () => void;
+  applyBigFileJobEvent: (type: BigFileJobEventType, payload: Record<string, unknown>) => void;
   openAbout: () => void;
   closeAbout: () => void;
   applyCleanDump: (rel: string, outRel: string, t: DumpTransform) => Promise<void>;
@@ -895,7 +891,7 @@ interface State {
   convertEncoding: (path: string, encoding: string) => Promise<TabSaveResult>;
   reloadIfChanged: (path: string) => Promise<void>;
   reloadTab: (path: string) => Promise<void>;
-  syncWatches: () => void;
+  syncWatches: () => Promise<boolean>;
 
   // actions — git
   loadGitStatus: () => Promise<void>;
@@ -1297,6 +1293,7 @@ export const useStore = create<State>()((set, get) => ({
   toolBusy: false,
   cleanDump: null,
   dataTools: null,
+  bigFileJob: null,
   aboutOpen: false,
   view: "explorer",
   sidebarVisible: true,
@@ -1847,7 +1844,7 @@ export const useStore = create<State>()((set, get) => ({
 
   syncWatches: () => {
     const st = get();
-    if (st.workspaceTransitioning || !st.isOpen) return;
+    if (st.workspaceTransitioning || !st.isOpen) return Promise.resolve(false);
     const workspaceInstanceId = st.workspaceInstanceId;
     const attempt = ++watchSyncAttemptCounter;
     latestWatchSyncAttempt = attempt;
@@ -1859,13 +1856,18 @@ export const useStore = create<State>()((set, get) => ({
           .filter((path): path is string => path !== null),
       ),
     ];
-    void enqueueWatchOperation(async () => {
-      if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return;
+    return enqueueWatchOperation(async () => {
+      if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return false;
       await Watcher.Watch(files);
+      if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return false;
+      watchRecovery.observeSyncSuccess();
+      return true;
     }).catch((error) => {
       const current = get();
-      if (!canReportWorkspaceDiagnostic(current, workspaceInstanceId) || attempt !== latestWatchSyncAttempt) return;
-      current.setStatus(`File watcher update failed: ${errMessage(error)}`, "error");
+      if (canReportWorkspaceDiagnostic(current, workspaceInstanceId) && attempt === latestWatchSyncAttempt) {
+        current.setStatus(`File watcher update failed: ${errMessage(error)}`, "error");
+      }
+      return false;
     });
   },
 
@@ -2027,7 +2029,6 @@ export const useStore = create<State>()((set, get) => ({
 							...tab,
 							largeFileSessionId: state.sessionId ?? tab.largeFileSessionId,
 							largeFileDirty: state.dirty ?? tab.largeFileDirty,
-							largeFileInPlaceEligible: state.inPlaceEligible ?? tab.largeFileInPlaceEligible,
 						}
 					: tab,
 			),
@@ -2041,7 +2042,7 @@ export const useStore = create<State>()((set, get) => ({
 		const requestedTab = get().tabs.find((tab) => tab.path === path);
 		if (requestedTab?.largeFileDirty) {
 			if (save) {
-				get().setStatus("Save the staged large-file edits from the editor, then close the tab.", "error");
+				get().setStatus("Save a copy of the staged large-file edits from the editor, then close the tab.", "error");
 				return;
 			}
 			if (!requestedTab.largeFileSessionId) {
@@ -2059,6 +2060,18 @@ export const useStore = create<State>()((set, get) => ({
 				}
 				return;
 			}
+			// The backend discard is authoritative even if an outer workspace action
+			// invalidated this close attempt while it was in flight. Reconcile only
+			// the exact tab/session instance that initiated it; a reopened tab with
+			// the same path must retain its own state.
+			set((state) => ({
+				tabs: state.tabs.map((tab) =>
+					tab.instanceId === requestedTab.instanceId &&
+					tab.largeFileSessionId === requestedTab.largeFileSessionId
+						? { ...tab, largeFileDirty: false }
+						: tab,
+				),
+			}));
 			const current = get();
 			if (current.pendingTabClose !== path || current.pendingTabCloseAttemptToken !== attemptToken) return;
 			set({ pendingTabClose: null, pendingTabCloseAttemptToken: null, pendingTabCloseSaving: false });
@@ -2093,7 +2106,13 @@ export const useStore = create<State>()((set, get) => ({
     set({ pendingTabCloseSaving: false });
   },
 
-  cancelCloseTab: () => set({ pendingTabClose: null, pendingTabCloseAttemptToken: null, pendingTabCloseSaving: false }),
+  cancelCloseTab: () => {
+    // A destructive save/discard has crossed the backend boundary. Keep its
+    // attempt token and modal ownership until it settles so Escape/backdrop
+    // cannot strand renderer state halfway through reconciliation.
+    if (get().pendingTabCloseSaving) return;
+    set({ pendingTabClose: null, pendingTabCloseAttemptToken: null, pendingTabCloseSaving: false });
+  },
 
   runCsvSchema: async () => {
     const { csv, path } = activeResourceCapabilities(get().tabs, get().activePath);
@@ -2323,6 +2342,10 @@ export const useStore = create<State>()((set, get) => ({
   },
 
   closeDataTools: () => set({ dataTools: null }),
+
+  applyBigFileJobEvent: (type, payload) => {
+    set((state) => ({ bigFileJob: reduceBigFileJobEvent(state.bigFileJob, type, payload) }));
+  },
 
   openAbout: () => set({ aboutOpen: true }),
   closeAbout: () => set({ aboutOpen: false }),
@@ -3345,7 +3368,7 @@ export const useStore = create<State>()((set, get) => ({
       return;
     }
     const normalizedPatch = { ...patch };
-    if (normalizedPatch.baseURL !== undefined) normalizedPatch.baseURL = stripUrlCreds(normalizedPatch.baseURL);
+    if (normalizedPatch.baseURL !== undefined) normalizedPatch.baseURL = stripUrlCredentials(normalizedPatch.baseURL);
     const next = { ...cur, llm: { ...cur.llm, ...normalizedPatch } };
     const mutation = claimSettingsMutation();
     set({ settings: next });
@@ -4013,13 +4036,19 @@ export const useStore = create<State>()((set, get) => ({
     }
   },
 
-  setSearchQuery: (query: string) =>
-    set(query.trim() ? { searchQuery: query } : { searchQuery: query, searchResults: null, searching: false }),
+  setSearchQuery: (query: string) => {
+    // Query ownership changes immediately, before the debounced backend call.
+    // Clear the old snapshot so an A -> B -> A edit cannot expose or revive a
+    // result produced by the first A request.
+    workspaceSearchRequests.invalidate();
+    set({ searchQuery: query, searchResults: null, searching: false });
+  },
 
   runSearch: async (query: string) => {
     set({ searchQuery: query });
     const q = query.trim();
     if (!q) {
+      workspaceSearchRequests.invalidate();
       set({ searchResults: null });
       return;
     }
@@ -4027,9 +4056,11 @@ export const useStore = create<State>()((set, get) => ({
     if (!requested.isOpen || requested.workspaceTransitioning) return;
     const workspaceInstanceId = requested.workspaceInstanceId;
     const fileGeneration = workspaceFileStateGeneration;
+    const requestGeneration = workspaceSearchRequests.begin();
     const isCurrentSearch = () => {
       const current = get();
       return (
+        workspaceSearchRequests.isCurrent(requestGeneration) &&
         current.workspaceInstanceId === workspaceInstanceId &&
         !current.workspaceTransitioning &&
         current.searchQuery === query
@@ -4049,7 +4080,10 @@ export const useStore = create<State>()((set, get) => ({
   },
 
   openFileAt: async (path: string, line: number, column: number) => {
+    const workspaceInstanceId = get().workspaceInstanceId;
+    if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return;
     await get().openFile(path, baseName(path));
+    if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return;
     // Line/column reveal only works in the Monaco editor. For tabular, binary, or
     // too-large targets there's no editor to reveal in — open them but tell the
     // user rather than silently dropping the navigation.
@@ -4075,58 +4109,97 @@ export const useStore = create<State>()((set, get) => ({
   closePalette: () => set({ paletteOpen: false }),
 
   openAuditLog: async () => {
+    const request = auditLogRequests.begin();
     set({ auditOpen: true, auditLoading: true });
     try {
       const entries = await Agent.AuditLog(500);
-      set({ auditEntries: entries, auditLoading: false });
+      if (auditLogRequests.isCurrent(request) && get().auditOpen) {
+        set({ auditEntries: entries, auditLoading: false });
+      }
     } catch (e) {
-      set({ auditLoading: false });
-      get().setStatus(errMessage(e), "error");
+      if (auditLogRequests.isCurrent(request) && get().auditOpen) {
+        set({ auditLoading: false });
+        get().setStatus(errMessage(e), "error");
+      }
     }
   },
-  closeAuditLog: () => set({ auditOpen: false }),
+  closeAuditLog: () => {
+    auditLogRequests.invalidate();
+    set({ auditOpen: false, auditLoading: false });
+  },
 
   setPanelTab: (tab) => set({ panelTab: tab }),
 
   loadJobs: async () => {
+    const requested = get();
+    if (!requested.isOpen || requested.workspaceTransitioning) {
+      jobsListRequests.invalidate();
+      set({ jobs: [] });
+      return;
+    }
+    const workspaceInstanceId = requested.workspaceInstanceId;
+    const request = jobsListRequests.begin();
     try {
-      set({ jobs: await Jobs.ListJobs() });
+      const jobs = await Jobs.ListJobs();
+      const current = get();
+      if (
+        jobsListRequests.isCurrent(request) &&
+        current.workspaceInstanceId === workspaceInstanceId &&
+        current.isOpen &&
+        !current.workspaceTransitioning
+      ) {
+        set({ jobs });
+      }
     } catch {
       /* ledger unavailable — leave jobs as-is */
     }
   },
   cancelJob: async (id: string) => {
+    const workspaceInstanceId = get().workspaceInstanceId;
+    if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return;
     try {
       await Jobs.CancelJob(id);
-      await get().loadJobs();
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) await get().loadJobs();
     } catch (e) {
-      get().setStatus(errMessage(e), "error");
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) get().setStatus(errMessage(e), "error");
     }
   },
   clearFinishedJobs: async () => {
+    const workspaceInstanceId = get().workspaceInstanceId;
+    if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return;
     try {
       await Jobs.ClearFinished();
-      await get().loadJobs();
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) await get().loadJobs();
     } catch (e) {
-      get().setStatus(errMessage(e), "error");
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) get().setStatus(errMessage(e), "error");
     }
   },
 
   loadArtifacts: async () => {
     const workspaceInstanceId = get().workspaceInstanceId;
     if (!get().isOpen || get().workspaceTransitioning) {
+      artifactListRequests.invalidate();
       set({ artifacts: [], artifactsError: null });
       return;
     }
+    const request = artifactListRequests.begin();
     try {
       const artifacts = await Artifacts.ListArtifacts();
       const st = get();
-      if (st.workspaceInstanceId === workspaceInstanceId && !st.workspaceTransitioning) {
+      if (
+        artifactListRequests.isCurrent(request) &&
+        st.workspaceInstanceId === workspaceInstanceId &&
+        !st.workspaceTransitioning
+      ) {
         set({ artifacts, artifactsError: null });
       }
     } catch (e) {
       const st = get();
-      if (st.workspaceInstanceId === workspaceInstanceId && !st.workspaceTransitioning) {
+      if (
+        artifactListRequests.isCurrent(request) &&
+        st.workspaceInstanceId === workspaceInstanceId &&
+        !st.workspaceTransitioning
+      ) {
         const message = errMessage(e);
         // Never retain actionable rows from an earlier successful load after
         // the registry has failed integrity validation.
@@ -4136,23 +4209,29 @@ export const useStore = create<State>()((set, get) => ({
     }
   },
   setArtifactArchived: async (id: string, archived: boolean) => {
+    const workspaceInstanceId = get().workspaceInstanceId;
+    if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return;
     try {
       await Artifacts.SetArchived(id, archived);
-      await get().loadArtifacts();
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) await get().loadArtifacts();
     } catch (e) {
-      get().setStatus(errMessage(e), "error");
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) get().setStatus(errMessage(e), "error");
     }
   },
   deleteArtifact: async (id: string) => {
+    const workspaceInstanceId = get().workspaceInstanceId;
+    if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return;
     try {
       await Artifacts.DeleteArtifact(id);
-      await get().loadArtifacts();
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) await get().loadArtifacts();
     } catch (e) {
-      get().setStatus(errMessage(e), "error");
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) get().setStatus(errMessage(e), "error");
     }
   },
   // Register the active editor file as an artifact (manual, user-driven producer).
   saveActiveAsArtifact: async (kind: string) => {
+    const workspaceInstanceId = get().workspaceInstanceId;
+    if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return;
     const resource = activeResourceCapabilities(get().tabs, get().activePath);
     const tab = resource.resource;
     if (!resource.realFile || !resource.path || !tab) {
@@ -4174,10 +4253,13 @@ export const useStore = create<State>()((set, get) => ({
         stale: false,
         missing: false,
       });
+      if (!canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) return;
       await get().loadArtifacts();
-      get().setStatus(`Saved ${tab.name} as a ${kind} artifact`, "success");
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) {
+        get().setStatus(`Saved ${tab.name} as a ${kind} artifact`, "success");
+      }
     } catch (e) {
-      get().setStatus(errMessage(e), "error");
+      if (canReportWorkspaceDiagnostic(get(), workspaceInstanceId)) get().setStatus(errMessage(e), "error");
     }
   },
   runDiagnostics: async () => {

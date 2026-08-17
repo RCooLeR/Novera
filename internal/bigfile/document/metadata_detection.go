@@ -10,34 +10,43 @@ import (
 )
 
 func detectMetadata(path string, size int64, sample []byte) Metadata {
+	truncatedSample := int64(len(sample)) < size
 	enc := encodingx.DetectSample(sample)
-	binary, binaryConfidence := detectBinary(sample)
-	if strings.HasPrefix(enc.Name, "UTF-16") || strings.HasPrefix(enc.Name, "UTF-32") {
+	if truncatedSample {
+		enc = encodingx.DetectPrefixSample(sample)
+	}
+	binary, binaryConfidence := detectBinary(sample, truncatedSample)
+	if enc.RequiresConfirmation || strings.HasPrefix(enc.Name, "UTF-16") || strings.HasPrefix(enc.Name, "UTF-32") {
 		binary = false
 		binaryConfidence = enc.Confidence
 	}
-	decodedSample := encodingx.DecodeBytesBestEffort(enc.Name, sample)
+	decodedSample := ""
+	if !enc.RequiresConfirmation {
+		decodedSample = encodingx.DecodeBytesBestEffort(enc.Name, sample)
+	}
 
 	return Metadata{
-		Path:               path,
-		Size:               size,
-		Encoding:           enc.Name,
-		EncodingConfidence: enc.Confidence,
-		LineEnding:         detectLineEnding(decodedSample),
-		FileType:           detectFileType(path, decodedSample, binary),
-		Binary:             binary,
-		BinaryConfidence:   binaryConfidence,
+		Path:                         path,
+		Size:                         size,
+		Encoding:                     enc.Name,
+		EncodingConfidence:           enc.Confidence,
+		EncodingRequiresConfirmation: enc.RequiresConfirmation,
+		HasBOM:                       enc.HasBOM,
+		LineEnding:                   detectLineEnding(decodedSample),
+		FileType:                     detectFileType(path, decodedSample, binary),
+		Binary:                       binary,
+		BinaryConfidence:             binaryConfidence,
 	}
 }
 
-func detectBinary(sample []byte) (bool, float64) {
+func detectBinary(sample []byte, allowIncompleteUTF8Tail bool) (bool, float64) {
 	if len(sample) == 0 {
 		return false, 0
 	}
 	if bytes.IndexByte(sample, 0) >= 0 {
 		return true, 0.95
 	}
-	if utf8.Valid(sample) {
+	if utf8.Valid(sample) || (allowIncompleteUTF8Tail && encodingx.ValidUTF8Prefix(sample)) {
 		return false, 0.8
 	}
 

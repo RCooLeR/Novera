@@ -1,11 +1,13 @@
 package main
 
 import (
+	"hash/fnv"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -23,15 +25,16 @@ var reviewedBridgeMethods = map[string][]string{
 		"CreateArtifact", "DeleteArtifact", "GetArtifact", "ListArtifacts", "SetArchived",
 	},
 	"frontend/bindings/novera/internal/bigfile/fileservice.ts": {
-		"CancelJob", "CloseFile", "CsvAddColumnViaDialog", "CsvDedupeViaDialog",
+		"BeginSearchRequest", "CancelJob", "CancelSearch", "CloseFile", "CsvAddColumnViaDialog", "CsvDedupeViaDialog",
 		"CsvExportJSONLViaDialog", "CsvExportSQLiteViaDialog", "CsvExportXLSXViaDialog",
 		"CsvFilterViaDialog", "CsvInspect", "CsvMarkdownPreview", "CsvPreview", "CsvProfile",
 		"CsvProjectViaDialog", "CsvRedactViaDialog", "CsvSampleViaDialog", "CsvSchema",
 		"CsvToSQLConfigPreview", "CsvToSQLConfigViaDialog", "CsvToSQLPreview", "CsvToSQLViaDialog",
-		"DiscardEdits", "FileSize", "FindNext", "FindPrev", "GetCsvGrid", "GetDiffWindow",
-		"GetEditWindow", "GetHexWindow", "GetNextWindow", "GetPrevWindow", "GetStagedEdits",
-		"GetStagingState", "GetWindow", "HarvestMatchesViaDialog", "OpenFile", "OpenViaDialog",
-		"RefreshFile", "ResolveLine", "SaveCopy", "SaveCopyViaDialog", "SavePatch", "SearchAll",
+		"DiscardEdits", "FileSize", "FileState", "FindNextRequest", "FindPrevRequest",
+		"GetCsvGrid", "GetDiffWindow", "GetEditWindow", "GetHexWindow", "GetMatchWindow",
+		"GetNextWindow", "GetPrevWindow", "GetStagedEdits", "GetStagingState", "GetTailWindow",
+		"GetWindow", "HarvestMatchesViaDialog", "OpenFile", "OpenViaDialog", "PrepareEditSession",
+		"RefreshFile", "ReleaseCleanEditSession", "ResolveLine", "SaveCopyViaDialog", "SavePatch", "SearchAllRequest",
 		"SqlAnalyze", "SqlApplyPresetViaDialog", "SqlExtractDataViaDialog", "SqlExtractSchemaViaDialog",
 		"SqlExtractTableViaDialog", "SqlLint", "SqlListPresets", "SqlReplaceViaDialog",
 		"SqlReshapeInsertsViaDialog", "SqlSampleFixtureViaDialog", "SqlSchemaDiff",
@@ -127,7 +130,41 @@ func TestGeneratedBridgeMethodAllowlist(t *testing.T) {
 	}
 }
 
-// The alpha Wails runtime is intentionally quarantined to this reviewed set of
+// Wails identifies bound methods with the FNV-1a hash of their fully-qualified
+// Go name. Keep this check beside the allowlist so a manually refreshed
+// binding cannot silently dispatch an approved method name to the wrong RPC.
+func TestBigFileBindingMethodIDsMatchWailsFNV(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.FromSlash("frontend/bindings/novera/internal/bigfile/fileservice.ts")
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read big-file binding: %v", err)
+	}
+	callPattern := regexp.MustCompile(`(?m)^export function ([A-Za-z0-9_]+)\([^\r\n]*\)[^{]*\{\r?\n\s+return \$Call\.ByID\(([0-9]+)`)
+	matches := callPattern.FindAllSubmatch(source, -1)
+	if len(matches) != len(reviewedBridgeMethods[filepath.ToSlash(path)]) {
+		t.Fatalf(
+			"parse big-file binding IDs: found %d calls, want %d",
+			len(matches),
+			len(reviewedBridgeMethods[filepath.ToSlash(path)]),
+		)
+	}
+	for _, match := range matches {
+		method := string(match[1])
+		got, err := strconv.ParseUint(string(match[2]), 10, 32)
+		if err != nil {
+			t.Fatalf("parse %s binding ID: %v", method, err)
+		}
+		hash := fnv.New32a()
+		_, _ = hash.Write([]byte("novera/internal/bigfile.FileService." + method))
+		if want := uint64(hash.Sum32()); got != want {
+			t.Errorf("%s binding ID = %d, want %d", method, got, want)
+		}
+	}
+}
+
+// The pre-stable Wails runtime is intentionally quarantined to this reviewed set of
 // integration seams. New business packages should depend on Novera-owned
 // adapters instead of importing the runtime directly.
 func TestWailsImportBoundary(t *testing.T) {
@@ -157,8 +194,14 @@ func TestWailsImportBoundary(t *testing.T) {
 			return walkErr
 		}
 		if entry.IsDir() {
+			// Windows CI keeps GOTMPDIR inside the checkout. Go may remove a
+			// package's temporary directory while this parallel test is walking
+			// the tree, so never descend into any of those transient roots.
+			if strings.HasPrefix(entry.Name(), ".gotmp") {
+				return filepath.SkipDir
+			}
 			switch entry.Name() {
-			case ".git", ".gotmp", "bin", "col-review", "dist", "node_modules":
+			case ".git", "bin", "col-review", "dist", "node_modules":
 				return filepath.SkipDir
 			}
 			return nil

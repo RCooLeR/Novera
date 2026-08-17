@@ -3,23 +3,24 @@ package csv
 import (
 	"bufio"
 	"context"
-	stdcsv "encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math"
-	"os"
-	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"novera/internal/bigfile/fileio"
+	"novera/internal/bigfile/regularfile"
 )
 
 // JSONLOptions configures a CSV → JSON Lines export.
 type JSONLOptions struct {
-	Delimiter  rune
-	HasHeader  bool
-	NumberKeys bool // emit numeric-looking cells as JSON numbers, not strings
-	Progress   func(records int64)
+	Delimiter      rune
+	HasHeader      bool
+	NumberKeys     bool // emit numeric-looking cells as JSON numbers, not strings
+	MaxRecordBytes int64
+	Progress       func(records int64)
 }
 
 // ExportSummary reports a tabular export result.
@@ -30,53 +31,110 @@ type ExportSummary struct {
 
 // ExportJSONLFile streams a CSV to newline-delimited JSON (one object per data
 // row). Keys come from the header row, or col1, col2, … when there is none.
-func ExportJSONLFile(ctx context.Context, srcPath, dstPath string, opts JSONLOptions) (ExportSummary, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func normalizeJSONLOptions(opts JSONLOptions) (JSONLOptions, error) {
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}
-	if same, err := sameFilePath(srcPath, dstPath); err != nil {
-		return ExportSummary{}, err
-	} else if same {
-		return ExportSummary{}, errors.New("output path must be different from input path")
+	if err := ValidateDelimiter(opts.Delimiter); err != nil {
+		return opts, err
 	}
-	in, err := os.Open(srcPath)
+	limit, err := normalizeLogicalRecordLimit(opts.MaxRecordBytes)
 	if err != nil {
-		return ExportSummary{}, err
+		return opts, err
 	}
-	defer in.Close()
-	tmpPath := tempOutputPath(dstPath)
-	out, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
-	if err != nil {
-		return ExportSummary{}, err
-	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = out.Close()
-			_ = os.Remove(tmpPath)
-		}
-	}()
+	opts.MaxRecordBytes = limit
+	return opts, nil
+}
 
-	br := bufio.NewReader(in)
+// ValidateJSONLOptions validates export configuration without opening a source
+// or destination.
+func ValidateJSONLOptions(opts JSONLOptions) error {
+	_, err := normalizeJSONLOptions(opts)
+	return err
+}
+
+// ExportJSONL streams records between caller-owned streams. File publication
+// and source-generation validation remain the caller's responsibility.
+func ExportJSONL(ctx context.Context, r io.Reader, w io.Writer, opts JSONLOptions) (ExportSummary, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if r == nil {
+		return ExportSummary{}, errors.New("reader is required")
+	}
+	if w == nil {
+		return ExportSummary{}, errors.New("writer is required")
+	}
+	normalized, err := normalizeJSONLOptions(opts)
+	if err != nil {
+		return ExportSummary{}, err
+	}
+	opts = normalized
+
+	br := bufio.NewReader(r)
 	if err := skipInputBOM(br); err != nil {
 		return ExportSummary{}, err
 	}
-	reader := stdcsv.NewReader(br)
-	reader.Comma = opts.Delimiter
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-	reader.ReuseRecord = false
-
-	bw := bufio.NewWriterSize(out, 1<<20)
-	enc := json.NewEncoder(bw)
-	enc.SetEscapeHTML(false)
+	reader, err := newBoundedCSVReader(ctx, br, csvReaderConfig{
+		Delimiter: opts.Delimiter, MaxRecordBytes: opts.MaxRecordBytes,
+		FieldsPerRecord: 0, LazyQuotes: false,
+	})
+	if err != nil {
+		return ExportSummary{}, err
+	}
 
 	var sum ExportSummary
-	var header []string
-	first := true
+	var firstData []string
+	var keys []string
+	first, readErr := reader.Read()
+	if errors.Is(readErr, io.EOF) {
+		if opts.HasHeader {
+			return sum, errors.New("JSONL export requires the configured header row")
+		}
+	} else if readErr != nil {
+		return sum, readErr
+	} else {
+		sum.RecordsRead++
+		if opts.HasHeader {
+			keys, err = jsonlColumnKeys(first)
+		} else {
+			keys, err = jsonlColumnKeys(make([]string, len(first)))
+			if err == nil {
+				err = validateJSONLRecord(first, sum.RecordsRead)
+			}
+			firstData = first
+		}
+		if err != nil {
+			return sum, err
+		}
+	}
+
+	bw := bufio.NewWriterSize(w, 1<<20)
+	enc := json.NewEncoder(bw)
+	enc.SetEscapeHTML(false)
+	writeRecord := func(rec []string) error {
+		if err := validateJSONLRecord(rec, sum.RecordsRead); err != nil {
+			return err
+		}
+		obj := make(map[string]any, len(rec))
+		for i, cell := range rec {
+			if opts.NumberKeys {
+				obj[keys[i]] = maybeNumber(cell)
+			} else {
+				obj[keys[i]] = cell
+			}
+		}
+		if err := enc.Encode(obj); err != nil {
+			return err
+		}
+		sum.RecordsWritten++
+		return nil
+	}
+	if firstData != nil {
+		if err := writeRecord(firstData); err != nil {
+			return sum, err
+		}
+	}
 	for {
 		if err := contextErr(ctx); err != nil {
 			return sum, err
@@ -90,79 +148,134 @@ func ExportJSONLFile(ctx context.Context, srcPath, dstPath string, opts JSONLOpt
 		}
 		sum.RecordsRead++
 		reportEvery(opts.Progress, sum.RecordsRead, 50000)
-		if first && opts.HasHeader {
-			first = false
-			header = append([]string(nil), rec...)
-			continue
-		}
-		first = false
-		obj := make(map[string]any, len(rec))
-		for i, cell := range rec {
-			key := columnKey(header, i)
-			if opts.NumberKeys {
-				obj[key] = maybeNumber(cell)
-			} else {
-				obj[key] = cell
-			}
-		}
-		if err := enc.Encode(obj); err != nil {
+		if err := writeRecord(rec); err != nil {
 			return sum, err
 		}
-		sum.RecordsWritten++
 	}
 	if err := bw.Flush(); err != nil {
 		return sum, err
 	}
-	if err := out.Sync(); err != nil {
-		return sum, err
-	}
-	if err := out.Close(); err != nil {
-		return sum, err
-	}
-	if err := os.Rename(tmpPath, dstPath); err != nil {
-		return sum, err
-	}
-	cleanup = false
-	return sum, nil
+	return sum, contextErr(ctx)
 }
 
-func columnKey(header []string, i int) string {
-	if i < len(header) && strings.TrimSpace(header[i]) != "" {
-		return header[i]
+// ExportJSONLFile publishes only a complete output and refuses existing
+// destinations and aliases of the source.
+func ExportJSONLFile(ctx context.Context, srcPath, dstPath string, opts JSONLOptions) (_ ExportSummary, retErr error) {
+	normalized, err := normalizeJSONLOptions(opts)
+	if err != nil {
+		return ExportSummary{}, err
 	}
-	return fmt.Sprintf("col%d", i+1)
+	opts = normalized
+	input, err := regularfile.Open(srcPath)
+	if err != nil {
+		return ExportSummary{}, err
+	}
+	defer func() { retErr = errors.Join(retErr, input.Close()) }()
+	output, err := fileio.OpenAtomicOutput(dstPath, []string{srcPath}, 0o600)
+	if err != nil {
+		return ExportSummary{}, err
+	}
+	defer func() { retErr = errors.Join(retErr, output.Cleanup()) }()
+
+	summary, err := ExportJSONL(ctx, input, output, opts)
+	if err != nil {
+		return summary, err
+	}
+	if err := output.CommitContext(ctx); err != nil {
+		return summary, err
+	}
+	return summary, nil
 }
 
-// numericCell returns an int64/float64 for numeric-looking cells, else the
-// original string. Shared by JSONL/SQLite/xlsx typed export so they agree.
-//
-//   - leading-zero integers (zip codes, IDs) stay TEXT
-//   - integers that overflow int64 stay TEXT rather than becoming a lossy float
-//   - a float is only attempted when the token actually looks fractional
-//     ('.', 'e', 'E'); this also keeps "NaN"/"Inf"/"Infinity" as TEXT
-//   - non-finite results (e.g. "1e999" → +Inf) stay TEXT so encoders that can't
-//     represent them (encoding/json) never see them
-func numericCell(s string) any {
-	t := strings.TrimSpace(s)
-	if t == "" {
-		return s
-	}
-	if len(t) > 1 && t[0] == '0' && t[1] != '.' {
-		return s
-	}
-	if n, err := strconv.ParseInt(t, 10, 64); err == nil {
-		return n
-	}
-	if strings.ContainsAny(t, ".eE") {
-		if f, err := strconv.ParseFloat(t, 64); err == nil && !math.IsInf(f, 0) && !math.IsNaN(f) {
-			return f
+func jsonlColumnKeys(header []string) ([]string, error) {
+	keys := make([]string, len(header))
+	seen := make(map[string]int, len(header))
+	for i := range header {
+		key := header[i]
+		if !utf8.ValidString(key) {
+			return nil, fmt.Errorf("JSONL header column %d is not valid UTF-8", i+1)
 		}
+		if strings.TrimSpace(key) == "" {
+			key = fmt.Sprintf("col%d", i+1)
+		}
+		if previous, exists := seen[key]; exists {
+			return nil, fmt.Errorf("JSONL object key %q is derived by both CSV columns %d and %d", key, previous+1, i+1)
+		}
+		seen[key] = i
+		keys[i] = key
+	}
+	return keys, nil
+}
+
+func validateJSONLRecord(record []string, recordNumber int64) error {
+	for column, cell := range record {
+		if !utf8.ValidString(cell) {
+			return fmt.Errorf("CSV record %d column %d is not valid UTF-8 for JSONL export", recordNumber, column+1)
+		}
+	}
+	return nil
+}
+
+// maybeNumber emits only exact JSON-number tokens. json.Number preserves every
+// source digit and exponent byte without a float64 round trip. Tokens with a
+// leading plus, signed/unsigned leading zeros, whitespace, NaN, or Inf remain
+// strings because converting them would change their identity or JSON spelling.
+func maybeNumber(s string) any {
+	if isExactJSONNumber(s) {
+		return json.Number(s)
 	}
 	return s
 }
 
-// maybeNumber is the JSONL spelling of numericCell.
-func maybeNumber(s string) any { return numericCell(s) }
+func isExactJSONNumber(value string) bool {
+	if value == "" || strings.TrimSpace(value) != value {
+		return false
+	}
+	i := 0
+	if value[i] == '-' {
+		i++
+		if i == len(value) {
+			return false
+		}
+	}
+	if value[i] == '0' {
+		i++
+		if i < len(value) && value[i] >= '0' && value[i] <= '9' {
+			return false
+		}
+	} else {
+		if value[i] < '1' || value[i] > '9' {
+			return false
+		}
+		for i < len(value) && value[i] >= '0' && value[i] <= '9' {
+			i++
+		}
+	}
+	if i < len(value) && value[i] == '.' {
+		i++
+		start := i
+		for i < len(value) && value[i] >= '0' && value[i] <= '9' {
+			i++
+		}
+		if i == start {
+			return false
+		}
+	}
+	if i < len(value) && (value[i] == 'e' || value[i] == 'E') {
+		i++
+		if i < len(value) && (value[i] == '+' || value[i] == '-') {
+			i++
+		}
+		start := i
+		for i < len(value) && value[i] >= '0' && value[i] <= '9' {
+			i++
+		}
+		if i == start {
+			return false
+		}
+	}
+	return i == len(value)
+}
 
 // MarkdownPreview renders a small set of rows as a GitHub-flavored Markdown
 // table. Used for "copy as Markdown" of the current preview (bounded).

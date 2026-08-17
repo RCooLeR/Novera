@@ -5,13 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"novera/internal/bigfile/document"
 )
 
 const DefaultMaxInsertedBytes int64 = 8 * 1024 * 1024
 
-var ErrInsertedTextTooLarge = errors.New("inserted text exceeds the safe edit limit")
+var (
+	ErrInsertedTextTooLarge = errors.New("inserted text exceeds the per-edit safe limit")
+	ErrLiveInsertedLimit    = errors.New("live inserted text exceeds the session memory limit")
+	ErrPieceCountLimit      = errors.New("piece count exceeds the session memory limit")
+	ErrEditSizeOverflow     = errors.New("edited document size exceeds the supported range")
+)
 
 type Range struct {
 	Start int64
@@ -50,19 +56,26 @@ type piece struct {
 // single-owner staging structure; concurrent mutation/readers need an external
 // lock or immutable snapshot handoff.
 type PieceTable struct {
-	originalSize int64
-	size         int64
-	maxInserted  int64
-	added        []byte
-	pieces       []piece
-	modified     []Range
+	originalSize    int64
+	size            int64
+	maxEditText     int64
+	maxLiveInserted int64
+	maxPieces       int
+	added           []byte
+	pieces          []piece
+	modified        []Range
 }
 
 func NewPieceTable(size int64) *PieceTable {
+	if size < 0 {
+		size = 0
+	}
 	pt := &PieceTable{
-		originalSize: size,
-		size:         size,
-		maxInserted:  DefaultMaxInsertedBytes,
+		originalSize:    size,
+		size:            size,
+		maxEditText:     DefaultMaxInsertedBytes,
+		maxLiveInserted: DefaultMaxLiveInsertedBytes,
+		maxPieces:       DefaultMaxPieceCount,
 	}
 	if size > 0 {
 		pt.pieces = []piece{{source: pieceOriginal, start: 0, length: size}}
@@ -72,8 +85,15 @@ func NewPieceTable(size int64) *PieceTable {
 
 func (pt *PieceTable) SetMaxInsertedBytes(limit int64) {
 	if limit > 0 {
-		pt.maxInserted = limit
+		pt.maxEditText = limit
+		pt.maxLiveInserted = limit
 	}
+}
+
+func (pt *PieceTable) setLimits(limits Limits) {
+	pt.maxEditText = limits.MaxEditTextBytes
+	pt.maxLiveInserted = limits.MaxLiveInsertedBytes
+	pt.maxPieces = limits.MaxPieceCount
 }
 
 func (pt *PieceTable) Size() int64 {
@@ -94,25 +114,11 @@ func (pt *PieceTable) ModifiedRanges() []Range {
 }
 
 func (pt *PieceTable) Replace(start int64, end int64, text []byte) error {
-	if pt == nil {
-		return errors.New("piece table is required")
+	if err := pt.validateReplace(start, end, text); err != nil {
+		return err
 	}
-	if start < 0 || end < 0 {
-		return errors.New("edit offsets must be non-negative")
-	}
-	if end < start {
-		return errors.New("end offset must be greater than or equal to start offset")
-	}
-	if start > pt.size || end > pt.size {
-		return errors.New("edit range is beyond end of document")
-	}
-	if pt.maxInserted > 0 && int64(len(text)) > pt.maxInserted {
-		return ErrInsertedTextTooLarge
-	}
-
-	insertStart := int64(len(pt.added))
-	if len(text) > 0 {
-		pt.added = append(pt.added, text...)
+	if len(pt.pieces) > maxInt()-2 {
+		return ErrPieceCountLimit
 	}
 
 	newPieces := make([]piece, 0, len(pt.pieces)+2)
@@ -125,7 +131,7 @@ func (pt *PieceTable) Replace(start int64, end int64, text []byte) error {
 
 		if pieceEnd <= start || pieceStart >= end {
 			if !inserted && pieceStart >= end {
-				newPieces = appendInsertedPiece(newPieces, insertStart, int64(len(text)))
+				newPieces = appendInsertedPiece(newPieces, -1, int64(len(text)))
 				inserted = true
 			}
 			newPieces = append(newPieces, current)
@@ -141,7 +147,7 @@ func (pt *PieceTable) Replace(start int64, end int64, text []byte) error {
 			})
 		}
 		if !inserted {
-			newPieces = appendInsertedPiece(newPieces, insertStart, int64(len(text)))
+			newPieces = appendInsertedPiece(newPieces, -1, int64(len(text)))
 			inserted = true
 		}
 		if pieceEnd > end {
@@ -157,13 +163,118 @@ func (pt *PieceTable) Replace(start int64, end int64, text []byte) error {
 	}
 
 	if !inserted {
-		newPieces = appendInsertedPiece(newPieces, insertStart, int64(len(text)))
+		newPieces = appendInsertedPiece(newPieces, -1, int64(len(text)))
 	}
 
-	pt.pieces = normalizePieces(newPieces)
+	newPieces = normalizePieces(newPieces)
+	if pt.maxPieces > 0 && len(newPieces) > pt.maxPieces {
+		return ErrPieceCountLimit
+	}
+
+	var liveInserted int64
+	for _, current := range newPieces {
+		if current.source != pieceAdded {
+			continue
+		}
+		if current.length > math.MaxInt64-liveInserted {
+			return ErrLiveInsertedLimit
+		}
+		liveInserted += current.length
+	}
+	if pt.maxLiveInserted > 0 && liveInserted > pt.maxLiveInserted {
+		return ErrLiveInsertedLimit
+	}
+	if liveInserted > int64(maxInt()) {
+		return ErrLiveInsertedLimit
+	}
+
+	// Repack only added bytes that remain live. This gives the cumulative
+	// memory cap deterministic semantics and does not retain dead append data.
+	newAdded := make([]byte, 0, int(liveInserted))
+	for idx := range newPieces {
+		current := &newPieces[idx]
+		if current.source != pieceAdded {
+			continue
+		}
+		newStart := int64(len(newAdded))
+		if current.start == -1 {
+			newAdded = append(newAdded, text...)
+		} else {
+			from := current.start
+			to := from + current.length
+			if from < 0 || to < from || to > int64(len(pt.added)) {
+				return errors.New("piece table contains an invalid added-text range")
+			}
+			newAdded = append(newAdded, pt.added[from:to]...)
+		}
+		current.start = newStart
+	}
+	newPieces = normalizePieces(newPieces)
+	if pt.maxPieces > 0 && len(newPieces) > pt.maxPieces {
+		return ErrPieceCountLimit
+	}
+
+	pt.added = newAdded
+	pt.pieces = newPieces
 	pt.size = pt.size - (end - start) + int64(len(text))
 	pt.recordModifiedRange(start, max64(end, start+int64(len(text))))
 	return nil
+}
+
+func (pt *PieceTable) validateReplace(start int64, end int64, text []byte) error {
+	if pt == nil {
+		return errors.New("piece table is required")
+	}
+	if start < 0 || end < 0 {
+		return errors.New("edit offsets must be non-negative")
+	}
+	if end < start {
+		return errors.New("end offset must be greater than or equal to start offset")
+	}
+	if start > pt.size || end > pt.size {
+		return errors.New("edit range is beyond end of document")
+	}
+	if pt.maxEditText > 0 && int64(len(text)) > pt.maxEditText {
+		return ErrInsertedTextTooLarge
+	}
+	remaining := pt.size - (end - start)
+	if int64(len(text)) > math.MaxInt64-remaining {
+		return ErrEditSizeOverflow
+	}
+	return nil
+}
+
+func (pt *PieceTable) pieceCount() int {
+	if pt == nil {
+		return 0
+	}
+	return len(pt.pieces)
+}
+
+func (pt *PieceTable) liveInsertedBytes() int64 {
+	if pt == nil {
+		return 0
+	}
+	return int64(len(pt.added))
+}
+
+func (pt *PieceTable) residentBytes() (int64, error) {
+	if pt == nil {
+		return 0, nil
+	}
+	pieceBytes, err := checkedMemoryProduct(int64(len(pt.pieces)), pieceAccountingBytes)
+	if err != nil {
+		return 0, err
+	}
+	rangeBytes, err := checkedMemoryProduct(int64(len(pt.modified)), rangeAccountingBytes)
+	if err != nil {
+		return 0, err
+	}
+	return checkedMemorySum(
+		int64(len(pt.added)),
+		pieceBytes,
+		rangeBytes,
+	)
 }
 
 func (pt *PieceTable) WriteTo(ctx context.Context, src document.ReaderAtSize, dst syncWriter, opts WriteOptions) (int64, error) {
@@ -454,6 +565,156 @@ func (pt *PieceTable) sourceRangeToTransformedRange(start int64, end int64) (Ran
 		return Range{}, false
 	}
 	return out, true
+}
+
+// transformedRangeToSourceRange maps a transformed half-open range back to a
+// conservative source span. Boundaries inside added text map to the source gap
+// between adjacent original pieces; pure insertions map to a zero-width span.
+func (pt *PieceTable) transformedRangeToSourceRange(start int64, end int64) (Range, bool) {
+	if pt == nil || start < 0 || end < start || end > pt.size {
+		return Range{}, false
+	}
+	if start == end {
+		before, ok := pt.sourceImmediatelyBefore(start)
+		if !ok {
+			return Range{}, false
+		}
+		after, ok := pt.sourceImmediatelyAfter(start)
+		if !ok || after < before {
+			return Range{}, false
+		}
+		return Range{Start: before, End: after}, true
+	}
+	sourceStart, ok := pt.sourceBoundaryForRangeStart(start)
+	if !ok {
+		return Range{}, false
+	}
+	sourceEnd, ok := pt.sourceBoundaryForRangeEnd(end)
+	if !ok || sourceEnd < sourceStart {
+		return Range{}, false
+	}
+	return Range{Start: sourceStart, End: sourceEnd}, true
+}
+
+func (pt *PieceTable) sourceBoundaryForRangeStart(pos int64) (int64, bool) {
+	if pt == nil || pos < 0 || pos > pt.size {
+		return 0, false
+	}
+	if pos == pt.size {
+		return pt.originalSize, true
+	}
+	cursor := int64(0)
+	for idx, current := range pt.pieces {
+		pieceStart := cursor
+		pieceEnd := cursor + current.length
+		if pos >= pieceStart && pos < pieceEnd {
+			if current.source == pieceOriginal {
+				return current.start + (pos - pieceStart), true
+			}
+			before, _, ok := pt.sourceGapAroundAddedPiece(idx)
+			return before, ok
+		}
+		cursor = pieceEnd
+	}
+	return 0, false
+}
+
+func (pt *PieceTable) sourceBoundaryForRangeEnd(pos int64) (int64, bool) {
+	if pt == nil || pos < 0 || pos > pt.size {
+		return 0, false
+	}
+	if pos == 0 {
+		return 0, true
+	}
+	cursor := int64(0)
+	for idx, current := range pt.pieces {
+		pieceStart := cursor
+		pieceEnd := cursor + current.length
+		if pos > pieceStart && pos <= pieceEnd {
+			if current.source == pieceOriginal {
+				return current.start + (pos - pieceStart), true
+			}
+			_, after, ok := pt.sourceGapAroundAddedPiece(idx)
+			return after, ok
+		}
+		cursor = pieceEnd
+	}
+	return 0, false
+}
+
+func (pt *PieceTable) sourceGapAroundAddedPiece(index int) (int64, int64, bool) {
+	if pt == nil || index < 0 || index >= len(pt.pieces) || pt.pieces[index].source != pieceAdded {
+		return 0, 0, false
+	}
+	before := int64(0)
+	for idx := index - 1; idx >= 0; idx-- {
+		current := pt.pieces[idx]
+		if current.source == pieceOriginal {
+			before = current.start + current.length
+			break
+		}
+	}
+	after := pt.originalSize
+	for idx := index + 1; idx < len(pt.pieces); idx++ {
+		current := pt.pieces[idx]
+		if current.source == pieceOriginal {
+			after = current.start
+			break
+		}
+	}
+	if after < before {
+		return 0, 0, false
+	}
+	return before, after, true
+}
+
+func (pt *PieceTable) sourceImmediatelyBefore(pos int64) (int64, bool) {
+	if pt == nil || pos < 0 || pos > pt.size {
+		return 0, false
+	}
+	if pos == 0 {
+		return 0, true
+	}
+	cursor := int64(0)
+	for idx, current := range pt.pieces {
+		pieceStart := cursor
+		pieceEnd := cursor + current.length
+		if pos > pieceStart && pos <= pieceEnd {
+			if current.source == pieceOriginal {
+				return current.start + (pos - pieceStart), true
+			}
+			before, _, ok := pt.sourceGapAroundAddedPiece(idx)
+			return before, ok
+		}
+		cursor = pieceEnd
+	}
+	if pt.size == 0 {
+		return 0, true
+	}
+	return 0, false
+}
+
+func (pt *PieceTable) sourceImmediatelyAfter(pos int64) (int64, bool) {
+	if pt == nil || pos < 0 || pos > pt.size {
+		return 0, false
+	}
+	if pos == pt.size {
+		return pt.originalSize, true
+	}
+	cursor := int64(0)
+	for idx, current := range pt.pieces {
+		pieceStart := cursor
+		pieceEnd := cursor + current.length
+		if pos >= pieceStart && pos < pieceEnd {
+			if current.source == pieceOriginal {
+				return current.start + (pos - pieceStart), true
+			}
+			_, after, ok := pt.sourceGapAroundAddedPiece(idx)
+			return after, ok
+		}
+		cursor = pieceEnd
+	}
+	return 0, false
 }
 
 func (pt *PieceTable) transformedPositionForSourceOffset(sourceOffset int64) (int64, bool) {

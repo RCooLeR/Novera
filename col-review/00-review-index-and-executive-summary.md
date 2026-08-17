@@ -4,7 +4,7 @@ Review date: **2026-07-16**
 Reviewed revision: **`46c90bba35d41a74d356f8ade7cb55999499c9c7` (`v0.1.0`, `master`)**
 Review output: documentation only under `col-review/`; product source was not changed.
 
-Post-review implementation is tracked separately in [06-remediation-progress.md](06-remediation-progress.md) through [11-remediation-progress-batch-6.md](11-remediation-progress-batch-6.md). The original evidence and severity counts below remain the assessment of the reviewed revision. The latest conservative working-tree reconciliation is **89 remediated in cited surfaces, 51 partial/contained, and 2 open; release remains frozen**.
+Post-review implementation is tracked separately in [06-remediation-progress.md](06-remediation-progress.md) through [11-remediation-progress-batch-6.md](11-remediation-progress-batch-6.md). The later Quarry-derived large-file tool synchronization and focused re-review are recorded in [12-quarry-tool-sync.md](12-quarry-tool-sync.md). The 2026-08-17 full-tree review and dependency update are recorded in [13-full-project-review-2026-08-17.md](13-full-project-review-2026-08-17.md), with the immediate independent residual pass in [14-second-pass-hardening-2026-08-17.md](14-second-pass-hardening-2026-08-17.md). The original evidence and severity counts below remain the assessment of the reviewed revision; the later passes do not recompute those historical counts. The latest conservative historical reconciliation remains **89 remediated in cited surfaces, 51 partial/contained, and 2 open; release remains frozen**.
 
 ## Overall assessment
 
@@ -42,6 +42,9 @@ It is **not ready to be represented as data-safe or release-ready at the reviewe
 | [09-remediation-progress-batch-4.md](09-remediation-progress-batch-4.md) | Fourth remediation batch: Big File session/output/budget safety, DB schema/query bounds, Git/watcher/terminal/Jobs ordering, credential-state reconciliation, build identity, CI/build determinism, truthful large-file/release documentation, final integrated validation | — |
 | [10-remediation-progress-batch-5.md](10-remediation-progress-batch-5.md) | Fifth remediation batch and full re-review: exact approvals, dial/process ownership, SQL/CSV/chunk correctness, staged large-file lifecycle, accessibility/event typing, dependency/supply-chain gates, conservative 142-finding reconciliation, residual release blockers | — |
 | [11-remediation-progress-batch-6.md](11-remediation-progress-batch-6.md) | Sixth remediation batch and residual review: native close/conflict safety, Big File generations/jobs/recovery, workspace-bound table caches, exact bridge contract, performance/governance/SBOM evidence, 89/51/2 reconciliation | — |
+| [12-quarry-tool-sync.md](12-quarry-tool-sync.md) | Quarry-to-Novera large-file synchronization: exact source/session ownership, CSV and SQL parser/tool parity, serializer-aware WordPress dump replacement, focused validation, intentional divergences, and residual risks | — |
+| [13-full-project-review-2026-08-17.md](13-full-project-review-2026-08-17.md) | Full current-tree review: dependency/security updates, native/Agent/terminal lifecycle hardening, frontend request/approval fixes, validation evidence, and residual release gates | — |
+| [14-second-pass-hardening-2026-08-17.md](14-second-pass-hardening-2026-08-17.md) | Independent residual pass: LLM/watcher/session lifecycle, physical audit migration, bounded workspace/XLSX acquisition, frontend async ownership, malformed URL credentials, and AppImage pinning | — |
 
 The four audit documents contain **142 finding records**. This is not 142 independent bugs: architecture and delivery records deliberately describe root causes or gates that overlap concrete backend/frontend manifestations.
 

@@ -12,12 +12,13 @@ import (
 const DefaultColumnGuideMaxColumns = 500
 
 type ColumnGuideOptions struct {
-	Delimiter  rune
-	HasHeader  bool
-	MaxBytes   int64
-	MaxRows    int
-	MaxColumns int
-	NullValues []string
+	Delimiter      rune
+	HasHeader      bool
+	MaxBytes       int64
+	MaxRows        int
+	MaxRecordBytes int64
+	MaxColumns     int
+	NullValues     []string
 }
 
 type ColumnGuideReport struct {
@@ -118,11 +119,12 @@ func normalizeColumnGuideOptions(opts ColumnGuideOptions) (ColumnGuideOptions, S
 		opts.MaxColumns = DefaultColumnGuideMaxColumns
 	}
 	schemaOpts, err := normalizeSchemaOptions(SchemaOptions{
-		Delimiter:  opts.Delimiter,
-		HasHeader:  opts.HasHeader,
-		MaxBytes:   opts.MaxBytes,
-		MaxRows:    opts.MaxRows,
-		NullValues: opts.NullValues,
+		Delimiter:      opts.Delimiter,
+		HasHeader:      opts.HasHeader,
+		MaxBytes:       opts.MaxBytes,
+		MaxRows:        opts.MaxRows,
+		MaxRecordBytes: opts.MaxRecordBytes,
+		NullValues:     opts.NullValues,
 	})
 	if err != nil {
 		return opts, schemaOpts, err
@@ -130,6 +132,7 @@ func normalizeColumnGuideOptions(opts ColumnGuideOptions) (ColumnGuideOptions, S
 	opts.Delimiter = schemaOpts.Delimiter
 	opts.MaxBytes = schemaOpts.MaxBytes
 	opts.MaxRows = schemaOpts.MaxRows
+	opts.MaxRecordBytes = schemaOpts.MaxRecordBytes
 	return opts, schemaOpts, nil
 }
 

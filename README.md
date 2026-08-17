@@ -19,10 +19,10 @@ xterm.js, virtualized grids, and generated Wails bindings.
 - Big-file engine with bounded read/bridge windows for large files: a windowed
   viewer with true line numbers, in-file search, go-to
   line/offset/percent, hex view, follow-tail, and encoding detection; per-line
-  syntax highlighting (~45 languages + SQL) and rainbow-CSV grids; and editing
-  with journaled in-place patch or save-as-copy. Practical limits depend on the
-  operation, file structure, filesystem, memory, and free disk space. See
-  [Large-file engine](docs/big-files.md).
+  syntax highlighting (~45 languages + SQL) and rainbow-CSV grids; and
+  copy-only staged editing that leaves the source untouched. Practical limits
+  depend on the operation, file structure, filesystem, memory, and free disk
+  space. See [Large-file engine](docs/big-files.md).
 - Animated boot splash shown over startup until the backend finishes
   initializing.
 - Source Control panel with status, stage/unstage, commit, and changed-file
@@ -36,19 +36,21 @@ xterm.js, virtualized grids, and generated Wails bindings.
   integration, and configurable runtime limits for slow local models.
 - Data tools for CSV/TSV schema inference, CSV-to-SQL generation, SQL dump
   analysis, dump cleaning, table extraction, dump splitting, CSV projection,
-  and constant-column export — plus a streaming Data Tools suite (Tools menu)
-  for large CSV/SQL files: CSV filter/dedupe/sample/redact/profile and
-  JSONL/SQLite/XLSX export, and SQL lint/extract/split/reshape/preset cleanups
-  and regex harvesting.
+  and constant-column export — plus a bounded, streaming Data Tools suite
+  (Tools menu) for large CSV/SQL files. The large-file suite provides CSV
+  filter/dedupe/sample/redact/profile, JSONL and CSV-to-SQL export, SQL
+  lint/extract/split/reshape/sample, serialization-aware plain SQL
+  find/replace, and regex harvesting. Large-file SQLite/XLSX export, structural
+  cleanup presets, and regex SQL replacement remain disabled.
 - Database connections for SQLite/Postgres/MySQL with encrypted credentials,
   schema browsing, guarded read-only queries, and virtualized result grids.
 - Artifact registry for produced files and lineage/freshness tracking.
 
 ## Stack
 
-- Go 1.26.5
-- Wails v3.0.0-alpha.79
-- React 18 + TypeScript + Vite
+- Go 1.26.6
+- Wails v3.0.0-beta.9
+- React 19 + TypeScript 6 + Vite 8
 - Monaco editor
 - xterm.js
 - Zustand
@@ -56,12 +58,12 @@ xterm.js, virtualized grids, and generated Wails bindings.
 
 ## Prerequisites
 
-- Go 1.26.5
+- Go 1.26.6
 - Node 24.x
 - Wails v3 CLI:
 
 ```powershell
-go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha.79
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9
 ```
 
 ## Development
@@ -172,7 +174,7 @@ internal/
   artifacts/                    Artifact registry and freshness checks
   bigfile/                      Large-file engine with bounded read windows:
                                 read/edit, line index, piece-table edits,
-                                journaled in-place patch, hex, CSV/SQL tools
+                                copy-only publication, hex, CSV/SQL tools
   datatools/                    CSV and SQL dump inspection/transforms
   db/                           Database profiles, read-only query service
   gitsvc/                       Git status/diff/stage/commit service

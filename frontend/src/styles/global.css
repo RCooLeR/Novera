@@ -751,6 +751,7 @@ input, textarea { font-family: inherit; color: inherit; }
   color: var(--text-faint); user-select: none; overflow: hidden; white-space: nowrap;
 }
 .bfv__text { flex: 1; white-space: pre; overflow: hidden; user-select: text; padding-right: 16px; }
+.bfv__match { background: rgba(255, 205, 64, 0.48); color: inherit; border-radius: 2px; }
 .bfv__edge { color: var(--text-faint); font-size: var(--fs-xs); text-align: center; padding: 6px; user-select: none; }
 /* big-file editing */
 .bfv__editbanner { display: flex; align-items: center; gap: 8px; flex: none; padding: 6px 12px; background: rgba(210, 153, 34, 0.12); border-bottom: 1px solid var(--border-strong); font-size: var(--fs-sm); color: var(--amber); }
@@ -786,6 +787,7 @@ input, textarea { font-family: inherit; color: inherit; }
 .bigtools__lint b { color: var(--text); }
 .bigtools__err { margin-top: 10px; color: var(--red); font-size: var(--fs-sm); white-space: pre-wrap; }
 .bigtools__ok { margin-top: 10px; color: var(--green); font-size: var(--fs-sm); word-break: break-all; }
+.bigtools__hint { margin: 7px 0 0; color: var(--text-dim); font-size: var(--fs-xs); line-height: 1.45; }
 .bigtools .modal__actions { margin-top: 12px; align-items: center; }
 
 /* ---- about dialog ---- */

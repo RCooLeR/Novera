@@ -42,7 +42,7 @@ func TestRollbackJournal(t *testing.T) {
 	if _, err := j.rollback(ws, rbA.ID); err != nil {
 		t.Fatalf("rollback a: %v", err)
 	}
-	if got, _, _ := workspace.ReadRaw(ws, "a.txt"); string(got) != "original" {
+	if got, _, _ := workspace.ReadRawBounded(ws, "a.txt", rollbackMaxFileBytes); string(got) != "original" {
 		t.Errorf("a.txt not restored, got %q", got)
 	}
 
@@ -50,7 +50,7 @@ func TestRollbackJournal(t *testing.T) {
 	if _, err := j.rollback(ws, rbB.ID); err != nil {
 		t.Fatalf("rollback b: %v", err)
 	}
-	if _, existed, _ := workspace.ReadRaw(ws, "b.txt"); existed {
+	if _, existed, _ := workspace.ReadRawBounded(ws, "b.txt", rollbackMaxFileBytes); existed {
 		t.Error("b.txt should have been deleted by rollback")
 	}
 
@@ -88,10 +88,10 @@ func TestRollbackMoveRestoresBothEnds(t *testing.T) {
 	if _, err := j.rollback(ws, rb.ID); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	if got, _, _ := workspace.ReadRaw(ws, "from.txt"); string(got) != "payload" {
+	if got, _, _ := workspace.ReadRawBounded(ws, "from.txt", rollbackMaxFileBytes); string(got) != "payload" {
 		t.Errorf("from.txt not restored, got %q", got)
 	}
-	if got, _, _ := workspace.ReadRaw(ws, "to.txt"); string(got) != "victim" {
+	if got, _, _ := workspace.ReadRawBounded(ws, "to.txt", rollbackMaxFileBytes); string(got) != "victim" {
 		t.Errorf("to.txt (overwritten dest) not restored, got %q", got)
 	}
 }
@@ -148,5 +148,36 @@ func TestRollbackSnapshotRejectsDirectoryAndPublishesNothing(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Join(root, "tree")); err != nil || !info.IsDir() {
 		t.Fatalf("directory was damaged: info=%v err=%v", info, err)
+	}
+}
+
+func TestCopyFileToolRejectsOversizedSourceBeforeAllocationOrMutation(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "large.bin")
+	f, err := os.Create(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(rollbackMaxFileBytes + 1); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ws := workspace.New()
+	if _, err := ws.Open(root); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{ws: ws, rollback: newRollbackJournal()}
+	tools, _ := s.buildTools()
+	if _, err := tools["copy_file"].run(map[string]any{"from": "large.bin", "to": "copy.bin"}); !errors.Is(err, workspace.ErrRawTooLarge) {
+		t.Fatalf("copy_file error = %v, want ErrRawTooLarge", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "copy.bin")); !os.IsNotExist(err) {
+		t.Fatalf("copy_file published a destination after refusal: %v", err)
+	}
+	if len(s.rollback.list()) != 0 {
+		t.Fatal("failed copy must not publish an undo record")
 	}
 }

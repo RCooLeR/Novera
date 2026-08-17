@@ -27,6 +27,13 @@ const (
 	EventExit = "term:exit"
 )
 
+var (
+	errServiceStopping   = errors.New("terminal service is shutting down")
+	errStartDrainTimeout = errors.New("terminal shutdown timed out waiting for pending starts")
+)
+
+const terminalStartDrainTimeout = 5 * time.Second
+
 // RootProvider yields the active workspace root (used as the shell's cwd).
 type RootProvider interface{ Root() string }
 
@@ -51,10 +58,21 @@ type session struct {
 
 // Service is the bound Wails terminal service.
 type Service struct {
-	mu       sync.Mutex
-	roots    RootProvider
-	sessions map[string]*session
-	seq      int
+	mu            sync.Mutex
+	roots         RootProvider
+	sessions      map[string]*session
+	seq           int
+	stopping      bool
+	pendingStarts int
+	startsDrained chan struct{}
+
+	// startDrainTimeout is a test seam; zero uses the production deadline.
+	startDrainTimeout time.Duration
+
+	// beforeStartCommit is a deterministic test seam reached only after a
+	// process has started and its process tree is owned, but before it can be
+	// published in sessions. Production leaves it nil.
+	beforeStartCommit func(*session)
 }
 
 // New constructs the terminal service.
@@ -65,6 +83,14 @@ func New(roots RootProvider) *Service {
 // Start launches a shell on a new pseudo-terminal sized to cols×rows and returns
 // the session id. Output arrives via the "term:data" event.
 func (s *Service) Start(cols, rows int) (string, error) {
+	if err := s.reserveStart(); err != nil {
+		return "", err
+	}
+	// Keep the reservation until every failure path has closed the PTY and, if
+	// a process was created, killed and reaped it. ServiceShutdown waits on this
+	// count before returning.
+	defer s.finishStart()
+
 	root := strings.TrimSpace(s.root())
 	if root == "" {
 		return "", errors.New("open a folder before starting a terminal")
@@ -75,6 +101,9 @@ func (s *Service) Start(cols, rows int) (string, error) {
 	}
 	if !info.IsDir() {
 		return "", errors.New("terminal workspace root is not a directory")
+	}
+	if s.isStopping() {
+		return "", errServiceStopping
 	}
 	p, err := pty.New()
 	if err != nil {
@@ -88,6 +117,10 @@ func (s *Service) Start(cols, rows int) (string, error) {
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	prepareTerminalCommand(cmd)
+	if s.isStopping() {
+		_ = p.Close()
+		return "", errServiceStopping
+	}
 	if err := cmd.Start(); err != nil {
 		_ = p.Close()
 		return "", err
@@ -100,10 +133,22 @@ func (s *Service) Start(cols, rows int) (string, error) {
 		return "", fmt.Errorf("terminal process-tree ownership: %w", err)
 	}
 
+	sess := &session{pty: p, cmd: cmd, tree: tree}
+	if s.beforeStartCommit != nil {
+		s.beforeStartCommit(sess)
+	}
+
 	s.mu.Lock()
+	if s.stopping {
+		s.mu.Unlock()
+		// Shutdown won after cmd.Start. This session was never visible in the
+		// map, so Start itself must synchronously kill the tree and reap cmd.
+		s.shutdown(sess, false)
+		return "", errServiceStopping
+	}
 	s.seq++
 	id := fmt.Sprintf("term-%d", s.seq)
-	sess := &session{id: id, pty: p, cmd: cmd, tree: tree}
+	sess.id = id
 	s.sessions[id] = sess
 	s.mu.Unlock()
 
@@ -114,19 +159,82 @@ func (s *Service) Start(cols, rows int) (string, error) {
 	return id, nil
 }
 
-// ServiceShutdown tears down every live session when the app exits so child
-// shells and their PTYs aren't leaked.
+// ServiceShutdown permanently closes the start gate and tears down every live
+// session. It waits a bounded interval for already-reserved starts to finish
+// their own cleanup so an OS-level root/PTY/process call cannot hang application
+// shutdown indefinitely.
 func (s *Service) ServiceShutdown() error {
 	s.mu.Lock()
+	s.stopping = true
 	live := make([]*session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		live = append(live, sess)
+	}
+	drained := s.startsDrained
+	drainTimeout := s.startDrainTimeout
+	if drainTimeout <= 0 {
+		drainTimeout = terminalStartDrainTimeout
 	}
 	s.mu.Unlock()
 	for _, sess := range live {
 		s.shutdown(sess, false)
 	}
+	if drained == nil {
+		return nil
+	}
+	timer := time.NewTimer(drainTimeout)
+	defer timer.Stop()
+	select {
+	case <-drained:
+		return nil
+	case <-timer.C:
+		// Avoid reporting a timeout if the final cleanup raced the timer.
+		s.mu.Lock()
+		pending := s.pendingStarts
+		s.mu.Unlock()
+		if pending == 0 {
+			return nil
+		}
+		return fmt.Errorf("%w: %d start(s) still cleaning up", errStartDrainTimeout, pending)
+	}
+}
+
+// reserveStart establishes a shutdown-visible reservation before Start reads
+// the workspace root or allocates OS resources. Once stopping is set it is
+// permanent: a late renderer call can never reopen the service lifecycle.
+func (s *Service) reserveStart() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopping {
+		return errServiceStopping
+	}
+	if s.pendingStarts == 0 {
+		s.startsDrained = make(chan struct{})
+	}
+	s.pendingStarts++
 	return nil
+}
+
+func (s *Service) finishStart() {
+	s.mu.Lock()
+	s.pendingStarts--
+	if s.pendingStarts < 0 {
+		// This is an internal invariant, not renderer input. Keep a broken
+		// lifecycle from letting shutdown proceed under a false count.
+		s.mu.Unlock()
+		panic("terminal: negative pending start count")
+	}
+	if s.pendingStarts == 0 && s.startsDrained != nil {
+		close(s.startsDrained)
+		s.startsDrained = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) isStopping() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopping
 }
 
 // Write sends user input (keystrokes) to the session's shell. An unknown id is

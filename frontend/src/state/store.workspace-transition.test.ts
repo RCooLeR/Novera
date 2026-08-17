@@ -108,7 +108,6 @@ function dirtyLargeFileTab(): Tab {
 		savedContent: "",
 		largeFileSessionId: "f-large",
 		largeFileDirty: true,
-		largeFileInPlaceEligible: true,
 	};
 }
 
@@ -658,6 +657,34 @@ describe("workspace transition identity", () => {
 		expect(mocks.discardBigFileEdits).toHaveBeenCalledWith("f-large");
 		expect(useStore.getState().tabs).toEqual([]);
 		expect(useStore.getState().pendingTabClose).toBeNull();
+	});
+
+	it("keeps destructive large-file close ownership while discard is in flight", async () => {
+		installSuccessfulDefaults();
+		const tab = dirtyLargeFileTab();
+		installWorkspaceA(tab);
+		const discard = deferred<{ editCount: number }>();
+		mocks.discardBigFileEdits.mockReturnValue(discard.promise);
+
+		useStore.getState().requestCloseTab(tab.path);
+		const closing = useStore.getState().confirmCloseTab(false);
+		await vi.waitFor(() => expect(useStore.getState().pendingTabCloseSaving).toBe(true));
+
+		useStore.getState().cancelCloseTab();
+		expect(useStore.getState()).toMatchObject({
+			pendingTabClose: tab.path,
+			pendingTabCloseSaving: true,
+		});
+		expect(useStore.getState().tabs).toContainEqual(tab);
+
+		discard.resolve({ editCount: 0 });
+		await closing;
+
+		expect(useStore.getState().tabs).toEqual([]);
+		expect(useStore.getState()).toMatchObject({
+			pendingTabClose: null,
+			pendingTabCloseSaving: false,
+		});
 	});
 
   it("does not let an older deferred Abort cancel a newer Open intent", async () => {

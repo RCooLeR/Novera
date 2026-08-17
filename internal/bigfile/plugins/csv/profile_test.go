@@ -2,6 +2,7 @@ package csv
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -43,5 +44,40 @@ func TestProfileColumnsRaggedRows(t *testing.T) {
 	}
 	if rep.RaggedRows != 2 {
 		t.Fatalf("ragged = %d, want 2", rep.RaggedRows)
+	}
+}
+
+func TestProfileColumnsCapsAggregateDistinctStateAcrossWideInput(t *testing.T) {
+	rows := profileAggregateDistinctCap/3 + 2
+	var input strings.Builder
+	for row := 0; row < rows; row++ {
+		value := strconv.Itoa(row)
+		input.WriteString("a")
+		input.WriteString(value)
+		input.WriteString(",b")
+		input.WriteString(value)
+		input.WriteString(",c")
+		input.WriteString(value)
+		input.WriteByte('\n')
+	}
+
+	report, err := ProfileColumns(context.Background(), strings.NewReader(input.String()), SchemaOptions{
+		Delimiter: ',', MaxBytes: int64(input.Len()), MaxRows: rows,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Columns) != 3 {
+		t.Fatalf("columns = %d, want 3", len(report.Columns))
+	}
+	totalDistinct := 0
+	for index, column := range report.Columns {
+		totalDistinct += column.Distinct
+		if !column.DistinctCapped {
+			t.Fatalf("column %d was not marked capped: %+v", index, column)
+		}
+	}
+	if totalDistinct != profileAggregateDistinctCap {
+		t.Fatalf("retained distinct entries = %d, want %d", totalDistinct, profileAggregateDistinctCap)
 	}
 }

@@ -16,7 +16,7 @@
 #   docker run --rm -v $(pwd):/app wails-cross windows arm64
 
 ARG TARGETPLATFORM
-FROM --platform=${TARGETPLATFORM} golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651
+FROM --platform=${TARGETPLATFORM} golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
 
 ARG TARGETARCH
 ARG TARGETPLATFORM
@@ -31,20 +31,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Zig - automatically selects correct binary for host architecture
-ARG ZIG_VERSION=0.14.0
-ARG ZIG_SHA256_AMD64=473ec26806133cf4d1918caf1a410f8403a13d979726a9045b421b685031a982
-ARG ZIG_SHA256_ARM64=ab64e3ea277f6fc5f3d723dcd95d9ce1ab282c8ed0f431b4de880d30df891e4f
+ARG ZIG_VERSION=0.14.1
+ARG ZIG_SHA256_AMD64=24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c
+ARG ZIG_SHA256_ARM64=f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b
 RUN case "${TARGETARCH}" in \
         amd64) ZIG_ARCH=x86_64; ZIG_SHA256="${ZIG_SHA256_AMD64}" ;; \
         arm64) ZIG_ARCH=aarch64; ZIG_SHA256="${ZIG_SHA256_ARM64}" ;; \
         *) echo "unsupported Zig host architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac \
     && curl --fail --location --retry 3 --output /tmp/zig.tar.xz \
-        "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" \
+        "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" \
     && echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum --check --strict - \
     && tar -xJf /tmp/zig.tar.xz -C /opt \
     && rm /tmp/zig.tar.xz \
-    && ln -s /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig
+    && ln -s /opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
 
 # Download macOS SDK (required for darwin targets)
 ARG MACOS_SDK_VERSION=14.5

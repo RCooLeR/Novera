@@ -17,11 +17,28 @@ import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Cr
 import * as $models from "./models.js";
 
 /**
- * CancelJob cancels the active long transform, if any. The transform aborts and
- * removes its partial output.
+ * BeginSearchRequest reserves one bounded, server-owned cancellation identity.
+ * The reservation expires after searchTimeout even if the frontend abandons it.
+ * Call exactly one *Request method or CancelSearch for each returned ID.
  */
-export function CancelJob(): $CancellablePromise<void> {
-    return $Call.ByID(2867360005);
+export function BeginSearchRequest(fileID: string): $CancellablePromise<string> {
+    return $Call.ByID(3683175542, fileID);
+}
+
+/**
+ * CancelJob cancels exactly the active job represented by jobID. A stale ID is
+ * rejected and cannot cancel a newer operation.
+ */
+export function CancelJob(jobID: string): $CancellablePromise<void> {
+    return $Call.ByID(2867360005, jobID);
+}
+
+/**
+ * CancelSearch cancels only the exact active ID. IDs are monotonically
+ * generated and never reused, so a delayed cancellation cannot hit newer work.
+ */
+export function CancelSearch(requestID: string): $CancellablePromise<boolean> {
+    return $Call.ByID(3389175066, requestID);
 }
 
 /**
@@ -35,8 +52,8 @@ export function CloseFile(fileID: string): $CancellablePromise<void> {
  * CsvAddColumnViaDialog writes a new CSV with a constant column appended to every
  * row (including the header, which becomes the value).
  */
-export function CsvAddColumnViaDialog(fileID: string, delimiter: string, columnCount: number, value: string): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(1110146483, fileID, delimiter, columnCount, value).then(($result: any) => {
+export function CsvAddColumnViaDialog(fileID: string, sourceGeneration: number, delimiter: string, columnCount: number, value: string): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(1110146483, fileID, sourceGeneration, delimiter, columnCount, value).then(($result: any) => {
         return $$createType0($result);
     });
 }
@@ -45,8 +62,8 @@ export function CsvAddColumnViaDialog(fileID: string, delimiter: string, columnC
  * CsvDedupeViaDialog writes a new CSV dropping duplicate rows — by a key column
  * (keyColumn>=0) or the whole row (keyColumn<0). First occurrence wins.
  */
-export function CsvDedupeViaDialog(fileID: string, delimiter: string, hasHeader: boolean, keyColumn: number): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(1348673393, fileID, delimiter, hasHeader, keyColumn).then(($result: any) => {
+export function CsvDedupeViaDialog(fileID: string, sourceGeneration: number, delimiter: string, hasHeader: boolean, keyColumn: number): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(1348673393, fileID, sourceGeneration, delimiter, hasHeader, keyColumn).then(($result: any) => {
         return $$createType0($result);
     });
 }
@@ -54,26 +71,28 @@ export function CsvDedupeViaDialog(fileID: string, delimiter: string, hasHeader:
 /**
  * CsvExportJSONLViaDialog streams the CSV to newline-delimited JSON.
  */
-export function CsvExportJSONLViaDialog(fileID: string, delimiter: string, hasHeader: boolean, numberKeys: boolean): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(724714548, fileID, delimiter, hasHeader, numberKeys).then(($result: any) => {
+export function CsvExportJSONLViaDialog(fileID: string, sourceGeneration: number, delimiter: string, hasHeader: boolean, numberKeys: boolean): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(724714548, fileID, sourceGeneration, delimiter, hasHeader, numberKeys).then(($result: any) => {
         return $$createType0($result);
     });
 }
 
 /**
- * CsvExportSQLiteViaDialog streams the CSV into a new SQLite .db file.
+ * CsvExportSQLiteViaDialog is disabled until SQLite publication can provide
+ * the same atomic, no-overwrite guarantees as the other artifact transforms.
  */
-export function CsvExportSQLiteViaDialog(fileID: string, delimiter: string, hasHeader: boolean, tableName: string, typedCells: boolean): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(1436630870, fileID, delimiter, hasHeader, tableName, typedCells).then(($result: any) => {
+export function CsvExportSQLiteViaDialog(fileID: string, sourceGeneration: number, delimiter: string, hasHeader: boolean, tableName: string, typedCells: boolean): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(1436630870, fileID, sourceGeneration, delimiter, hasHeader, tableName, typedCells).then(($result: any) => {
         return $$createType0($result);
     });
 }
 
 /**
- * CsvExportXLSXViaDialog streams the CSV into a new .xlsx workbook.
+ * CsvExportXLSXViaDialog is disabled until workbook generation can use secure,
+ * exclusively owned scratch storage.
  */
-export function CsvExportXLSXViaDialog(fileID: string, delimiter: string, hasHeader: boolean, sheetName: string, typedCells: boolean): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(2750541179, fileID, delimiter, hasHeader, sheetName, typedCells).then(($result: any) => {
+export function CsvExportXLSXViaDialog(fileID: string, sourceGeneration: number, delimiter: string, hasHeader: boolean, sheetName: string, typedCells: boolean): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(2750541179, fileID, sourceGeneration, delimiter, hasHeader, sheetName, typedCells).then(($result: any) => {
         return $$createType0($result);
     });
 }
@@ -82,8 +101,8 @@ export function CsvExportXLSXViaDialog(fileID: string, delimiter: string, hasHea
  * CsvFilterViaDialog writes a new CSV keeping only rows where the chosen column
  * matches op/value (eq, ne, contains, gt, lt, empty, nonempty). Source untouched.
  */
-export function CsvFilterViaDialog(fileID: string, delimiter: string, hasHeader: boolean, column: number, op: string, value: string, negate: boolean): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(2426919946, fileID, delimiter, hasHeader, column, op, value, negate).then(($result: any) => {
+export function CsvFilterViaDialog(fileID: string, sourceGeneration: number, delimiter: string, hasHeader: boolean, column: number, op: string, value: string, negate: boolean): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(2426919946, fileID, sourceGeneration, delimiter, hasHeader, column, op, value, negate).then(($result: any) => {
         return $$createType0($result);
     });
 }
@@ -101,13 +120,15 @@ export function CsvInspect(fileID: string): $CancellablePromise<$models.CsvInspe
 /**
  * CsvMarkdownPreview returns the current preview as a Markdown table (for copy).
  */
-export function CsvMarkdownPreview(fileID: string, delimiter: string, hasHeader: boolean, maxRows: number): $CancellablePromise<string> {
-    return $Call.ByID(403569035, fileID, delimiter, hasHeader, maxRows);
+export function CsvMarkdownPreview(fileID: string, delimiter: string, hasHeader: boolean, maxRows: number): $CancellablePromise<$models.CsvTextPreviewResult> {
+    return $Call.ByID(403569035, fileID, delimiter, hasHeader, maxRows).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 export function CsvPreview(fileID: string, delimiter: string, hasHeader: boolean, maxRows: number): $CancellablePromise<$models.CsvPreviewResult> {
     return $Call.ByID(1308065476, fileID, delimiter, hasHeader, maxRows).then(($result: any) => {
-        return $$createType2($result);
+        return $$createType3($result);
     });
 }
 
@@ -117,7 +138,7 @@ export function CsvPreview(fileID: string, delimiter: string, hasHeader: boolean
  */
 export function CsvProfile(fileID: string, delimiter: string, hasHeader: boolean): $CancellablePromise<$models.CsvProfileResult> {
     return $Call.ByID(3488062821, fileID, delimiter, hasHeader).then(($result: any) => {
-        return $$createType3($result);
+        return $$createType4($result);
     });
 }
 
@@ -125,8 +146,8 @@ export function CsvProfile(fileID: string, delimiter: string, hasHeader: boolean
  * CsvProjectViaDialog writes a new CSV keeping only keepIndices (0-based) in the
  * given order — used for drop-column and reorder.
  */
-export function CsvProjectViaDialog(fileID: string, delimiter: string, keepIndices: number[]): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(165873055, fileID, delimiter, keepIndices).then(($result: any) => {
+export function CsvProjectViaDialog(fileID: string, sourceGeneration: number, delimiter: string, keepIndices: number[]): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(165873055, fileID, sourceGeneration, delimiter, keepIndices).then(($result: any) => {
         return $$createType0($result);
     });
 }
@@ -135,8 +156,8 @@ export function CsvProjectViaDialog(fileID: string, delimiter: string, keepIndic
  * CsvRedactViaDialog writes an anonymized copy of the CSV with the chosen columns
  * masked, for sharing a dataset without leaking PII. Source is never modified.
  */
-export function CsvRedactViaDialog(fileID: string, delimiter: string, hasHeader: boolean, columns: $models.CsvRedactColumn[], replacement: string): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(3188274975, fileID, delimiter, hasHeader, columns, replacement).then(($result: any) => {
+export function CsvRedactViaDialog(fileID: string, sourceGeneration: number, delimiter: string, hasHeader: boolean, columns: $models.CsvRedactColumn[], replacement: string): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(3188274975, fileID, sourceGeneration, delimiter, hasHeader, columns, replacement).then(($result: any) => {
         return $$createType0($result);
     });
 }
@@ -145,31 +166,33 @@ export function CsvRedactViaDialog(fileID: string, delimiter: string, hasHeader:
  * CsvSampleViaDialog writes a new CSV keeping every Nth data row (header kept),
  * for shrinking a huge dump to a representative slice.
  */
-export function CsvSampleViaDialog(fileID: string, delimiter: string, hasHeader: boolean, everyN: number): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(3744408314, fileID, delimiter, hasHeader, everyN).then(($result: any) => {
+export function CsvSampleViaDialog(fileID: string, sourceGeneration: number, delimiter: string, hasHeader: boolean, everyN: number): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(3744408314, fileID, sourceGeneration, delimiter, hasHeader, everyN).then(($result: any) => {
         return $$createType0($result);
     });
 }
 
 export function CsvSchema(fileID: string, delimiter: string, hasHeader: boolean): $CancellablePromise<$models.CsvSchemaResult> {
     return $Call.ByID(3148189243, fileID, delimiter, hasHeader).then(($result: any) => {
-        return $$createType4($result);
+        return $$createType5($result);
     });
 }
 
 /**
  * CsvToSQLConfigPreview returns a short sample of the SQL for a full config.
  */
-export function CsvToSQLConfigPreview(fileID: string, cfg: $models.CsvSqlConfig): $CancellablePromise<string> {
-    return $Call.ByID(710905099, fileID, cfg);
+export function CsvToSQLConfigPreview(fileID: string, cfg: $models.CsvSqlConfig): $CancellablePromise<$models.CsvTextPreviewResult> {
+    return $Call.ByID(710905099, fileID, cfg).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
  * CsvToSQLConfigViaDialog streams the whole CSV to a .sql file using a full
  * column-mapping config (select/rename/type, insert mode, batch, null, policy).
  */
-export function CsvToSQLConfigViaDialog(fileID: string, cfg: $models.CsvSqlConfig): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(3756880875, fileID, cfg).then(($result: any) => {
+export function CsvToSQLConfigViaDialog(fileID: string, sourceGeneration: number, cfg: $models.CsvSqlConfig): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(3756880875, fileID, sourceGeneration, cfg).then(($result: any) => {
         return $$createType0($result);
     });
 }
@@ -177,15 +200,17 @@ export function CsvToSQLConfigViaDialog(fileID: string, cfg: $models.CsvSqlConfi
 /**
  * CsvToSQLPreview returns a short sample of the generated SQL.
  */
-export function CsvToSQLPreview(fileID: string, delimiter: string, tableName: string, hasHeader: boolean, includeCreate: boolean): $CancellablePromise<string> {
-    return $Call.ByID(3439646149, fileID, delimiter, tableName, hasHeader, includeCreate);
+export function CsvToSQLPreview(fileID: string, delimiter: string, tableName: string, hasHeader: boolean, includeCreate: boolean): $CancellablePromise<$models.CsvTextPreviewResult> {
+    return $Call.ByID(3439646149, fileID, delimiter, tableName, hasHeader, includeCreate).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
  * CsvToSQLViaDialog streams the whole CSV to a .sql file of INSERTs.
  */
-export function CsvToSQLViaDialog(fileID: string, delimiter: string, tableName: string, hasHeader: boolean, includeCreate: boolean): $CancellablePromise<$models.TransformResult> {
-    return $Call.ByID(428322317, fileID, delimiter, tableName, hasHeader, includeCreate).then(($result: any) => {
+export function CsvToSQLViaDialog(fileID: string, sourceGeneration: number, delimiter: string, tableName: string, hasHeader: boolean, includeCreate: boolean): $CancellablePromise<$models.TransformResult> {
+    return $Call.ByID(428322317, fileID, sourceGeneration, delimiter, tableName, hasHeader, includeCreate).then(($result: any) => {
         return $$createType0($result);
     });
 }
@@ -195,7 +220,7 @@ export function CsvToSQLViaDialog(fileID: string, delimiter: string, tableName: 
  */
 export function DiscardEdits(fileID: string): $CancellablePromise<$models.StagingState> {
     return $Call.ByID(3793258711, fileID).then(($result: any) => {
-        return $$createType5($result);
+        return $$createType6($result);
     });
 }
 
@@ -208,31 +233,37 @@ export function FileSize(fileID: string): $CancellablePromise<number> {
 }
 
 /**
- * FindNext finds the first match at/after fromByte (single streaming pass).
+ * FileState returns the pathname's current state and whether it still names
+ * the exact retained descriptor. This detects rename-and-recreate rotation,
+ * including replacements with the same size and modification time.
  */
-export function FindNext(fileID: string, query: string, fromByte: number, regex: boolean, caseSensitive: boolean, wholeWord: boolean): $CancellablePromise<$models.SearchHit> {
-    return $Call.ByID(814300810, fileID, query, fromByte, regex, caseSensitive, wholeWord).then(($result: any) => {
-        return $$createType6($result);
+export function FileState(fileID: string): $CancellablePromise<$models.FileStateResult> {
+    return $Call.ByID(907552787, fileID).then(($result: any) => {
+        return $$createType7($result);
+    });
+}
+
+export function FindNextRequest(requestID: string, query: string, fromByte: number, regex: boolean, caseSensitive: boolean, wholeWord: boolean): $CancellablePromise<$models.SearchHit> {
+    return $Call.ByID(1229834119, requestID, query, fromByte, regex, caseSensitive, wholeWord).then(($result: any) => {
+        return $$createType8($result);
+    });
+}
+
+export function FindPrevRequest(requestID: string, query: string, beforeByte: number, regex: boolean, caseSensitive: boolean, wholeWord: boolean): $CancellablePromise<$models.SearchHit> {
+    return $Call.ByID(289346419, requestID, query, beforeByte, regex, caseSensitive, wholeWord).then(($result: any) => {
+        return $$createType8($result);
     });
 }
 
 /**
- * FindPrev finds the first match before beforeByte (streaming backward pass).
- */
-export function FindPrev(fileID: string, query: string, beforeByte: number, regex: boolean, caseSensitive: boolean, wholeWord: boolean): $CancellablePromise<$models.SearchHit> {
-    return $Call.ByID(1897676702, fileID, query, beforeByte, regex, caseSensitive, wholeWord).then(($result: any) => {
-        return $$createType6($result);
-    });
-}
-
-/**
- * GetCsvGrid parses a bounded, line-aligned byte window into CSV rows for the
- * grid view. Rows are returned as data (no header special-casing); the frontend
- * supplies column labels from the schema. Scrolling loads adjacent windows.
+ * GetCsvGrid parses a bounded raw-byte window into complete logical CSV
+ * records. startByte must be zero or a NextByte returned by an earlier call for
+ * the same file generation and delimiter. Physical newlines inside quoted
+ * fields never become cursors.
  */
 export function GetCsvGrid(fileID: string, delimiter: string, startByte: number, maxBytes: number): $CancellablePromise<$models.CsvGridResult> {
     return $Call.ByID(885416396, fileID, delimiter, startByte, maxBytes).then(($result: any) => {
-        return $$createType7($result);
+        return $$createType9($result);
     });
 }
 
@@ -242,7 +273,7 @@ export function GetCsvGrid(fileID: string, delimiter: string, startByte: number,
  */
 export function GetDiffWindow(fileID: string, startByte: number, maxBytes: number): $CancellablePromise<$models.DiffWindow> {
     return $Call.ByID(2293174843, fileID, startByte, maxBytes).then(($result: any) => {
-        return $$createType8($result);
+        return $$createType10($result);
     });
 }
 
@@ -253,7 +284,7 @@ export function GetDiffWindow(fileID: string, startByte: number, maxBytes: numbe
  */
 export function GetEditWindow(fileID: string, startByte: number, maxBytes: number): $CancellablePromise<$models.Window> {
     return $Call.ByID(2343628796, fileID, startByte, maxBytes).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
@@ -264,7 +295,17 @@ export function GetEditWindow(fileID: string, startByte: number, maxBytes: numbe
  */
 export function GetHexWindow(fileID: string, startByte: number, maxBytes: number): $CancellablePromise<$models.HexWindow> {
     return $Call.ByID(914678545, fileID, startByte, maxBytes).then(($result: any) => {
-        return $$createType10($result);
+        return $$createType12($result);
+    });
+}
+
+/**
+ * GetMatchWindow returns a bounded decoded window that contains hitOffset and,
+ * when the complete hit is displayable, its exact JavaScript UTF-16 span.
+ */
+export function GetMatchWindow(fileID: string, hitOffset: number, hitLength: number, maxBytes: number): $CancellablePromise<$models.MatchWindow> {
+    return $Call.ByID(2704531653, fileID, hitOffset, hitLength, maxBytes).then(($result: any) => {
+        return $$createType13($result);
     });
 }
 
@@ -273,17 +314,17 @@ export function GetHexWindow(fileID: string, startByte: number, maxBytes: number
  */
 export function GetNextWindow(fileID: string, fromByte: number, maxBytes: number): $CancellablePromise<$models.Window> {
     return $Call.ByID(3363176709, fileID, fromByte, maxBytes).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
 /**
- * GetPrevWindow returns the window immediately preceding currentStart, aligned
- * to a line boundary so it reads cleanly.
+ * GetPrevWindow returns the bounded decoded window immediately preceding
+ * currentStart. Its NextByte is exactly currentStart.
  */
 export function GetPrevWindow(fileID: string, currentStart: number, maxBytes: number): $CancellablePromise<$models.Window> {
     return $Call.ByID(1960744817, fileID, currentStart, maxBytes).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
@@ -292,7 +333,7 @@ export function GetPrevWindow(fileID: string, currentStart: number, maxBytes: nu
  */
 export function GetStagedEdits(fileID: string): $CancellablePromise<$models.StagedEdit[]> {
     return $Call.ByID(1432012583, fileID).then(($result: any) => {
-        return $$createType12($result);
+        return $$createType15($result);
     });
 }
 
@@ -301,24 +342,31 @@ export function GetStagedEdits(fileID: string): $CancellablePromise<$models.Stag
  */
 export function GetStagingState(fileID: string): $CancellablePromise<$models.StagingState> {
     return $Call.ByID(2175041062, fileID).then(($result: any) => {
-        return $$createType5($result);
+        return $$createType6($result);
     });
 }
 
 /**
- * GetWindow returns a window beginning at startByte (clamped, aligned by the
- * document's own line handling).
+ * GetTailWindow returns the final non-empty bounded window ending at the
+ * retained generation's EOF. An empty source honestly returns an empty
+ * BOF/EOF window.
+ */
+export function GetTailWindow(fileID: string, maxBytes: number): $CancellablePromise<$models.Window> {
+    return $Call.ByID(4038850250, fileID, maxBytes).then(($result: any) => {
+        return $$createType11($result);
+    });
+}
+
+/**
+ * GetWindow returns a bounded, decoded window beginning at the line that
+ * contains startByte.
  */
 export function GetWindow(fileID: string, startByte: number, maxBytes: number): $CancellablePromise<$models.Window> {
     return $Call.ByID(2814923928, fileID, startByte, maxBytes).then(($result: any) => {
-        return $$createType9($result);
+        return $$createType11($result);
     });
 }
 
-/**
- * HarvestMatchesViaDialog runs a regex over the whole file and writes every
- * match, one per line, to a chosen file — e.g. extract every email or id.
- */
 export function HarvestMatchesViaDialog(fileID: string, pattern: string, caseInsensitive: boolean): $CancellablePromise<$models.TransformResult> {
     return $Call.ByID(4019629850, fileID, pattern, caseInsensitive).then(($result: any) => {
         return $$createType0($result);
@@ -332,7 +380,7 @@ export function HarvestMatchesViaDialog(fileID: string, pattern: string, caseIns
  */
 export function OpenFile(path: string): $CancellablePromise<$models.FileMeta> {
     return $Call.ByID(382069238, path).then(($result: any) => {
-        return $$createType13($result);
+        return $$createType16($result);
     });
 }
 
@@ -342,7 +390,18 @@ export function OpenFile(path: string): $CancellablePromise<$models.FileMeta> {
  */
 export function OpenViaDialog(): $CancellablePromise<$models.FileMeta> {
     return $Call.ByID(2517771520).then(($result: any) => {
-        return $$createType13($result);
+        return $$createType16($result);
+    });
+}
+
+/**
+ * PrepareEditSession performs the one exact full-source fingerprint as a
+ * cancellable, progress-reporting job before the frontend enables edit mode.
+ * StageEdit never performs this whole-file pass.
+ */
+export function PrepareEditSession(fileID: string): $CancellablePromise<$models.StagingState> {
+    return $Call.ByID(4079740945, fileID).then(($result: any) => {
+        return $$createType6($result);
     });
 }
 
@@ -354,25 +413,28 @@ export function OpenViaDialog(): $CancellablePromise<$models.FileMeta> {
  */
 export function RefreshFile(fileID: string): $CancellablePromise<$models.FileMeta> {
     return $Call.ByID(1000304125, fileID).then(($result: any) => {
-        return $$createType13($result);
+        return $$createType16($result);
     });
 }
 
 /**
- * ResolveLine maps a 1-based line number to a byte offset (exact if the index
- * is built, otherwise approximate). Returns 0 when the line can't be resolved.
+ * ReleaseCleanEditSession drops the retained exact fingerprint only when no
+ * staged edits exist. Dirty state is never discarded implicitly.
  */
-export function ResolveLine(fileID: string, line: number): $CancellablePromise<number> {
-    return $Call.ByID(4183015142, fileID, line);
+export function ReleaseCleanEditSession(fileID: string): $CancellablePromise<$models.StagingState> {
+    return $Call.ByID(4030164182, fileID).then(($result: any) => {
+        return $$createType6($result);
+    });
 }
 
 /**
- * SaveCopy writes the edited file to dstPath via the streaming copy-through
- * pipeline (source untouched; staged edits remain).
+ * ResolveLine maps a positive 1-based line number under a hard 8 MiB exact-scan
+ * budget and a timeout. Source read failures remain errors; a timeout fallback
+ * is returned explicitly and never reported as proof that the line is absent.
  */
-export function SaveCopy(fileID: string, dstPath: string): $CancellablePromise<$models.SaveResult> {
-    return $Call.ByID(3494652756, fileID, dstPath).then(($result: any) => {
-        return $$createType14($result);
+export function ResolveLine(fileID: string, line: number): $CancellablePromise<$models.LineResolution> {
+    return $Call.ByID(4183015142, fileID, line).then(($result: any) => {
+        return $$createType17($result);
     });
 }
 
@@ -382,27 +444,23 @@ export function SaveCopy(fileID: string, dstPath: string): $CancellablePromise<$
  */
 export function SaveCopyViaDialog(fileID: string): $CancellablePromise<$models.SaveResult> {
     return $Call.ByID(1169867108, fileID).then(($result: any) => {
-        return $$createType14($result);
+        return $$createType18($result);
     });
 }
 
 /**
- * SavePatch applies the staged edits in place (length-preserving only) with a
- * crash-safe reverse-patch sidecar, then refreshes the document from disk.
+ * SavePatch is retained as an RPC compatibility boundary but fails closed.
+ * Source mutation remains unavailable; callers must save a separate copy.
  */
 export function SavePatch(fileID: string): $CancellablePromise<$models.SaveResult> {
     return $Call.ByID(1419832985, fileID).then(($result: any) => {
-        return $$createType14($result);
+        return $$createType18($result);
     });
 }
 
-/**
- * SearchAll collects up to maxHits matches across the whole file with previews,
- * for a results panel. The query is encoded into the file's encoding first.
- */
-export function SearchAll(fileID: string, query: string, regex: boolean, caseSensitive: boolean, wholeWord: boolean, maxHits: number): $CancellablePromise<$models.SearchAllResult> {
-    return $Call.ByID(1598277695, fileID, query, regex, caseSensitive, wholeWord, maxHits).then(($result: any) => {
-        return $$createType15($result);
+export function SearchAllRequest(requestID: string, query: string, regex: boolean, caseSensitive: boolean, wholeWord: boolean, maxHits: number): $CancellablePromise<$models.SearchAllResult> {
+    return $Call.ByID(1561391520, requestID, query, regex, caseSensitive, wholeWord, maxHits).then(($result: any) => {
+        return $$createType19($result);
     });
 }
 
@@ -413,14 +471,13 @@ export function SearchAll(fileID: string, query: string, regex: boolean, caseSen
  */
 export function SqlAnalyze(fileID: string): $CancellablePromise<$models.SqlSummaryResult> {
     return $Call.ByID(1563764376, fileID).then(($result: any) => {
-        return $$createType16($result);
+        return $$createType20($result);
     });
 }
 
 /**
- * SqlApplyPresetViaDialog runs a named cleanup preset, streaming the result to a
- * chosen file. Presets that need arguments (e.g. change-database) take them via
- * a1..a4; the source is never modified.
+ * SqlApplyPresetViaDialog is retained for generated-binding compatibility. It
+ * rejects before file lookup, dialogs, jobs, or filesystem work.
  */
 export function SqlApplyPresetViaDialog(fileID: string, name: string, a1: string, a2: string, a3: string, a4: string): $CancellablePromise<$models.TransformResult> {
     return $Call.ByID(1655907585, fileID, name, a1, a2, a3, a4).then(($result: any) => {
@@ -429,7 +486,8 @@ export function SqlApplyPresetViaDialog(fileID: string, name: string, a1: string
 }
 
 /**
- * SqlExtractDataViaDialog writes just the INSERT rows for a table (no DDL).
+ * SqlExtractDataViaDialog writes exact analyzed INSERT/REPLACE regions for one
+ * table, with no DDL or surrounding dump SQL.
  */
 export function SqlExtractDataViaDialog(fileID: string, tableName: string): $CancellablePromise<$models.TransformResult> {
     return $Call.ByID(2269513535, fileID, tableName).then(($result: any) => {
@@ -438,8 +496,8 @@ export function SqlExtractDataViaDialog(fileID: string, tableName: string): $Can
 }
 
 /**
- * SqlExtractSchemaViaDialog writes just the DDL (CREATE TABLE / structure) with
- * no INSERT data. An empty tableName extracts the whole dump's schema.
+ * SqlExtractSchemaViaDialog writes exact analyzed CREATE regions with no INSERT
+ * data. An empty tableName selects every discovered table.
  */
 export function SqlExtractSchemaViaDialog(fileID: string, tableName: string): $CancellablePromise<$models.TransformResult> {
     return $Call.ByID(1617829806, fileID, tableName).then(($result: any) => {
@@ -448,8 +506,9 @@ export function SqlExtractSchemaViaDialog(fileID: string, tableName: string): $C
 }
 
 /**
- * SqlExtractTableViaDialog writes one table's byte range to a chosen output
- * file (streamed; never materializes the whole dump).
+ * SqlExtractTableViaDialog writes one table's exact analyzed
+ * CREATE/INSERT/REPLACE regions to a chosen output file. Surrounding session
+ * and unrelated SQL is deliberately omitted.
  */
 export function SqlExtractTableViaDialog(fileID: string, tableName: string): $CancellablePromise<$models.TransformResult> {
     return $Call.ByID(3125375737, fileID, tableName).then(($result: any) => {
@@ -463,23 +522,20 @@ export function SqlExtractTableViaDialog(fileID: string, tableName: string): $Ca
  */
 export function SqlLint(fileID: string): $CancellablePromise<$models.SqlLintResult> {
     return $Call.ByID(3422427641, fileID).then(($result: any) => {
-        return $$createType17($result);
+        return $$createType21($result);
     });
 }
 
 /**
- * SqlListPresets returns the available SQL cleanup preset names.
+ * SqlListPresets exposes no names while structural cleanup presets remain
+ * fail-closed.
  */
 export function SqlListPresets(): $CancellablePromise<string[]> {
     return $Call.ByID(69917632).then(($result: any) => {
-        return $$createType18($result);
+        return $$createType22($result);
     });
 }
 
-/**
- * SqlReplaceViaDialog streams a find/replace (plain or regex) to a new file —
- * also used for table-prefix renames. The source is never modified.
- */
 export function SqlReplaceViaDialog(fileID: string, find: string, replaceWith: string, regex: boolean, caseInsensitive: boolean, wholeWord: boolean): $CancellablePromise<$models.TransformResult> {
     return $Call.ByID(1077960636, fileID, find, replaceWith, regex, caseInsensitive, wholeWord).then(($result: any) => {
         return $$createType0($result);
@@ -509,12 +565,13 @@ export function SqlSampleFixtureViaDialog(fileID: string, rowsPerTable: number):
 }
 
 /**
- * SqlSchemaDiff compares the table/column structure of two analyzed dumps
- * (A = baseline, B = new). Both must be analyzed first.
+ * SqlSchemaDiff compares complete bounded CREATE TABLE structure for two
+ * analyzed dumps (A = baseline, B = new), including constraints, indexes,
+ * options, qualified identity, and column order.
  */
 export function SqlSchemaDiff(fileIDA: string, fileIDB: string): $CancellablePromise<$models.SqlSchemaDiffResult> {
     return $Call.ByID(3883908852, fileIDA, fileIDB).then(($result: any) => {
-        return $$createType19($result);
+        return $$createType23($result);
     });
 }
 
@@ -530,32 +587,36 @@ export function SqlSplitByTableViaDialog(fileID: string): $CancellablePromise<$m
 /**
  * StageEdit reconciles the window [startByte, startByte+origLen) with newText.
  * It trims the common prefix/suffix so only the genuinely changed bytes are
- * staged — keeping the diff granular and in-place patches minimal.
+ * staged, keeping the diff granular and in-place patches minimal.
  */
 export function StageEdit(fileID: string, startByte: number, origLen: number, newText: string): $CancellablePromise<$models.StagingState> {
     return $Call.ByID(756414490, fileID, startByte, origLen, newText).then(($result: any) => {
-        return $$createType5($result);
+        return $$createType6($result);
     });
 }
 
 // Private type creation functions
 const $$createType0 = $models.TransformResult.createFrom;
 const $$createType1 = $models.CsvInspectResult.createFrom;
-const $$createType2 = $models.CsvPreviewResult.createFrom;
-const $$createType3 = $models.CsvProfileResult.createFrom;
-const $$createType4 = $models.CsvSchemaResult.createFrom;
-const $$createType5 = $models.StagingState.createFrom;
-const $$createType6 = $models.SearchHit.createFrom;
-const $$createType7 = $models.CsvGridResult.createFrom;
-const $$createType8 = $models.DiffWindow.createFrom;
-const $$createType9 = $models.Window.createFrom;
-const $$createType10 = $models.HexWindow.createFrom;
-const $$createType11 = $models.StagedEdit.createFrom;
-const $$createType12 = $Create.Array($$createType11);
-const $$createType13 = $models.FileMeta.createFrom;
-const $$createType14 = $models.SaveResult.createFrom;
-const $$createType15 = $models.SearchAllResult.createFrom;
-const $$createType16 = $models.SqlSummaryResult.createFrom;
-const $$createType17 = $models.SqlLintResult.createFrom;
-const $$createType18 = $Create.Array($Create.Any);
-const $$createType19 = $models.SqlSchemaDiffResult.createFrom;
+const $$createType2 = $models.CsvTextPreviewResult.createFrom;
+const $$createType3 = $models.CsvPreviewResult.createFrom;
+const $$createType4 = $models.CsvProfileResult.createFrom;
+const $$createType5 = $models.CsvSchemaResult.createFrom;
+const $$createType6 = $models.StagingState.createFrom;
+const $$createType7 = $models.FileStateResult.createFrom;
+const $$createType8 = $models.SearchHit.createFrom;
+const $$createType9 = $models.CsvGridResult.createFrom;
+const $$createType10 = $models.DiffWindow.createFrom;
+const $$createType11 = $models.Window.createFrom;
+const $$createType12 = $models.HexWindow.createFrom;
+const $$createType13 = $models.MatchWindow.createFrom;
+const $$createType14 = $models.StagedEdit.createFrom;
+const $$createType15 = $Create.Array($$createType14);
+const $$createType16 = $models.FileMeta.createFrom;
+const $$createType17 = $models.LineResolution.createFrom;
+const $$createType18 = $models.SaveResult.createFrom;
+const $$createType19 = $models.SearchAllResult.createFrom;
+const $$createType20 = $models.SqlSummaryResult.createFrom;
+const $$createType21 = $models.SqlLintResult.createFrom;
+const $$createType22 = $Create.Array($Create.Any);
+const $$createType23 = $models.SqlSchemaDiffResult.createFrom;

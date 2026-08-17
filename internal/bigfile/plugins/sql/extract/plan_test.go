@@ -1,7 +1,9 @@
 package extract
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"novera/internal/bigfile/plugins/sql/analyze"
@@ -87,7 +89,7 @@ func TestPlanExtractTableIsCaseSensitive(t *testing.T) {
 		t.Fatalf("preview = %#v", preview)
 	}
 	assertRange(t, preview.Tables[0], "users", 50, 90)
-	if got := filepath.Base(preview.Tables[0].OutputPath); got != "users.dump" {
+	if got := filepath.Base(preview.Tables[0].OutputPath); got != "users_02.dump" {
 		t.Fatalf("output path = %q", got)
 	}
 }
@@ -96,6 +98,21 @@ func TestPlanExtractTableMissing(t *testing.T) {
 	summary := analyze.Summary{Tables: []analyze.Table{{Name: "users", CreateOffset: 10, InsertOffset: -1}}}
 	if _, err := PlanExtractTable(summary, 50, "Users", PlanOptions{}); err == nil {
 		t.Fatal("expected case-sensitive missing table error")
+	}
+}
+
+func TestPlanExtractTableBoundsQualifiedDisplayIdentity(t *testing.T) {
+	component := strings.Repeat("`", analyze.MaxIdentifierBytes)
+	display := "`" + strings.ReplaceAll(component, "`", "``") + "`.`" + strings.ReplaceAll(component, "`", "``") + "`"
+	if len(display) != MaxTableSelectionBytes {
+		t.Fatalf("qualified display length = %d, want %d", len(display), MaxTableSelectionBytes)
+	}
+	summary := analyze.Summary{Tables: []analyze.Table{{Name: display, CreateOffset: 0, InsertOffset: -1}}}
+	if _, err := PlanExtractTable(summary, 10, display, PlanOptions{}); err != nil {
+		t.Fatalf("largest analyzer identity rejected: %v", err)
+	}
+	if _, err := PlanExtractTable(summary, 10, display+"x", PlanOptions{}); !errors.Is(err, ErrTableNameTooLong) {
+		t.Fatalf("oversized display error = %v, want ErrTableNameTooLong", err)
 	}
 }
 
@@ -123,6 +140,62 @@ func TestPlanTableRangesAvoidsDuplicateOutputNames(t *testing.T) {
 	}
 	if got := filepath.Base(ranges[1].OutputPath); got != "a_b_02.sql" {
 		t.Fatalf("second output = %q", got)
+	}
+}
+
+func TestPlanTableRangesRejectsUnsafeExtensionsBeforePathConstruction(t *testing.T) {
+	summary := analyze.Summary{Tables: []analyze.Table{{Name: "users", CreateOffset: 0, InsertOffset: -1}}}
+	for _, extension := range []string{
+		"../escape", `..\escape`, "/absolute", `C:\escape`, "two.parts", ".", " sql", "sql ", "sql\x00x", strings.Repeat("a", maxExtractExtensionBytes),
+	} {
+		t.Run(strings.ReplaceAll(extension, "\\", "_"), func(t *testing.T) {
+			if _, err := PlanTableRanges(summary, 10, PlanOptions{OutputDir: t.TempDir(), Extension: extension}); err == nil {
+				t.Fatalf("extension %q unexpectedly accepted", extension)
+			}
+		})
+	}
+}
+
+func TestPlanTableRangesUsesPortableCollisionKeysAndReservedNames(t *testing.T) {
+	outDir := t.TempDir()
+	summary := analyze.Summary{Tables: []analyze.Table{
+		{Name: "Users", CreateOffset: 0, InsertOffset: -1},
+		{Name: "users", CreateOffset: 10, InsertOffset: -1},
+		{Name: "e\u0301", CreateOffset: 20, InsertOffset: -1},
+		{Name: "\u00e9", CreateOffset: 30, InsertOffset: -1},
+		{Name: "CON", CreateOffset: 40, InsertOffset: -1},
+		{Name: "lpt1...   ", CreateOffset: 50, InsertOffset: -1},
+	}}
+	ranges, err := PlanTableRanges(summary, 60, PlanOptions{OutputDir: outDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Users.sql", "users_02.sql", "\u00e9.sql", "\u00e9_02.sql", "_CON.sql", "_lpt1.sql"}
+	for i, table := range ranges {
+		if got := filepath.Base(table.OutputPath); got != want[i] {
+			t.Fatalf("output %d = %q, want %q", i, got, want[i])
+		}
+		if err := requireDirectChild(outDir, table.OutputPath); err != nil {
+			t.Fatalf("output %q escaped selected directory: %v", table.OutputPath, err)
+		}
+	}
+}
+
+func TestSafeFilenameComponentBoundsLongUnicodeNames(t *testing.T) {
+	name := strings.Repeat("\u754c", 300)
+	first := SafeFilenameComponent(name)
+	second := SafeFilenameComponent(name)
+	if first != second {
+		t.Fatalf("component is not deterministic: %q != %q", first, second)
+	}
+	if len(first) > maxExtractBaseBytes {
+		t.Fatalf("component bytes = %d, want <= %d", len(first), maxExtractBaseBytes)
+	}
+	if !strings.Contains(first, "_") {
+		t.Fatalf("truncated component lacks stable hash suffix: %q", first)
+	}
+	if filepath.Base(first) != first || first == "." || first == ".." {
+		t.Fatalf("unsafe component %q", first)
 	}
 }
 

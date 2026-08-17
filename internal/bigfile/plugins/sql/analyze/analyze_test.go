@@ -65,7 +65,7 @@ func TestAnalyzeFindsTablesAndSettings(t *testing.T) {
 }
 
 func TestAnalyzeHandlesChunkBoundaries(t *testing.T) {
-	text := "aaa CREATE TABLE `alpha` (id int);\nzzz INSERT INTO `alpha` VALUES (1);"
+	text := "-- aaa\nCREATE TABLE `alpha` (id int);\n-- zzz\nINSERT INTO `alpha` VALUES (1);"
 	summary, err := Analyze(context.Background(), memReader{data: []byte(text)}, Options{ChunkSize: 10})
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +193,7 @@ func TestAnalyzeFindsLongDefinerCreateAcrossChunkBoundary(t *testing.T) {
 	longUser := strings.Repeat("u", 1500)
 	longHost := strings.Repeat("h", 1500)
 	statement := "CREATE DEFINER=`" + longUser + "`@`" + longHost + "` TABLE `BoundaryCase` (id int);"
-	text := strings.Repeat("x", 700) + statement + "\n" + strings.Repeat("y", 20*1024)
+	text := "-- " + strings.Repeat("x", 697) + "\n" + statement + "\n-- " + strings.Repeat("y", 20*1024)
 
 	summary, err := Analyze(context.Background(), memReader{data: []byte(text)}, Options{ChunkSize: 512})
 	if err != nil {
@@ -208,15 +208,19 @@ func TestAnalyzeFindsLongDefinerCreateAcrossChunkBoundary(t *testing.T) {
 	if got, want := summary.Tables[0].Name, "BoundaryCase"; got != want {
 		t.Fatalf("table = %q, want %q", got, want)
 	}
-	if summary.Tables[0].CreateOffset != int64(700) {
-		t.Fatalf("create offset = %d, want 700", summary.Tables[0].CreateOffset)
+	if summary.Tables[0].CreateOffset != int64(701) {
+		t.Fatalf("create offset = %d, want 701", summary.Tables[0].CreateOffset)
 	}
 }
 
 func tableNames(summary Summary) map[string]Table {
 	out := make(map[string]Table, len(summary.Tables))
 	for _, t := range summary.Tables {
-		out[t.Name] = t
+		name := t.Name
+		if t.TableName != "" {
+			name = t.TableName
+		}
+		out[name] = t
 	}
 	return out
 }

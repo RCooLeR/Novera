@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -26,10 +25,17 @@ type RecoveryState struct {
 	OutputExists bool
 	TempExists   bool
 	BackupExists bool
+	validated    bool
 }
 
 const minRecoveryManifestRetention = 24 * time.Hour
 const maxRecoveryManifestBytes = 1 << 20
+
+// ErrRecoveryMutationDisabled keeps recovery inspection-only until every
+// mutation can be authorized against securely opened, manifest-bound files.
+var ErrRecoveryMutationDisabled = errors.New(
+	"automatic replace recovery mutation is disabled; inspect the preserved artifacts and choose an explicit safe output operation",
+)
 
 // LoadManifest reads a replace manifest from disk.
 func LoadManifest(path string) (Manifest, error) {
@@ -110,6 +116,7 @@ func InspectRecoveryManifest(path string) (RecoveryState, error) {
 		ManifestPath: path,
 		Manifest:     manifest,
 		InPlace:      manifest.Operation == "plain-replace-in-place",
+		validated:    true,
 	}
 	if _, err := statPath(manifest.Source); err == nil {
 		state.SourceExists = true
@@ -211,19 +218,9 @@ func FindRecoveryStates(sourcePath string) ([]RecoveryState, error) {
 	return states, nil
 }
 
-// DeleteRecoveryTemp removes a partial temp output while keeping the manifest for audit/history.
-func DeleteRecoveryTemp(state RecoveryState) error {
-	refreshed, err := InspectRecoveryManifest(state.ManifestPath)
-	if err != nil {
-		return err
-	}
-	if refreshed.Manifest.TempOutput == "" {
-		return errors.New("manifest has no temp output")
-	}
-	if err := removePath(refreshed.Manifest.TempOutput); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+// DeleteRecoveryTemp is disabled so recovery remains inspection-only.
+func DeleteRecoveryTemp(RecoveryState) error {
+	return ErrRecoveryMutationDisabled
 }
 
 // CleanupCompletedRecoveryManifests removes completed manifest files older than
@@ -235,7 +232,7 @@ func CleanupCompletedRecoveryManifests(states []RecoveryState, retention time.Du
 	}
 	removed := 0
 	for _, state := range states {
-		if state.ManifestPath == "" || state.Manifest.Status != "complete" || state.Manifest.CompletedAt == nil {
+		if !state.validated || state.ManifestPath == "" || state.Manifest.Status != "complete" || state.Manifest.CompletedAt == nil {
 			continue
 		}
 		if now.Sub(*state.Manifest.CompletedAt) < retention {
@@ -254,6 +251,9 @@ func CleanupCompletedRecoveryManifests(states []RecoveryState, retention time.Du
 
 // RecoveryOpenPath returns the most useful artifact path to inspect from a recovery manifest.
 func RecoveryOpenPath(state RecoveryState) (string, string, bool) {
+	if !state.validated {
+		return "", "", false
+	}
 	switch {
 	case state.TempExists:
 		return state.Manifest.TempOutput, "partial temp output", true
@@ -266,191 +266,14 @@ func RecoveryOpenPath(state RecoveryState) (string, string, bool) {
 	}
 }
 
-// CanResumeRecovery reports whether a recovery manifest can be safely resumed.
-func CanResumeRecovery(state RecoveryState) (bool, string) {
-	manifest := state.Manifest
-	if state.InPlace {
-		return false, "in-place patch recovery cannot be resumed"
-	}
-	if manifest.Status == "complete" {
-		return false, "manifest is already complete"
-	}
-	if manifest.Output == "" {
-		return false, "manifest has no output path"
-	}
-	if manifest.Phase == "" {
-		return false, "manifest phase is unknown"
-	}
-
-	switch manifest.Phase {
-	case "ready_to_finalize":
-		if manifest.TempOutput == "" {
-			return false, "manifest has no temp output"
-		}
-		if !state.TempExists {
-			return false, "temp output is missing"
-		}
-		if state.OutputExists {
-			return false, "output file already exists"
-		}
-		if manifest.SwapRequested {
-			if !state.SourceExists {
-				return false, "source file is missing"
-			}
-			backupPath := resolveRecoveryBackupPath(manifest)
-			if _, err := statPath(backupPath); err == nil {
-				return false, "backup file already exists"
-			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return false, "backup path check failed: " + err.Error()
-			}
-		}
-		return true, ""
-	case "output_written":
-		if !state.OutputExists {
-			return false, "output file is missing"
-		}
-		if !manifest.SwapRequested {
-			return true, ""
-		}
-		backupPath := resolveRecoveryBackupPath(manifest)
-		if state.SourceExists {
-			if _, err := statPath(backupPath); err == nil {
-				return false, "backup file already exists"
-			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return false, "backup path check failed: " + err.Error()
-			}
-			return true, ""
-		}
-		if !state.BackupExists {
-			return false, "source file is missing"
-		}
-		return true, ""
-	case "swapped":
-		if !manifest.SwapRequested {
-			return false, "manifest phase is swapped without swap request"
-		}
-		if !state.SourceExists {
-			return false, "source file is missing"
-		}
-		return true, ""
-	default:
-		if manifest.Phase == "" {
-			return false, "manifest phase is unknown"
-		}
-		return false, "manifest phase is " + manifest.Phase
-	}
+// CanResumeRecovery reports that automatic recovery mutation is unavailable.
+func CanResumeRecovery(RecoveryState) (bool, string) {
+	return false, ErrRecoveryMutationDisabled.Error()
 }
 
-// ResumeRecovery finalizes a safe recovery state by promoting temp output and optional source swap.
+// ResumeRecovery is disabled so recovery remains inspection-only.
 func ResumeRecovery(state RecoveryState) (RecoveryState, error) {
-	refreshed, err := InspectRecoveryManifest(state.ManifestPath)
-	if err != nil {
-		return RecoveryState{}, err
-	}
-	canResume, reason := CanResumeRecovery(refreshed)
-	if !canResume {
-		return refreshed, errors.New("recovery is not resumable: " + reason)
-	}
-
-	manifest := refreshed.Manifest
-	switch manifest.Phase {
-	case "ready_to_finalize":
-		if err := renamePath(manifest.TempOutput, manifest.Output); err != nil {
-			return recoveryFailure(refreshed.ManifestPath, manifest, err)
-		}
-		if err := writeManifestPhaseOrFail(refreshed.ManifestPath, &manifest, "output_written"); err != nil {
-			state, inspectErr := InspectRecoveryManifest(refreshed.ManifestPath)
-			if inspectErr != nil {
-				return RecoveryState{}, err
-			}
-			return state, err
-		}
-	case "output_written":
-		// Continue from already-promoted output.
-	case "swapped":
-		// Continue directly to final manifest close-out.
-	default:
-		return refreshed, errors.New("recovery is not resumable: manifest phase is " + manifest.Phase)
-	}
-
-	if manifest.SwapRequested && manifest.Phase == "output_written" {
-		backupPath := resolveRecoveryBackupPath(manifest)
-		sameBackup, err := samePath(manifest.Source, backupPath)
-		if err != nil {
-			return recoveryFailure(refreshed.ManifestPath, manifest, err)
-		}
-		if sameBackup {
-			return recoveryFailure(refreshed.ManifestPath, manifest, errors.New("backup path must be different from source path"))
-		}
-
-		if _, err := statPath(manifest.Source); err == nil {
-			if _, err := statPath(backupPath); err == nil {
-				return recoveryFailure(refreshed.ManifestPath, manifest, errors.New("backup file already exists"))
-			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return recoveryFailure(refreshed.ManifestPath, manifest, fmt.Errorf("backup path check failed: %w", err))
-			}
-			if manifest.SourceModTime != 0 {
-				before := sourceSnapshot{
-					size: manifest.SourceSize,
-				}
-				before.modTime = time.Unix(0, manifest.SourceModTime)
-				if err := verifySourceUnchanged(manifest.Source, before); err != nil {
-					return recoveryFailure(refreshed.ManifestPath, manifest, err)
-				}
-			}
-			if err := swapOutputIntoSource(manifest.Source, manifest.Output, backupPath); err != nil {
-				return recoveryFailure(refreshed.ManifestPath, manifest, err)
-			}
-		} else if errors.Is(err, os.ErrNotExist) {
-			if _, backupErr := statPath(backupPath); backupErr != nil {
-				if errors.Is(backupErr, os.ErrNotExist) {
-					return recoveryFailure(refreshed.ManifestPath, manifest, errors.New("source file is missing"))
-				}
-				return recoveryFailure(refreshed.ManifestPath, manifest, fmt.Errorf("backup path check failed: %w", backupErr))
-			}
-			if err := applyBackupModeToOutput(manifest.Output, backupPath); err != nil {
-				return recoveryFailure(refreshed.ManifestPath, manifest, err)
-			}
-			if err := renamePath(manifest.Output, manifest.Source); err != nil {
-				return recoveryFailure(refreshed.ManifestPath, manifest, err)
-			}
-		} else {
-			return recoveryFailure(refreshed.ManifestPath, manifest, err)
-		}
-
-		manifest.Backup = backupPath
-		manifest.Swapped = true
-		if err := writeManifestPhaseOrFail(refreshed.ManifestPath, &manifest, "swapped"); err != nil {
-			state, inspectErr := InspectRecoveryManifest(refreshed.ManifestPath)
-			if inspectErr != nil {
-				return RecoveryState{}, err
-			}
-			return state, err
-		}
-	}
-
-	now := time.Now().UTC()
-	manifest.Status = "complete"
-	manifest.Error = ""
-	manifest.Phase = "complete"
-	manifest.BytesProcessed = manifest.SourceSize
-	manifest.CompletedAt = &now
-	if err := writeManifest(refreshed.ManifestPath, manifest, false); err != nil {
-		return RecoveryState{}, fmt.Errorf("finalize recovery manifest: %w", err)
-	}
-
-	return InspectRecoveryManifest(refreshed.ManifestPath)
-}
-
-func recoveryFailure(path string, manifest Manifest, failure error) (RecoveryState, error) {
-	manifest.Status = "failed"
-	manifest.Error = failure.Error()
-	_ = writeManifest(path, manifest, false)
-	state, err := InspectRecoveryManifest(path)
-	if err != nil {
-		return RecoveryState{}, failure
-	}
-	return state, failure
+	return state, ErrRecoveryMutationDisabled
 }
 
 func resolveRecoveryBackupPath(manifest Manifest) string {

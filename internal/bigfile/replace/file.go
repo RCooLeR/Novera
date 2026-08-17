@@ -12,10 +12,11 @@ import (
 	"time"
 
 	"novera/internal/bigfile/fileio"
+	"novera/internal/bigfile/regularfile"
 )
 
 var (
-	openSourceFile = os.Open
+	openSourceFile = regularfile.Open
 	openExclusive  = func(path string) (syncWriteCloser, error) {
 		return fileio.OpenExclusiveOutput(path, 0o600)
 	}
@@ -31,7 +32,10 @@ var (
 	}
 )
 
-var ErrSourceModifiedDuringOperation = errors.New("source file modified during operation")
+var (
+	ErrSourceModifiedDuringOperation = errors.New("source file modified during operation")
+	ErrSwapOriginalDisabled          = errors.New("replacing the opened source is disabled; choose a separate output path")
+)
 
 type sourceSnapshot struct {
 	size    int64
@@ -84,6 +88,12 @@ type FileSummary struct {
 
 // ReplacePlainFile streams sourcePath into outputPath through an exclusive temp file.
 func ReplacePlainFile(ctx context.Context, sourcePath string, outputPath string, pattern []byte, repl []byte, opts FileOptions) (FileSummary, error) {
+	if opts.SwapOriginal {
+		return FileSummary{}, ErrSwapOriginalDisabled
+	}
+	if err := validatePlainTransformInputs(pattern, repl, opts.ChunkSize); err != nil {
+		return FileSummary{OutputPath: outputPath}, err
+	}
 	same, err := samePath(sourcePath, outputPath)
 	if err != nil {
 		return FileSummary{}, err
@@ -105,24 +115,6 @@ func ReplacePlainFile(ctx context.Context, sourcePath string, outputPath string,
 	}
 
 	backupPath := opts.BackupPath
-	if opts.SwapOriginal {
-		if backupPath == "" {
-			backupPath = sourcePath + ".quarry.bak"
-		}
-		sameBackup, err := samePath(sourcePath, backupPath)
-		if err != nil {
-			return summary, err
-		}
-		if sameBackup {
-			return summary, errors.New("backup path must be different from source path")
-		}
-		if _, err := statPath(backupPath); err == nil {
-			return summary, errors.New("backup file already exists")
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return summary, err
-		}
-		summary.BackupPath = backupPath
-	}
 
 	src, err := openSourceFile(sourcePath)
 	if err != nil {

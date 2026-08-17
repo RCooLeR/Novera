@@ -1,6 +1,9 @@
 package units
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestFormatBytes(t *testing.T) {
 	tests := []struct {
@@ -12,6 +15,8 @@ func TestFormatBytes(t *testing.T) {
 		{"kib", 1536, "1.5 KiB"},
 		{"mib", 2 * 1024 * 1024, "2.0 MiB"},
 		{"gib", 3 * 1024 * 1024 * 1024, "3.0 GiB"},
+		{"pib", 1 << 50, "1.0 PiB"},
+		{"maximum int64", math.MaxInt64, "8.0 EiB"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

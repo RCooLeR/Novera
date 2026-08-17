@@ -91,7 +91,17 @@ export default function SettingsView() {
         </label>
         <label className="settingsv__row settingsv__col">
           <span>Base URL</span>
-          <input value={llm.baseURL} spellCheck={false} onChange={(e) => void saveLLMConfig({ baseURL: e.target.value })} />
+          {/* An endpoint-origin change deliberately detaches its stored API key.
+              Commit once on blur so intermediate keystrokes cannot persist a
+              partial origin and delete the credential while the user types. */}
+          <input
+            key={`settings-baseurl-${llm.baseURL}`}
+            defaultValue={llm.baseURL}
+            spellCheck={false}
+            onBlur={(e) => {
+              if (e.currentTarget.value !== llm.baseURL) void saveLLMConfig({ baseURL: e.currentTarget.value });
+            }}
+          />
         </label>
         <label className="settingsv__row settingsv__col">
           <span>Model</span>

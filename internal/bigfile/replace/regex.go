@@ -1,9 +1,11 @@
 package replace
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"regexp"
@@ -12,12 +14,21 @@ import (
 	"novera/internal/bigfile/regexutil"
 )
 
-const defaultRegexMatchWindow = 1 * 1024 * 1024
+const (
+	defaultRegexMatchWindow     = 1 * 1024 * 1024
+	defaultRegexWriteBufferSize = 1 * 1024 * 1024
+	maxRegexChunkSize           = 64 * 1024 * 1024
+
+	// MaxRegexWriteBufferBytes bounds caller-selected buffering independently
+	// of the source chunk and match-window budgets.
+	MaxRegexWriteBufferBytes = 4 * 1024 * 1024
+)
 
 // RegexOptions controls bounded regex search/replace operations.
 type RegexOptions struct {
 	ChunkSize       int
 	MaxMatchWindow  int
+	WriteBufferSize int
 	CaseInsensitive bool
 	Progress        func(Progress)
 }
@@ -28,12 +39,21 @@ var ErrRegexMatchExceededWindow = errors.New("regex match exceeded the configure
 
 // ReplaceRegexp streams src to dst while applying regex replacements.
 func ReplaceRegexp(ctx context.Context, src *os.File, dst syncWriter, pattern []byte, repl []byte, opts RegexOptions) (int64, error) {
-	re, err := compileRegex(pattern, opts.CaseInsensitive)
+	if err := validateRegexOptions(opts); err != nil {
+		return 0, err
+	}
+	if err := validatePlainTransformInputs(pattern, repl, opts.ChunkSize); err != nil {
+		return 0, err
+	}
+	opts = normalizeRegexOptions(opts)
+	re, analysis, err := compileRegexBoundedAnalysis(pattern, opts.CaseInsensitive, opts.MaxMatchWindow)
 	if err != nil {
 		return 0, err
 	}
+	if _, err := validateRegexReplacementExpansion(repl, analysis.MaxMatchBytes); err != nil {
+		return 0, err
+	}
 
-	opts = normalizeRegexOptions(opts)
 	st, err := src.Stat()
 	if err != nil {
 		return 0, err
@@ -41,6 +61,7 @@ func ReplaceRegexp(ctx context.Context, src *os.File, dst syncWriter, pattern []
 
 	total := st.Size()
 	buf := make([]byte, opts.ChunkSize)
+	bufferedDst := bufio.NewWriterSize(dst, opts.WriteBufferSize)
 	carryBudget := opts.MaxMatchWindow * 2
 	carry := make([]byte, 0, carryBudget)
 	window := make([]byte, 0, opts.ChunkSize+carryBudget)
@@ -68,7 +89,7 @@ func ReplaceRegexp(ctx context.Context, src *os.File, dst syncWriter, pattern []
 				processLimit = 0
 			}
 
-			consumed, count, err := writeRegexPrefix(dst, window, processLimit, re, repl)
+			consumed, count, err := writeRegexPrefix(ctx, bufferedDst, window, processLimit, re, repl)
 			if err != nil {
 				return matches, err
 			}
@@ -90,14 +111,14 @@ func ReplaceRegexp(ctx context.Context, src *os.File, dst syncWriter, pattern []
 		}
 
 		if errors.Is(readErr, io.EOF) && len(carry) > 0 {
-			_, count, err := writeRegexPrefix(dst, carry, len(carry), re, repl)
+			_, count, err := writeRegexPrefix(ctx, bufferedDst, carry, len(carry), re, repl)
 			if err != nil {
 				return matches, err
 			}
 			matches += int64(count)
 		}
 		if errors.Is(readErr, io.EOF) {
-			return matches, dst.Sync()
+			return matches, finishRegexOutput(ctx, bufferedDst, dst)
 		}
 		if readErr != nil {
 			return matches, readErr
@@ -107,6 +128,23 @@ func ReplaceRegexp(ctx context.Context, src *os.File, dst syncWriter, pattern []
 
 // ReplaceRegexpFile streams sourcePath into outputPath through an exclusive temp file.
 func ReplaceRegexpFile(ctx context.Context, sourcePath string, outputPath string, pattern []byte, repl []byte, opts FileOptions, regexOpts RegexOptions) (FileSummary, error) {
+	if opts.SwapOriginal {
+		return FileSummary{}, ErrSwapOriginalDisabled
+	}
+	if err := validateRegexOptions(regexOpts); err != nil {
+		return FileSummary{OutputPath: outputPath}, err
+	}
+	if err := validatePlainTransformInputs(pattern, repl, regexOpts.ChunkSize); err != nil {
+		return FileSummary{OutputPath: outputPath}, err
+	}
+	regexOpts = normalizeRegexOptions(regexOpts)
+	_, analysis, err := compileRegexBoundedAnalysis(pattern, regexOpts.CaseInsensitive, regexOpts.MaxMatchWindow)
+	if err != nil {
+		return FileSummary{OutputPath: outputPath}, err
+	}
+	if _, err := validateRegexReplacementExpansion(repl, analysis.MaxMatchBytes); err != nil {
+		return FileSummary{OutputPath: outputPath}, err
+	}
 	same, err := samePath(sourcePath, outputPath)
 	if err != nil {
 		return FileSummary{}, err
@@ -128,24 +166,6 @@ func ReplaceRegexpFile(ctx context.Context, sourcePath string, outputPath string
 	}
 
 	backupPath := opts.BackupPath
-	if opts.SwapOriginal {
-		if backupPath == "" {
-			backupPath = sourcePath + ".quarry.bak"
-		}
-		sameBackup, err := samePath(sourcePath, backupPath)
-		if err != nil {
-			return summary, err
-		}
-		if sameBackup {
-			return summary, errors.New("backup path must be different from source path")
-		}
-		if _, err := statPath(backupPath); err == nil {
-			return summary, errors.New("backup file already exists")
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return summary, err
-		}
-		summary.BackupPath = backupPath
-	}
 
 	src, err := openSourceFile(sourcePath)
 	if err != nil {
@@ -257,20 +277,32 @@ func ReplaceRegexpFile(ctx context.Context, sourcePath string, outputPath string
 
 // PreviewRegexp returns bounded before/after snippets for the first regex matches.
 func PreviewRegexp(ctx context.Context, r ReaderAtSize, pattern []byte, repl []byte, opts RegexPreviewOptions, regexOpts RegexOptions) ([]Preview, error) {
-	re, err := compileRegex(pattern, regexOpts.CaseInsensitive)
+	radius, err := validatePreviewBase(opts.ChunkSize, opts.MaxHits, opts.PreviewBytes)
 	if err != nil {
 		return nil, err
 	}
-
+	if err := validateRegexOptions(regexOpts); err != nil {
+		return nil, err
+	}
+	if err := validatePlainTransformInputs(pattern, repl, firstPositive(regexOpts.ChunkSize, opts.ChunkSize)); err != nil {
+		return nil, err
+	}
 	regexOpts.ChunkSize = firstPositive(regexOpts.ChunkSize, opts.ChunkSize)
+	regexOpts = normalizeRegexOptions(regexOpts)
+	re, analysis, err := compileRegexBoundedAnalysis(pattern, regexOpts.CaseInsensitive, regexOpts.MaxMatchWindow)
+	if err != nil {
+		return nil, err
+	}
+	expandedReplacementBytes, err := validateRegexReplacementExpansion(repl, analysis.MaxMatchBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePreviewBudget(opts.MaxHits, radius, int(analysis.MaxMatchBytes), expandedReplacementBytes, 2*(re.NumSubexp()+1)); err != nil {
+		return nil, err
+	}
 	results, err := collectRegexpMatches(ctx, r, re, regexOpts, opts.MaxHits)
 	if err != nil {
 		return nil, err
-	}
-
-	radius := opts.PreviewBytes
-	if radius <= 0 {
-		radius = 48
 	}
 
 	previews := make([]Preview, 0, len(results))
@@ -294,7 +326,17 @@ type regexMatch struct {
 }
 
 func collectRegexpMatches(ctx context.Context, r ReaderAtSize, re *regexp.Regexp, opts RegexOptions, maxHits int) ([]regexMatch, error) {
+	if err := validateRegexOptions(opts); err != nil {
+		return nil, err
+	}
+	if maxHits <= 0 || maxHits > MaxPreviewHits {
+		return nil, replaceLimit("maximum preview hits must be between 1 and %d", MaxPreviewHits)
+	}
 	opts = normalizeRegexOptions(opts)
+	size := r.Size()
+	if size < 0 {
+		return nil, errors.New("source size must not be negative")
+	}
 	results := make([]regexMatch, 0, maxHits)
 	buf := make([]byte, opts.ChunkSize)
 	carryBudget := opts.MaxMatchWindow * 2
@@ -303,7 +345,7 @@ func collectRegexpMatches(ctx context.Context, r ReaderAtSize, re *regexp.Regexp
 	startOffset := int64(0)
 	processed := int64(0)
 
-	for processed < r.Size() {
+	for processed < size {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -311,7 +353,7 @@ func collectRegexpMatches(ctx context.Context, r ReaderAtSize, re *regexp.Regexp
 		}
 
 		want := opts.ChunkSize
-		if remaining := r.Size() - processed; remaining < int64(want) {
+		if remaining := size - processed; remaining < int64(want) {
 			want = int(remaining)
 		}
 
@@ -319,22 +361,26 @@ func collectRegexpMatches(ctx context.Context, r ReaderAtSize, re *regexp.Regexp
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return nil, readErr
 		}
-		if n == 0 {
-			break
+		if n != want {
+			return nil, io.ErrUnexpectedEOF
+		}
+		atEnd := processed+int64(n) == size
+		if errors.Is(readErr, io.EOF) && !atEnd {
+			return nil, io.ErrUnexpectedEOF
 		}
 
 		window = window[:0]
 		window = append(window, carry...)
 		window = append(window, buf[:n]...)
 		processLimit := len(window) - opts.MaxMatchWindow
-		if errors.Is(readErr, io.EOF) {
+		if atEnd {
 			processLimit = len(window)
 		}
 		if processLimit < 0 {
 			processLimit = 0
 		}
 
-		consumed, err := collectRegexPrefix(window, processLimit, re, startOffset-int64(len(carry)), func(offset int64, length int) bool {
+		consumed, err := collectRegexPrefix(ctx, window, processLimit, re, startOffset-int64(len(carry)), func(offset int64, length int) bool {
 			results = append(results, regexMatch{Offset: offset, Length: length})
 			return maxHits > 0 && len(results) >= maxHits
 		})
@@ -352,9 +398,9 @@ func collectRegexpMatches(ctx context.Context, r ReaderAtSize, re *regexp.Regexp
 		processed += int64(n)
 		startOffset = processed
 
-		if errors.Is(readErr, io.EOF) && len(carry) > 0 {
+		if atEnd && len(carry) > 0 {
 			windowStart := startOffset - int64(len(carry))
-			consumed, err := collectRegexPrefix(carry, len(carry), re, windowStart, func(offset int64, length int) bool {
+			consumed, err := collectRegexPrefix(ctx, carry, len(carry), re, windowStart, func(offset int64, length int) bool {
 				results = append(results, regexMatch{Offset: offset, Length: length})
 				return maxHits > 0 && len(results) >= maxHits
 			})
@@ -373,7 +419,7 @@ func collectRegexpMatches(ctx context.Context, r ReaderAtSize, re *regexp.Regexp
 
 	if len(carry) > 0 {
 		windowStart := startOffset - int64(len(carry))
-		_, err := collectRegexPrefix(carry, len(carry), re, windowStart, func(offset int64, length int) bool {
+		_, err := collectRegexPrefix(ctx, carry, len(carry), re, windowStart, func(offset int64, length int) bool {
 			results = append(results, regexMatch{Offset: offset, Length: length})
 			return maxHits > 0 && len(results) >= maxHits
 		})
@@ -388,9 +434,16 @@ func collectRegexpMatches(ctx context.Context, r ReaderAtSize, re *regexp.Regexp
 // collectRegexPrefix iterates matches with a moving cursor (FindSubmatchIndex)
 // instead of materializing every match up front (FindAllSubmatchIndex), so peak
 // memory stays bounded by the window rather than the match count on dense inputs.
-func collectRegexPrefix(window []byte, processLimit int, re *regexp.Regexp, windowStart int64, emit func(offset int64, length int) bool) (int, error) {
+func collectRegexPrefix(ctx context.Context, window []byte, processLimit int, re *regexp.Regexp, windowStart int64, emit func(offset int64, length int) bool) (int, error) {
 	consumed := processLimit
+	work := 0
 	for pos := 0; pos <= len(window); {
+		work++
+		if work%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return consumed, err
+			}
+		}
 		loc := re.FindSubmatchIndex(window[pos:])
 		if loc == nil {
 			break
@@ -418,11 +471,18 @@ func collectRegexPrefix(window []byte, processLimit int, re *regexp.Regexp, wind
 // a single Expand scratch buffer, so a dense replace (e.g. a frequent token in a
 // 16 MiB window) no longer allocates the full match-index slice plus a fresh
 // expansion per match — keeping per-chunk allocation bounded by the window size.
-func writeRegexPrefix(dst io.Writer, window []byte, processLimit int, re *regexp.Regexp, repl []byte) (consumed int, count int, err error) {
+func writeRegexPrefix(ctx context.Context, dst io.Writer, window []byte, processLimit int, re *regexp.Regexp, repl []byte) (consumed int, count int, err error) {
 	cursor := 0
 	consumed = processLimit
 	var scratch []byte
+	work := 0
 	for pos := 0; pos <= len(window); {
+		work++
+		if work%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, count, err
+			}
+		}
 		loc := re.FindSubmatchIndex(window[pos:])
 		if loc == nil {
 			break
@@ -507,17 +567,64 @@ func compileRegex(pattern []byte, caseInsensitive bool) (*regexp.Regexp, error) 
 	return regexutil.Compile(pattern, caseInsensitive)
 }
 
+func compileRegexBoundedAnalysis(pattern []byte, caseInsensitive bool, maxMatchWindow int) (*regexp.Regexp, regexutil.Analysis, error) {
+	return regexutil.CompileBounded(pattern, caseInsensitive, maxMatchWindow)
+}
+
 func normalizeRegexOptions(opts RegexOptions) RegexOptions {
-	if opts.ChunkSize <= 0 {
+	if opts.ChunkSize == 0 {
 		opts.ChunkSize = 16 * 1024 * 1024
 	}
-	if opts.MaxMatchWindow <= 0 {
+	if opts.MaxMatchWindow == 0 {
 		opts.MaxMatchWindow = defaultRegexMatchWindow
 	}
 	if opts.MaxMatchWindow > opts.ChunkSize {
 		opts.MaxMatchWindow = opts.ChunkSize
 	}
+	if opts.WriteBufferSize == 0 {
+		opts.WriteBufferSize = defaultRegexWriteBufferSize
+	}
 	return opts
+}
+
+func validateRegexOptions(opts RegexOptions) error {
+	if opts.ChunkSize < 0 {
+		return fmt.Errorf("%w: replace chunk size must not be negative", regexutil.ErrRegexResourceLimit)
+	}
+	if opts.ChunkSize > maxRegexChunkSize {
+		return fmt.Errorf("%w: replace chunk %d exceeds %d bytes", regexutil.ErrRegexResourceLimit, opts.ChunkSize, maxRegexChunkSize)
+	}
+	if opts.MaxMatchWindow < 0 {
+		return fmt.Errorf("%w: regex match window must not be negative", regexutil.ErrRegexResourceLimit)
+	}
+	if opts.MaxMatchWindow > regexutil.MaxExactMatchWindowBytes {
+		return fmt.Errorf("%w: match window %d exceeds %d bytes", regexutil.ErrRegexResourceLimit, opts.MaxMatchWindow, regexutil.MaxExactMatchWindowBytes)
+	}
+	if opts.WriteBufferSize < 0 {
+		return fmt.Errorf("%w: regex write buffer size must not be negative", regexutil.ErrRegexResourceLimit)
+	}
+	if opts.WriteBufferSize > MaxRegexWriteBufferBytes {
+		return fmt.Errorf("%w: regex write buffer %d exceeds %d bytes", regexutil.ErrRegexResourceLimit, opts.WriteBufferSize, MaxRegexWriteBufferBytes)
+	}
+	return nil
+}
+
+// finishRegexOutput makes all buffered output visible to Sync before durability
+// or publication can be reported.
+func finishRegexOutput(ctx context.Context, bufferedDst *bufio.Writer, dst syncWriter) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := bufferedDst.Flush(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := dst.Sync(); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func firstPositive(values ...int) int {

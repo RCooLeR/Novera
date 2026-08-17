@@ -4,5 +4,8 @@
 export {
     Column,
     ColumnChange,
+    DiffStatus,
+    IdentityChange,
+    OptionChange,
     TableDiff
 } from "./models.js";

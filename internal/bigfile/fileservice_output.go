@@ -1,6 +1,7 @@
 package bigfile
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,16 +15,22 @@ import (
 	"novera/internal/bigfile/fileio"
 )
 
-var ErrOutputAliasesSource = errors.New("big-file output aliases opened source")
+var (
+	ErrOutputAliasesSource      = errors.New("big-file output aliases opened source")
+	ErrOutputSourceChanged      = errors.New("big-file source changed before output publication")
+	ErrOutputValidationRequired = errors.New("big-file output validation callback is required")
+)
 
 type stagedServiceOutput struct {
-	sourcePath string
-	sourceInfo fs.FileInfo
-	finalPath  string
-	tempPath   string
-	file       *os.File
-	written    int64
-	published  bool
+	sourcePath  string
+	sourceInfo  fs.FileInfo
+	sourceState document.FileState
+	sourceDoc   *document.FileDocument
+	finalPath   string
+	tempPath    string
+	file        *os.File
+	written     int64
+	published   bool
 }
 
 // writeSafeOutput runs producer against an exclusive same-directory temporary
@@ -31,11 +38,42 @@ type stagedServiceOutput struct {
 // close. Any earlier failure removes the partial temp and preserves an existing
 // destination byte-for-byte.
 func writeSafeOutput(doc *document.FileDocument, sourcePath, destination string, producer func(io.Writer) error) (int64, error) {
+	return writeSafeOutputContext(context.Background(), doc, sourcePath, destination, producer)
+}
+
+func writeSafeOutputContext(ctx context.Context, doc *document.FileDocument, sourcePath, destination string, producer func(io.Writer) error) (int64, error) {
+	return writeSafeOutputValidatedContext(ctx, doc, sourcePath, destination, producer, nil)
+}
+
+// writeSafeOutputValidated adds an operation-specific validation immediately
+// before publication. The producer still writes only to an operation-owned
+// same-directory temporary file, and every validation failure removes that
+// temporary file while preserving source and destination bytes.
+func writeSafeOutputValidated(doc *document.FileDocument, sourcePath, destination string, producer func(io.Writer) error, validate func() error) (int64, error) {
+	return writeSafeOutputValidatedContext(context.Background(), doc, sourcePath, destination, producer, func(context.Context) error {
+		if validate == nil {
+			return nil
+		}
+		return validate()
+	})
+}
+
+// writeSafeOutputValidatedContext binds the final publication point to the
+// owning job context. Validation may be expensive and runs before the
+// publication lock; only the final atomic replacement and durability step are
+// serialized with cancellation.
+func writeSafeOutputValidatedContext(ctx context.Context, doc *document.FileDocument, sourcePath, destination string, producer func(io.Writer) error, validate func(context.Context) error) (int64, error) {
 	if doc == nil {
 		return 0, errors.New("source document is required")
 	}
 	if producer == nil {
 		return 0, errors.New("output producer is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
 	out, err := newStagedServiceOutput(doc, sourcePath, destination)
 	if err != nil {
@@ -45,15 +83,14 @@ func writeSafeOutput(doc *document.FileDocument, sourcePath, destination string,
 	if err := producer(out); err != nil {
 		return out.written, err
 	}
-	if err := out.commit(); err != nil {
+	if err := out.commit(ctx, validate); err != nil {
 		return out.written, err
 	}
 	return out.written, nil
 }
 
 func newStagedServiceOutput(doc *document.FileDocument, sourcePath, destination string) (*stagedServiceOutput, error) {
-	destination = strings.TrimSpace(destination)
-	if destination == "" {
+	if strings.TrimSpace(destination) == "" {
 		return nil, errors.New("output path is required")
 	}
 	sourceInfo, err := doc.OpenedFileInfo()
@@ -85,11 +122,13 @@ func newStagedServiceOutput(doc *document.FileDocument, sourcePath, destination 
 		return nil, fmt.Errorf("set staged output permissions: %w", err)
 	}
 	return &stagedServiceOutput{
-		sourcePath: sourcePath,
-		sourceInfo: sourceInfo,
-		finalPath:  destination,
-		tempPath:   tempPath,
-		file:       tmp,
+		sourcePath:  sourcePath,
+		sourceInfo:  sourceInfo,
+		sourceState: doc.OriginalFileState(),
+		sourceDoc:   doc,
+		finalPath:   destination,
+		tempPath:    tempPath,
+		file:        tmp,
 	}, nil
 }
 
@@ -102,7 +141,7 @@ func (o *stagedServiceOutput) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (o *stagedServiceOutput) commit() error {
+func (o *stagedServiceOutput) commit(ctx context.Context, validate func(context.Context) error) error {
 	if o == nil || o.file == nil {
 		return errors.New("staged output is closed")
 	}
@@ -114,15 +153,46 @@ func (o *stagedServiceOutput) commit() error {
 		return fmt.Errorf("close staged output: %w", err)
 	}
 	o.file = nil
+	if err := o.validateSource(); err != nil {
+		return err
+	}
+	if validate != nil {
+		if err := validate(ctx); err != nil {
+			return fmt.Errorf("validate output source: %w", err)
+		}
+	}
 	if err := rejectServiceOutputAlias(o.sourcePath, o.sourceInfo, o.finalPath); err != nil {
 		return err
 	}
-	if err := replaceServiceOutput(o.tempPath, o.finalPath); err != nil {
-		return fmt.Errorf("publish staged output: %w", err)
+	return publishServiceJobOutput(ctx, func() (bool, error) {
+		if err := replaceServiceOutput(o.tempPath, o.finalPath); err != nil {
+			return false, fmt.Errorf("publish staged output: %w", err)
+		}
+		o.published = true
+		if err := syncServiceOutputDirectory(o.finalPath); err != nil {
+			return true, fmt.Errorf("sync output directory: %w", err)
+		}
+		return true, nil
+	})
+}
+
+func (o *stagedServiceOutput) validateSource() error {
+	if o == nil || o.sourceDoc == nil || o.sourceInfo == nil {
+		return ErrOutputValidationRequired
 	}
-	o.published = true
-	if err := syncServiceOutputDirectory(o.finalPath); err != nil {
-		return fmt.Errorf("sync output directory: %w", err)
+	opened, err := o.sourceDoc.OpenedFileInfo()
+	if err != nil {
+		return fmt.Errorf("%w: inspect retained source: %v", ErrOutputSourceChanged, err)
+	}
+	current, err := os.Stat(o.sourcePath)
+	if err != nil {
+		return fmt.Errorf("%w: inspect current source path: %v", ErrOutputSourceChanged, err)
+	}
+	if !opened.Mode().IsRegular() || !current.Mode().IsRegular() ||
+		!os.SameFile(o.sourceInfo, opened) || !os.SameFile(opened, current) ||
+		opened.Size() != o.sourceInfo.Size() || !opened.ModTime().Equal(o.sourceInfo.ModTime()) ||
+		current.Size() != o.sourceState.Size || !current.ModTime().Equal(o.sourceState.ModTime) {
+		return ErrOutputSourceChanged
 	}
 	return nil
 }

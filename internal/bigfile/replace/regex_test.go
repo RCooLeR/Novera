@@ -12,7 +12,7 @@ import (
 func TestPreviewRegexp(t *testing.T) {
 	r := memReaderAt{data: []byte("alpha abc-123 bravo\ncharlie def-456 delta")}
 
-	previews, err := PreviewRegexp(context.Background(), r, []byte(`([a-z]+)-([0-9]+)`), []byte(`${2}:${1}`), RegexPreviewOptions{
+	previews, err := PreviewRegexp(context.Background(), r, []byte(`([a-z]{1,3})-([0-9]{1,3})`), []byte(`${2}:${1}`), RegexPreviewOptions{
 		ChunkSize:    8,
 		MaxHits:      2,
 		PreviewBytes: 6,

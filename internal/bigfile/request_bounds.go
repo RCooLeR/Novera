@@ -6,7 +6,7 @@ const (
 	maxWindowRequestBytes       = 8 << 20
 	maxCSVGridBytes             = 1 << 20
 	maxEditWindowBytes          = 4 << 20
-	maxHexWindowBytes           = 256 << 10
+	maxHexWindowBytes           = 64 << 10
 	defaultCSVPreviewRows       = 50
 	maxCSVPreviewRows           = 1_000
 	maxCSVColumns               = 10_000

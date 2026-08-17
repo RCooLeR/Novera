@@ -2,6 +2,8 @@ package bigfile
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -68,62 +70,94 @@ func TestStageEditRejectsUnboundedAndOverflowingRanges(t *testing.T) {
 	}
 }
 
-func TestSearchAllClampsMaxIntHitBudget(t *testing.T) {
+func TestSearchAllRequestRejectsMaxIntHitBudget(t *testing.T) {
 	data := bytes.Repeat([]byte("x\n"), maxSearchAllHits+250)
 	svc, meta := openBoundTestFile(t, "search.txt", data)
-	got, err := svc.SearchAll(meta.FileID, "x", false, true, false, int(^uint(0)>>1))
+	requestID, err := svc.BeginSearchRequest(meta.FileID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Hits) != maxSearchAllHits {
-		t.Fatalf("hits = %d, want capped %d", len(got.Hits), maxSearchAllHits)
-	}
-	if !got.Truncated {
-		t.Fatal("capped search must report truncation")
+	if _, err := svc.SearchAllRequest(requestID, "x", false, true, false, int(^uint(0)>>1)); err == nil {
+		t.Fatal("SearchAllRequest accepted an unbounded result limit")
 	}
 }
 
-func TestBridgeWindowsClampMaxIntByteBudgets(t *testing.T) {
+func TestBridgeWindowsRejectMaxIntByteBudgets(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
 
 	t.Run("csv grid", func(t *testing.T) {
 		svc, meta := openBoundTestFile(t, "grid.csv", bytes.Repeat([]byte("a"), maxCSVGridBytes+1024))
-		got, err := svc.GetCsvGrid(meta.FileID, ",", 0, maxInt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.NextByte > maxCSVGridBytes {
-			t.Fatalf("next byte = %d, cap = %d", got.NextByte, maxCSVGridBytes)
+		if _, err := svc.GetCsvGrid(meta.FileID, ",", 0, maxInt); err == nil {
+			t.Fatalf("CSV grid accepted byte budget above hard cap %d", maxCSVGridBytes)
 		}
 	})
 
 	t.Run("edit and diff", func(t *testing.T) {
-		data := bytes.Repeat([]byte("a"), maxEditWindowBytes+1024)
-		svc, meta := openBoundTestFile(t, "edit.txt", data)
-		edit, err := svc.GetEditWindow(meta.FileID, 0, maxInt)
-		if err != nil {
-			t.Fatal(err)
+		svc, meta := openBoundTestFile(t, "edit.txt", []byte("alpha\n"))
+		if _, err := svc.GetEditWindow(meta.FileID, 0, maxInt); !errors.Is(err, ErrEditRequestTooLarge) {
+			t.Fatalf("edit oversized request error = %v, want ErrEditRequestTooLarge", err)
 		}
-		if len(edit.Text) > maxEditWindowBytes || edit.NextByte > maxEditWindowBytes {
-			t.Fatalf("edit window bytes = %d, next = %d", len(edit.Text), edit.NextByte)
-		}
-		diff, err := svc.GetDiffWindow(meta.FileID, 0, maxInt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(diff.Edited) > maxEditWindowBytes || len(diff.Original) > maxEditWindowBytes || diff.NextByte > maxEditWindowBytes {
-			t.Fatalf("diff bytes = %d/%d, next = %d", len(diff.Edited), len(diff.Original), diff.NextByte)
+		if _, err := svc.GetDiffWindow(meta.FileID, 0, maxInt); !errors.Is(err, ErrEditRequestTooLarge) {
+			t.Fatalf("diff oversized request error = %v, want ErrEditRequestTooLarge", err)
 		}
 	})
 
 	t.Run("hex", func(t *testing.T) {
 		svc, meta := openBoundTestFile(t, "binary.bin", bytes.Repeat([]byte{0xaa}, maxHexWindowBytes+1024))
-		got, err := svc.GetHexWindow(meta.FileID, 0, maxInt)
+		if _, err := svc.GetHexWindow(meta.FileID, 0, maxInt); !errors.Is(err, ErrHexRequestTooLarge) {
+			t.Fatalf("oversized request error = %v, want ErrHexRequestTooLarge", err)
+		}
+		got, err := svc.GetHexWindow(meta.FileID, 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.NextByte > maxHexWindowBytes {
-			t.Fatalf("next byte = %d, cap = %d", got.NextByte, maxHexWindowBytes)
+			t.Fatalf("default next byte = %d, cap = %d", got.NextByte, maxHexWindowBytes)
+		}
+		if got.FileID != meta.FileID {
+			t.Fatalf("hex window file id = %q, want %q", got.FileID, meta.FileID)
 		}
 	})
+}
+
+func TestHexWindowRejectsNegativeOffsetsAndBudgets(t *testing.T) {
+	svc, meta := openBoundTestFile(t, "binary.bin", []byte{0xaa, 0xbb})
+	for _, test := range []struct {
+		name     string
+		start    int64
+		maxBytes int
+	}{
+		{name: "negative offset", start: -1, maxBytes: 1},
+		{name: "negative budget", start: 0, maxBytes: -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := svc.GetHexWindow(meta.FileID, test.start, test.maxBytes); !errors.Is(err, ErrHexRequestTooLarge) {
+				t.Fatalf("error = %v, want ErrHexRequestTooLarge", err)
+			}
+		})
+	}
+}
+
+func TestCSVServiceRejectsMultiRuneDelimiterInsteadOfDefaultingToComma(t *testing.T) {
+	svc, meta := openBoundTestFile(t, "delimiter.csv", []byte("a,b\n1,2\n"))
+	if _, err := svc.CsvPreview(meta.FileID, "ab", true, 10); err == nil {
+		t.Fatal("multi-rune delimiter silently defaulted to comma")
+	}
+}
+
+func TestCSVSampleReaderIncludesTruncationLookaheadByte(t *testing.T) {
+	data := bytes.Repeat([]byte{'x'}, int(csvSampleBytes+2))
+	svc, meta := openBoundTestFile(t, "lookahead.csv", data)
+	reader, _, err := svc.csvSampleReader(meta.FileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(got)) != csvSampleBytes+1 {
+		t.Fatalf("sample bytes = %d, want %d including lookahead", len(got), csvSampleBytes+1)
+	}
 }

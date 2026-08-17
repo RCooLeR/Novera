@@ -3,7 +3,6 @@ package csv
 import (
 	"bytes"
 	"context"
-	stdcsv "encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -30,11 +29,12 @@ const (
 )
 
 type SchemaOptions struct {
-	Delimiter  rune
-	HasHeader  bool
-	MaxBytes   int64
-	MaxRows    int
-	NullValues []string
+	Delimiter      rune
+	HasHeader      bool
+	MaxBytes       int64
+	MaxRows        int
+	MaxRecordBytes int64
+	NullValues     []string
 }
 
 type SchemaColumn struct {
@@ -67,34 +67,42 @@ func InferSchemaContext(ctx context.Context, r io.Reader, opts SchemaOptions) (S
 		return SchemaReport{}, err
 	}
 
-	data, err := readBoundedSample(ctx, r, opts.MaxBytes)
+	sample, err := readBoundedSampleResult(ctx, r, opts.MaxBytes)
 	if err != nil {
 		return SchemaReport{}, err
 	}
-	truncated := int64(len(data)) > opts.MaxBytes
-	if truncated {
-		data = data[:opts.MaxBytes]
+	data := sample.Data
+	partialOmitted := false
+	if sample.Truncated {
+		data, partialOmitted, err = CompleteRecordPrefix(ctx, data, opts.Delimiter, opts.MaxRecordBytes, true)
+		if err != nil {
+			return SchemaReport{}, err
+		}
 	}
 
 	report := SchemaReport{
-		BytesScanned:    int64(len(data)),
-		TruncatedSample: truncated,
+		BytesScanned:    sample.BytesScanned,
+		TruncatedSample: sample.Truncated,
 		HasHeader:       opts.HasHeader,
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		report.Warnings = append(report.Warnings, "sample is empty")
 		return report, nil
 	}
-	if truncated {
+	if sample.Truncated {
 		report.Warnings = append(report.Warnings, fmt.Sprintf("sample limited to %d bytes", opts.MaxBytes))
 	}
+	if partialOmitted {
+		report.Warnings = append(report.Warnings, "trailing partial logical record omitted from schema inference")
+	}
 
-	reader := stdcsv.NewReader(bytes.NewReader(data))
-	reader.Comma = opts.Delimiter
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-	reader.TrimLeadingSpace = true
-	reader.ReuseRecord = false
+	reader, err := newBoundedCSVReader(ctx, bytes.NewReader(data), csvReaderConfig{
+		Delimiter: opts.Delimiter, MaxRecordBytes: opts.MaxRecordBytes,
+		FieldsPerRecord: -1, LazyQuotes: false,
+	})
+	if err != nil {
+		return report, err
+	}
 
 	var columns []SchemaColumn
 	kinds := []schemaKind{}
@@ -195,18 +203,27 @@ func FormatSchemaReport(report SchemaReport) string {
 }
 
 func normalizeSchemaOptions(opts SchemaOptions) (SchemaOptions, error) {
+	maxBytes, err := normalizeSampleByteLimit("schema sample", opts.MaxBytes, DefaultSchemaMaxBytes)
+	if err != nil {
+		return opts, err
+	}
+	maxRows, err := normalizeSampleRowLimit("schema sample", opts.MaxRows, DefaultSchemaMaxRows)
+	if err != nil {
+		return opts, err
+	}
+	opts.MaxBytes = maxBytes
+	opts.MaxRows = maxRows
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}
 	if !validProjectDelimiter(opts.Delimiter) {
 		return opts, fmt.Errorf("invalid delimiter %q", opts.Delimiter)
 	}
-	if opts.MaxBytes <= 0 {
-		opts.MaxBytes = DefaultSchemaMaxBytes
+	limit, err := normalizeLogicalRecordLimit(opts.MaxRecordBytes)
+	if err != nil {
+		return opts, err
 	}
-	if opts.MaxRows <= 0 {
-		opts.MaxRows = DefaultSchemaMaxRows
-	}
+	opts.MaxRecordBytes = limit
 	return opts, nil
 }
 
@@ -241,22 +258,20 @@ const (
 )
 
 func classifySchemaValue(value string) schemaKind {
-	value = strings.TrimSpace(value)
 	if value == "" {
 		return schemaText
 	}
 	lower := strings.ToLower(value)
 	if lower == "true" || lower == "false" {
-		// NOTE: values are always emitted as quoted strings, and MySQL BOOLEAN is
-		// TINYINT(1), so 'true'/'false' coerce to 0 on import. BOOLEAN is kept for
-		// readability/back-compat; treat the CREATE TABLE type as a best-effort hint.
+		// The MySQL writer validates BOOLEAN columns during the full conversion
+		// and emits these tokens as canonical unquoted 1/0 literals.
 		return schemaBool
 	}
 	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
 		// A value like 007 / 00123 parses as an int but is almost certainly an
 		// identifier (zip/account/leading-zero id). Since values are stored as
 		// quoted strings, a BIGINT column would silently drop the leading zeros on
-		// import — so classify it as TEXT to preserve it.
+		// import вЂ” so classify it as TEXT to preserve it.
 		if looksLikeLeadingZeroInt(value) {
 			return schemaText
 		}

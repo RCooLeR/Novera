@@ -84,6 +84,15 @@ conversation. A canceled or crashed run similarly restores its immutable
 pre-run transcript, so a partial or unpaired tool-call turn is never inherited
 by the next request.
 
+Ask-mode requests use the same fail-closed lifecycle principle. At most four
+completion streams and two model-list requests can be active at once; a
+canceled request keeps its slot until its HTTP/setup work has actually
+returned. Application shutdown permanently closes admission, cancels every
+pending setup or HTTP request, and waits up to ten seconds for cleanup. The
+bridge payload is checked before JSON marshaling: at most 256 messages, 1 MiB
+per message, 256 KiB of system text, roughly 1 MiB of attached workspace
+context, and 4 MiB of aggregate normalized text are accepted.
+
 Every Agent event carries a per-run monotonic sequence number. The renderer
 buffers bounded early or out-of-order events until `Agent.Start` confirms the
 run ID, then applies only a contiguous sequence. Ask-mode stream events use the
@@ -144,6 +153,15 @@ on-disk footprint remains bounded. Disable the environment variable again and
 restart Novera after diagnosis. Provider-debug files are session-scoped and the
 next startup removes both `agent-debug.jsonl` and `agent-debug.jsonl.1`, which
 also clears raw-response logs left by older versions.
+
+The always-on Agent action audit is separate from provider diagnostics. It
+stores structured operation metadata and outcome sizes, not command text, SQL,
+search queries, request bodies/headers, tool output, or error text. On startup,
+older free-form JSONL entries are atomically rewritten to omit their payloads;
+malformed and oversized entries are dropped. The journal compacts to the newest
+4 MiB at startup and whenever its live size would exceed 8 MiB. Its directory
+and file are restricted to user-only permissions on platforms that expose
+POSIX-style modes.
 
 Defaults are intentionally generous for local models:
 

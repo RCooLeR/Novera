@@ -7,7 +7,45 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"novera/internal/bigfile/plugins"
 )
+
+func TestSQLDescriptorUsesTruthfulPerOperationCapabilities(t *testing.T) {
+	descriptor := Plugin()
+	if err := descriptor.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.HugeFileSafe {
+		t.Fatal("SQL descriptor must not make a plugin-wide huge-file-safety claim")
+	}
+	operations := make(map[string]plugins.OperationCapability, len(descriptor.Operations))
+	for _, operation := range descriptor.Operations {
+		operations[operation.ID] = operation
+	}
+	if got := operations["highlight-visible"]; got.Processing != plugins.ProcessingBoundedWindow || got.MaxInputBytes != 8<<20 || got.Memory != plugins.MemoryBounded {
+		t.Fatalf("highlight metadata = %+v", got)
+	}
+	if got := operations["analyze-dump"]; got.Processing != plugins.ProcessingStreaming || got.Memory != plugins.MemoryMetadataProportional {
+		t.Fatalf("analysis metadata = %+v", got)
+	}
+	if got := operations["extract-tables"]; got.AtomicOutput || !strings.Contains(strings.Join(got.Notes, " "), "not all-or-none") {
+		t.Fatalf("extract metadata = %+v", got)
+	}
+	if got := operations["fixture-sample"]; got.Processing != plugins.ProcessingStreaming || got.MaxInputBytes != 0 || got.MaxUnitBytes != 8<<20 || got.Memory != plugins.MemorySampleProportional {
+		t.Fatalf("fixture metadata = %+v", got)
+	}
+
+	descriptor.FilePatterns[0] = "*.changed"
+	descriptor.Operations[0].Notes[0] = "changed"
+	fresh := Plugin()
+	if got := fresh.FilePatterns[0]; got != "*.sql" {
+		t.Fatalf("mutating returned descriptor changed SQL patterns: %q", got)
+	}
+	if fresh.Operations[0].Notes[0] == "changed" {
+		t.Fatal("mutating returned operation notes changed SQL descriptor metadata")
+	}
+}
 
 type memReader struct {
 	data []byte
@@ -83,6 +121,31 @@ func TestSQLRuntimePluginRoutesPresetBuilder(t *testing.T) {
 	}
 	if rules := runtime.BatchRules(cfg); len(rules) != 3 {
 		t.Fatalf("rules = %d, want 3", len(rules))
+	}
+}
+
+func TestSQLBatchRulesDeepCopyNestedByteSlices(t *testing.T) {
+	cfg, err := BuildPreset(ChangeDatabasePreset, "old_db", "new_db", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := BatchRules(cfg)
+	if len(rules) == 0 || len(rules[0].Find) == 0 || len(rules[0].Replace) == 0 {
+		t.Fatalf("rules = %#v", rules)
+	}
+	wantFind := append([]byte(nil), cfg.BatchRules[0].Find...)
+	wantReplace := append([]byte(nil), cfg.BatchRules[0].Replace...)
+	rules[0].Find[0] ^= 0xff
+	rules[0].Replace[0] ^= 0xff
+	if string(cfg.BatchRules[0].Find) != string(wantFind) || string(cfg.BatchRules[0].Replace) != string(wantReplace) {
+		t.Fatal("mutating outward batch rules changed the preset configuration's nested byte slices")
+	}
+
+	var runtime Runtime = RuntimePlugin()
+	runtimeRules := runtime.BatchRules(cfg)
+	runtimeRules[0].Find[0] ^= 0xff
+	if string(cfg.BatchRules[0].Find) != string(wantFind) {
+		t.Fatal("runtime BatchRules returned an aliased Find slice")
 	}
 }
 

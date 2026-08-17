@@ -144,6 +144,16 @@ type runLease struct {
 	nextEventSeq    uint64
 }
 
+type pendingRunStop struct {
+	runID  string
+	cancel context.CancelFunc
+	done   <-chan struct{}
+}
+
+// ErrAgentShuttingDown is returned when Start races or follows the irreversible
+// application-shutdown barrier.
+var ErrAgentShuttingDown = errors.New("agent service is shutting down")
+
 // Service is the bound Wails agent service.
 type Service struct {
 	settings  SettingsReader
@@ -167,12 +177,17 @@ type Service struct {
 	session               []wireMsg
 	sessionID             int
 	startAttempts         int
+	startAttemptsDone     chan struct{}
 	transitionSeq         uint64
 	transitionToken       string
 	transitionSession     []wireMsg
 	transitionSnapshotSet bool
 	shutdownTimeout       time.Duration
+	shuttingDown          bool
+	shutdownOnce          sync.Once
+	shutdownErr           error
 	eventSink             func(agentEvent) // deterministic tests; production uses Wails
+	commandStarted        func()           // deterministic process-tree lifecycle tests
 
 	toolset       map[string]tool
 	toolOrder     []string          // stable order for a reproducible, cache-friendly wire payload
@@ -329,14 +344,7 @@ func containsAny(text string, needles ...string) bool {
 // within a run, so the model can pick up a capability the task evolved to need.
 func growActiveTools(messages []wireMsg, active map[string]bool) bool {
 	before := len(active)
-	var sb strings.Builder
-	for _, m := range messages {
-		if m.Role == "user" || m.Role == "assistant" {
-			sb.WriteString(m.Content)
-			sb.WriteByte('\n')
-		}
-	}
-	for _, name := range selectToolNamesForPrompt(sb.String()) {
+	for _, name := range selectToolNamesForPrompt(toolSelectionText(messages)) {
 		active[name] = true
 	}
 	return len(active) > before
@@ -360,25 +368,108 @@ func toolNameSet(names []string) map[string]bool {
 	return out
 }
 
+// ServiceShutdown permanently closes Agent admission, cancels every active
+// run, and waits for both admitted runs and Start calls still resolving
+// settings or secrets. Wails calls this hook synchronously during application
+// shutdown. The bounded wait prevents a context-free legacy tool or broken
+// settings backend from hanging application exit forever.
+func (s *Service) ServiceShutdown() error {
+	if s == nil {
+		return nil
+	}
+	s.shutdownOnce.Do(func() {
+		s.shutdownErr = s.shutdown()
+	})
+	return s.shutdownErr
+}
+
+func (s *Service) shutdown() error {
+	s.mu.Lock()
+	s.shuttingDown = true
+	pendingStarts := s.startAttempts
+	startDone := s.startAttemptsDone
+	stops := make([]pendingRunStop, 0, len(s.runs))
+	for runID, lease := range s.runs {
+		var cancel context.CancelFunc
+		if !lease.finishing {
+			lease.cancelRequested = true
+			if lease.sessionID == s.sessionID {
+				s.session = cloneWireMessages(lease.sessionBefore)
+			}
+			cancel = lease.cancel
+		}
+		stops = append(stops, pendingRunStop{runID: runID, cancel: cancel, done: lease.done})
+	}
+	timeout := s.shutdownTimeout
+	if timeout <= 0 {
+		timeout = resetShutdownTimeout
+	}
+	s.mu.Unlock()
+
+	for _, stop := range stops {
+		if stop.cancel != nil {
+			stop.cancel()
+		}
+	}
+
+	// Cancellation is synchronous. Once every waiter can observe it, remove all
+	// approval registrations so a late renderer decision cannot be accepted
+	// while shutdown is draining the owning run.
+	s.mu.Lock()
+	for callID := range s.approvals {
+		delete(s.approvals, callID)
+		delete(s.approvalDigests, callID)
+		delete(s.approvalExpirations, callID)
+	}
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if startDone != nil {
+		select {
+		case <-startDone:
+		case <-ctx.Done():
+			return fmt.Errorf("agent shutdown timed out after %s waiting for %d pending Start call(s)", timeout, pendingStarts)
+		}
+	}
+	for _, stop := range stops {
+		if stop.done == nil {
+			continue
+		}
+		select {
+		case <-stop.done:
+		case <-ctx.Done():
+			return fmt.Errorf("agent shutdown timed out after %s waiting for run %q", timeout, stop.runID)
+		}
+	}
+	return nil
+}
+
 // Start kicks off an agent run for the prompt and returns the run id.
 func (s *Service) Start(prompt string) (string, error) {
+	if err := validateAgentPrompt(prompt); err != nil {
+		return "", err
+	}
 	// Register the admission attempt before any settings/secret I/O. Reset can
 	// then invalidate its captured session epoch even while Load/Get is blocked;
 	// the final locked admission check makes the stale attempt fail without ever
 	// acquiring a run lease against a newly switched workspace.
 	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		return "", ErrAgentShuttingDown
+	}
 	if s.transitionToken != "" {
 		s.mu.Unlock()
 		return "", errors.New("Agent cannot start while a workspace transition is in progress.")
 	}
 	startSessionID := s.sessionID
+	if s.startAttempts == 0 {
+		s.startAttemptsDone = make(chan struct{})
+	}
 	s.startAttempts++
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.startAttempts--
-		s.mu.Unlock()
-	}()
+	defer s.finishStartAttempt()
 
 	appSettings := s.settings.Load()
 	cfg := appSettings.LLM
@@ -427,6 +518,11 @@ func (s *Service) Start(prompt string) (string, error) {
 	// individually time-bounded inside run().
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		cancel()
+		return "", ErrAgentShuttingDown
+	}
 	if startSessionID != s.sessionID || s.transitionToken != "" {
 		s.mu.Unlock()
 		cancel()
@@ -454,6 +550,22 @@ func (s *Service) Start(prompt string) (string, error) {
 	jobID := jobs.Start(s.jobs, "agent", clip(prompt, 80), func() { s.requestCancel(id) })
 	go s.run(ctx, id, jobID, prompt, sessionID, session, appSettings, key)
 	return id, nil
+}
+
+func (s *Service) finishStartAttempt() {
+	s.mu.Lock()
+	s.startAttempts--
+	if s.startAttempts < 0 {
+		s.mu.Unlock()
+		panic("agent: negative pending Start count")
+	}
+	if s.startAttempts == 0 {
+		if done := s.startAttemptsDone; done != nil {
+			close(done)
+		}
+		s.startAttemptsDone = nil
+	}
+	s.mu.Unlock()
 }
 
 // ResetConversation cancels and awaits the active run before clearing the
@@ -702,18 +814,7 @@ func (s *Service) appendSession(runID string, sessionID int, msgs ...wireMsg) bo
 }
 
 func trimConversationMessages(msgs []wireMsg) []wireMsg {
-	if len(msgs) <= maxConversationMessages {
-		return msgs
-	}
-	cut := len(msgs) - maxConversationMessages
-	for cut < len(msgs) && msgs[cut].Role == "tool" {
-		cut++
-	}
-	out := make([]wireMsg, 0, len(msgs)-cut)
-	for _, msg := range msgs[cut:] {
-		out = append(out, cloneWireMsg(msg))
-	}
-	return out
+	return trimWireMessages(msgs, maxConversationMessages, maxAgentTranscriptBytes)
 }
 
 func cloneWireMessages(msgs []wireMsg) []wireMsg {
@@ -745,26 +846,7 @@ func cloneWireToolCalls(calls []wireToolCall) []wireToolCall {
 }
 
 func toolSelectionText(msgs []wireMsg) string {
-	if len(msgs) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	start := max(0, len(msgs)-40)
-	for _, msg := range msgs[start:] {
-		switch msg.Role {
-		case "user", "assistant":
-			b.WriteString(msg.Content)
-			b.WriteByte('\n')
-			for _, tc := range msg.ToolCalls {
-				b.WriteString(tc.Function.Name)
-				b.WriteByte('\n')
-			}
-		case "tool":
-			b.WriteString(msg.Name)
-			b.WriteByte('\n')
-		}
-	}
-	return b.String()
+	return boundedSelectionText(msgs)
 }
 
 func scopeToolCallIDs(runID string, calls []wireToolCall, next *int) {
@@ -854,10 +936,16 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 	agentCfg := appSettings.Agent.Normalized()
 
 	activeToolNames := selectToolNamesForPrompt(prompt + "\n" + toolSelectionText(session))
-	messages := append([]wireMsg{{Role: "system", Content: s.systemPromptForTools(activeToolNames)}}, cloneWireMessages(session)...)
+	systemMessage := wireMsg{Role: "system", Content: s.systemPromptForTools(activeToolNames)}
+	if err := validateWireMessage(systemMessage); err != nil {
+		jobErr = "Agent system prompt exceeds its internal message budget: " + err.Error()
+		s.emitErrorOrCancellation(runID, jobErr)
+		return
+	}
+	messages := trimRunMessages(append([]wireMsg{systemMessage}, cloneWireMessages(session)...))
 	toolDefs := s.toolDefsFor(activeToolNames)
 	activeToolSet := toolNameSet(activeToolNames)
-	seen := map[string]int{} // signature -> times called, to break repeat-loops
+	seen := newBoundedToolCallHistory(maxAgentSeenSignatures)
 	var currentPlan []planStep
 	retriedNoProgressCompletion := false
 	forceFinalAnswer := false
@@ -883,8 +971,8 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 			comp, err := func() (completion, error) {
 				cctx, ccancel := context.WithTimeout(ctx, cfg.RequestTimeout())
 				defer ccancel()
-				// Send a recency-windowed view; the full transcript is still kept
-				// locally (messages) for correct tool-call/result pairing.
+				// Send a recency-windowed view. The local transcript is independently
+				// byte/count bounded while preserving recent tool-call/result pairing.
 				wireTools := toolDefs
 				if forceFinalAnswer {
 					wireTools = nil
@@ -931,7 +1019,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 				if hasOpenPlanStep(currentPlan) {
 					if !retriedNoProgressCompletion {
 						retriedNoProgressCompletion = true
-						messages = append(messages,
+						messages = appendRunMessages(messages,
 							wireMsg{Role: "assistant", Content: comp.Content},
 							wireMsg{
 								Role:    "user",
@@ -960,7 +1048,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 			// have been answered so combined "plan + final result" turns don't
 			// disappear from chat.
 			assistantMsg := wireMsg{Role: "assistant", ToolCalls: comp.ToolCalls}
-			messages = append(messages, assistantMsg)
+			messages = appendRunMessages(messages, assistantMsg)
 			if !s.appendSession(runID, sessionID, assistantMsg) {
 				s.emitTerminal(runID, agentEvent{RunID: runID, Type: "error", Text: "Run cancelled."})
 				return
@@ -977,10 +1065,8 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 				if known {
 					sigName = canon
 				}
-				sig := sigName + "|" + strings.TrimSpace(tc.Function.Arguments)
-				seen[sig]++
 				var result dispatchResult
-				if seen[sig] > 1 {
+				if seen.observe(sigName, tc.Function.Arguments) > 1 {
 					result.output = "You already made this exact tool call; the result will not change. Stop calling tools and use what you already have to write your final answer."
 					if !s.emitActive(runID, agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: tc.Function.Name, Result: result.output}) {
 						s.emitTerminal(runID, agentEvent{RunID: runID, Type: "error", Text: "Run cancelled."})
@@ -994,7 +1080,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 					return
 				}
 				toolMsg := wireMsg{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: result.output}
-				messages = append(messages, toolMsg)
+				messages = appendRunMessages(messages, toolMsg)
 				if !s.appendSession(runID, sessionID, toolMsg) {
 					s.emitTerminal(runID, agentEvent{RunID: runID, Type: "error", Text: "Run cancelled."})
 					return
@@ -1020,11 +1106,18 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 			if growActiveTools(messages, activeToolSet) {
 				activeToolNames = orderedToolSubset(activeToolSet)
 				toolDefs = s.toolDefsFor(activeToolNames)
-				messages[0].Content = s.systemPromptForTools(activeToolNames)
+				updatedSystem := wireMsg{Role: "system", Content: s.systemPromptForTools(activeToolNames)}
+				if err := validateWireMessage(updatedSystem); err != nil {
+					jobErr = "Agent system prompt exceeds its internal message budget: " + err.Error()
+					s.emitErrorOrCancellation(runID, jobErr)
+					return
+				}
+				messages[0] = updatedSystem
+				messages = trimRunMessages(messages)
 			}
 			if visibleContent != "" {
 				textMsg := wireMsg{Role: "assistant", Content: visibleContent}
-				messages = append(messages, textMsg)
+				messages = appendRunMessages(messages, textMsg)
 				if !s.appendSession(runID, sessionID, textMsg) {
 					s.emitTerminal(runID, agentEvent{RunID: runID, Type: "error", Text: "Run cancelled."})
 					return
@@ -1039,7 +1132,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 			if knownCalls == 0 {
 				if !retriedNoProgressCompletion {
 					retriedNoProgressCompletion = true
-					messages = append(messages, wireMsg{
+					messages = appendRunMessages(messages, wireMsg{
 						Role:    "user",
 						Content: fmt.Sprintf("The tool calls you just emitted were not valid active Novera tools. Do not use pseudo-tools such as thought, analysis, or channel. Continue by calling one of these active function tools exactly as named, with valid JSON arguments: %s.", strings.Join(activeToolNames, ", ")),
 					})
@@ -1053,7 +1146,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 			retriedNoProgressCompletion = false
 			forceFinalAnswer = toolCallsOnlyUpdatePlan(comp.ToolCalls) && !hasOpenPlanStep(currentPlan)
 			if forceFinalAnswer {
-				messages = append(messages, wireMsg{
+				messages = appendRunMessages(messages, wireMsg{
 					Role:    "user",
 					Content: "The visible plan is complete. Do not call tools. Provide the final answer now in normal assistant text.",
 				})
@@ -1078,7 +1171,7 @@ func (s *Service) run(ctx context.Context, runID, jobID, prompt string, sessionI
 			finishSuccessfully()
 			return
 		}
-		messages = append(messages, wireMsg{
+		messages = appendRunMessages(messages, wireMsg{
 			Role:    "user",
 			Content: fmt.Sprintf("Continue. You have used %d steps so far; keep working toward the goal and stop calling tools once it's complete.", totalSteps),
 		})
@@ -1095,10 +1188,9 @@ func (s *Service) awaitContinue(ctx context.Context, runID string, steps int) ga
 		s.emitActive(runID, agentEvent{RunID: runID, Type: "continue_request", CallID: callID, Text: fmt.Sprintf("%d", steps)})
 	})
 	if decision == gateCanceled {
-		s.audit.record(AuditEntry{
+		s.audit.record(auditAction{
 			RunID: runID, CallID: callID, Tool: "continue_checkpoint",
 			Decision: string(decision), Status: "canceled",
-			Detail: "The run was canceled while waiting for a continuation decision.",
 		})
 	}
 	return decision
@@ -1146,7 +1238,7 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, a
 		intentDigest = intent.digest
 		if approvalErr != nil {
 			out := "The action was not run because its exact approval intent could not be created: " + approvalErr.Error()
-			s.audit.record(AuditEntry{RunID: runID, CallID: tc.ID, Tool: name, Summary: auditSummary(args), Decision: "invalid_intent", Status: "error", Detail: out, IntentDigest: intentDigest})
+			s.audit.record(auditAction{RunID: runID, CallID: tc.ID, Tool: name, Args: args, Decision: "invalid_intent", Status: "error", ResultBytes: len(out), IntentDigest: intentDigest})
 			s.emitActive(runID, agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: name, Result: out})
 			return dispatchResult{output: out, denied: true, tool: name}
 		}
@@ -1156,7 +1248,7 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, a
 			if gate == gateCanceled {
 				status = "canceled"
 			}
-			s.audit.record(AuditEntry{RunID: runID, CallID: tc.ID, Tool: name, Summary: auditSummary(args), Decision: string(gate), Status: status, Detail: out, IntentDigest: intentDigest})
+			s.audit.record(auditAction{RunID: runID, CallID: tc.ID, Tool: name, Args: args, Decision: string(gate), Status: status, ResultBytes: len(out), IntentDigest: intentDigest})
 			if gate == gateCanceled {
 				return dispatchResult{canceled: true, tool: name}
 			}
@@ -1168,7 +1260,7 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, a
 	// Cancellation is authoritative over an approval that became ready at the
 	// same time. If Cancel won before this dispatch point, never start the tool.
 	if s.runCanceled(runID, ctx) {
-		s.audit.record(AuditEntry{RunID: runID, CallID: tc.ID, Tool: name, Summary: auditSummary(args), Decision: "canceled", Status: "canceled", Detail: "cancellation won before tool dispatch; action was not run", IntentDigest: intentDigest})
+		s.audit.record(auditAction{RunID: runID, CallID: tc.ID, Tool: name, Args: args, Decision: "canceled", Status: "canceled", IntentDigest: intentDigest})
 		return dispatchResult{canceled: true, tool: name}
 	}
 	// Tools that can block outside the process must honour the run's context
@@ -1193,12 +1285,10 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, a
 	}
 	if s.runCanceled(runID, ctx) {
 		status := "completed_after_cancel"
-		detail := "tool returned after cancellation; its result was suppressed from events and conversation state"
 		if err != nil {
 			status = "error_after_cancel"
-			detail = "tool returned an error after cancellation; its result was suppressed from events and conversation state"
 		}
-		s.audit.record(AuditEntry{RunID: runID, CallID: tc.ID, Tool: name, Summary: auditSummary(args), Decision: decision, Status: status, Detail: detail, IntentDigest: intentDigest})
+		s.audit.record(auditAction{RunID: runID, CallID: tc.ID, Tool: name, Args: args, Decision: decision, Status: status, ResultBytes: len(out), IntentDigest: intentDigest})
 		return dispatchResult{canceled: true, tool: name}
 	}
 	if err != nil {
@@ -1213,7 +1303,7 @@ func (s *Service) dispatch(ctx context.Context, runID string, tc wireToolCall, a
 	if err != nil {
 		status = "error"
 	}
-	s.audit.record(AuditEntry{RunID: runID, CallID: tc.ID, Tool: name, Summary: auditSummary(args), Decision: decision, Status: status, Detail: clip(out, 300), IntentDigest: intentDigest})
+	s.audit.record(auditAction{RunID: runID, CallID: tc.ID, Tool: name, Args: args, Decision: decision, Status: status, ResultBytes: len(out), IntentDigest: intentDigest})
 	s.emitActive(runID, agentEvent{RunID: runID, Type: "tool_result", CallID: tc.ID, Tool: name, Result: out})
 	return dispatchResult{output: out, tool: name}
 }
@@ -1964,7 +2054,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 				if err != nil {
 					return "", err
 				}
-				prior, _, err := workspace.ReadRaw(s.ws, path)
+				prior, _, err := workspace.ReadRawBounded(s.ws, path, rollbackMaxFileBytes)
 				if err != nil {
 					return "", err
 				}
@@ -2018,7 +2108,7 @@ func (s *Service) buildTools() (map[string]tool, []string) {
 			mutating: true,
 			run: func(args map[string]any) (string, error) {
 				from, to := getStr(args, "from"), getStr(args, "to")
-				data, existed, err := workspace.ReadRaw(s.ws, from)
+				data, existed, err := workspace.ReadRawBounded(s.ws, from, rollbackMaxFileBytes)
 				if err != nil {
 					return "", err
 				}
@@ -2231,6 +2321,9 @@ func (s *Service) complete(ctx context.Context, runID, base, model, key string, 
 	if err := netsafe.ValidateCredentialTransport(base, key); err != nil {
 		return completion{}, err
 	}
+	if err := validateProviderMessages(msgs); err != nil {
+		return completion{}, err
+	}
 	body := completionRequest{Model: model, Messages: msgs, Temperature: 0.2, Stream: false}
 	if len(tools) > 0 {
 		body.Tools = tools
@@ -2279,7 +2372,11 @@ func (s *Service) complete(ctx context.Context, runID, base, model, key string, 
 	if len(parsed.Choices) == 0 {
 		return completion{}, errors.New("provider returned no choices")
 	}
-	return completion{Content: parsed.Choices[0].Message.Content, ToolCalls: parsed.Choices[0].Message.ToolCalls}, nil
+	result := completion{Content: parsed.Choices[0].Message.Content, ToolCalls: parsed.Choices[0].Message.ToolCalls}
+	if err := validateCompletionPayload(result); err != nil {
+		return completion{}, err
+	}
+	return result, nil
 }
 
 func (s *Service) recordCompletionDebug(runID, model, endpoint string, msgs []wireMsg, tools []wireToolDef, requestBytes, statusCode int, duration time.Duration, rawResp []byte, err error) {
@@ -2329,8 +2426,8 @@ func debugToolNames(tools []wireToolDef) []string {
 // assistant+tool "rounds" plus the user message that led into the first kept
 // round. The cut never starts on a tool message, so tool results are not
 // orphaned from their assistant tool_calls (which OpenAI-compatible APIs
-// reject). The caller keeps the full slice for local bookkeeping; this only
-// shapes the wire payload.
+// reject). The caller keeps a separately byte/count-bounded local slice; this
+// applies the provider's tighter user-configured recency window.
 func windowMessages(msgs []wireMsg, keepGroups int) []wireMsg {
 	if keepGroups <= 0 || len(msgs) <= 2 {
 		return msgs
@@ -2420,6 +2517,9 @@ func (s *Service) runCommand(parent context.Context, command string, timeout tim
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return output.String(), fmt.Errorf("command process-tree ownership failed: %w", err)
+	}
+	if s.commandStarted != nil {
+		s.commandStarted()
 	}
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()

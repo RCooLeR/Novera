@@ -250,6 +250,78 @@ func TestSourceRangeToTransformedRejectsReplacedSourceRange(t *testing.T) {
 	}
 }
 
+func TestSessionRevisionIsMonotonicAndExhaustionIsTransactional(t *testing.T) {
+	session := NewSession(6, DefaultMaxInsertedBytes)
+	if err := session.ApplyEdit(Edit{Start: 1, End: 2, Text: []byte("X")}); err != nil {
+		t.Fatal(err)
+	}
+	if session.Revision() != 1 {
+		t.Fatalf("revision after apply = %d", session.Revision())
+	}
+	if err := session.Undo(); err != nil {
+		t.Fatal(err)
+	}
+	if session.Revision() != 2 {
+		t.Fatalf("revision after undo = %d", session.Revision())
+	}
+	if err := session.Redo(); err != nil {
+		t.Fatal(err)
+	}
+	if session.Revision() != 3 {
+		t.Fatalf("revision after redo = %d", session.Revision())
+	}
+	if err := session.DiscardEdits(); err != nil {
+		t.Fatal(err)
+	}
+	if session.Revision() != 4 || session.HasEdits() {
+		t.Fatalf("discard state revision=%d edits=%v", session.Revision(), session.HasEdits())
+	}
+
+	session.revision = ^uint64(0)
+	sizeBefore := session.Size()
+	if err := session.ApplyEdit(Edit{Start: 0, End: 0, Text: []byte("!")}); !errors.Is(err, ErrSessionRevisionExhausted) {
+		t.Fatalf("exhausted apply error = %v", err)
+	}
+	if session.Size() != sizeBefore || session.HasEdits() || session.Revision() != ^uint64(0) {
+		t.Fatal("revision exhaustion mutated session state")
+	}
+	if err := session.DiscardEdits(); !errors.Is(err, ErrSessionRevisionExhausted) {
+		t.Fatalf("exhausted discard error = %v", err)
+	}
+}
+
+func TestTransformedRangeToSourceAccountsForInsertAndDelete(t *testing.T) {
+	t.Run("insert", func(t *testing.T) {
+		session := NewSession(6, DefaultMaxInsertedBytes)
+		if err := session.ApplyEdit(Edit{Start: 2, End: 2, Text: []byte("XY")}); err != nil {
+			t.Fatal(err)
+		}
+		inserted, ok := session.TransformedRangeToSource(2, 4)
+		if !ok || inserted != (Range{Start: 2, End: 2}) {
+			t.Fatalf("inserted mapping = %+v, %v", inserted, ok)
+		}
+		following, ok := session.TransformedRangeToSource(4, 6)
+		if !ok || following != (Range{Start: 2, End: 4}) {
+			t.Fatalf("following mapping = %+v, %v", following, ok)
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		session := NewSession(6, DefaultMaxInsertedBytes)
+		if err := session.ApplyEdit(Edit{Start: 2, End: 4}); err != nil {
+			t.Fatal(err)
+		}
+		deleted, ok := session.TransformedRangeToSource(2, 2)
+		if !ok || deleted != (Range{Start: 2, End: 4}) {
+			t.Fatalf("deleted mapping = %+v, %v", deleted, ok)
+		}
+		following, ok := session.TransformedRangeToSource(2, 4)
+		if !ok || following != (Range{Start: 4, End: 6}) {
+			t.Fatalf("following mapping = %+v, %v", following, ok)
+		}
+	})
+}
+
 func renderSessionForTest(t *testing.T, session *Session, source string) string {
 	t.Helper()
 

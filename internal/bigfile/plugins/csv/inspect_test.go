@@ -88,6 +88,55 @@ func TestInspectReaderHonorsBoundedSample(t *testing.T) {
 	}
 }
 
+func TestInspectReaderTruncatedQuotedCSVDisqualifiesWrongDelimiter(t *testing.T) {
+	report, err := InspectReader(strings.NewReader("id,name\n1,\"Ada\"\n2,\"Grace\"\n"), InspectOptions{
+		MaxBytes: 22,
+		MaxRows:  10,
+	})
+	if err != nil {
+		t.Fatalf("InspectReader() error = %v", err)
+	}
+	if report.Delimiter != ',' {
+		t.Fatalf("delimiter = %q, want comma; candidates = %+v", report.Delimiter, report.Candidates)
+	}
+	if !report.TruncatedSample {
+		t.Fatal("truncated sample was not reported")
+	}
+}
+
+func TestInspectReaderFieldLimitDisqualifiesOnlyWrongDelimiter(t *testing.T) {
+	wideValue := strings.Repeat(",", MaxCSVFieldsPerRecord)
+	complete := "id\tpayload\n1\t" + wideValue + "\n2\tok\n3\tfine\n"
+	truncated := complete + strings.Repeat("tail", 20)
+
+	tests := []struct {
+		name     string
+		input    string
+		maxBytes int64
+	}{
+		{name: "complete sample", input: complete},
+		{
+			name:     "truncated sample",
+			input:    truncated,
+			maxBytes: int64(strings.Index(truncated, "3\tfine") + 3),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			report, err := InspectReader(strings.NewReader(test.input), InspectOptions{
+				MaxBytes: test.maxBytes,
+				MaxRows:  10,
+			})
+			if err != nil {
+				t.Fatalf("InspectReader() error = %v", err)
+			}
+			if report.Delimiter != '\t' {
+				t.Fatalf("delimiter = %q, want tab; candidates = %+v", report.Delimiter, report.Candidates)
+			}
+		})
+	}
+}
+
 func TestInspectReaderRequiresReader(t *testing.T) {
 	if _, err := InspectReader(nil, InspectOptions{}); err == nil {
 		t.Fatal("expected nil reader error")

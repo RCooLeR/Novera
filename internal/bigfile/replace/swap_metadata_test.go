@@ -2,13 +2,14 @@ package replace
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestReplacePlainFileSwapOriginalPreservesBackupTimeAndSourceReadOnlyMode(t *testing.T) {
+func TestReplacePlainFileSwapOriginalPreservesReadOnlySourceByRefusingMutation(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "source.txt")
 	outPath := filepath.Join(dir, "output.txt")
@@ -33,11 +34,11 @@ func TestReplacePlainFileSwapOriginalPreservesBackupTimeAndSourceReadOnlyMode(t 
 		SwapOriginal: true,
 		BackupPath:   backupPath,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrSwapOriginalDisabled) {
+		t.Fatalf("error = %v, want ErrSwapOriginalDisabled", err)
 	}
-	if !summary.Swapped {
-		t.Fatal("expected swapped summary")
+	if summary != (FileSummary{}) {
+		t.Fatalf("summary = %+v, want zero summary", summary)
 	}
 
 	sourceInfo, err := os.Stat(srcPath)
@@ -48,17 +49,18 @@ func TestReplacePlainFileSwapOriginalPreservesBackupTimeAndSourceReadOnlyMode(t 
 		t.Fatalf("swapped source mode = %v, want read-only permission bits preserved", sourceInfo.Mode().Perm())
 	}
 
-	backupInfo, err := os.Stat(backupPath)
-	if err != nil {
-		t.Fatal(err)
+	assertModTimeClose(t, srcPath, sourceInfo.ModTime(), originalTime)
+	if got, readErr := os.ReadFile(srcPath); readErr != nil || string(got) != "hello world hello" {
+		t.Fatalf("source changed: %q, %v", got, readErr)
 	}
-	if !isReadOnlyMode(backupInfo.Mode()) {
-		t.Fatalf("backup mode = %v, want original read-only permission bits", backupInfo.Mode().Perm())
+	for _, path := range []string{outPath, backupPath, outPath + ".quarry.tmp", outPath + ".quarry.manifest.json"} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("disabled swap created %q: %v", path, statErr)
+		}
 	}
-	assertModTimeClose(t, backupPath, backupInfo.ModTime(), originalTime)
 }
 
-func TestResumeRecoverySourceMissingUsesBackupModeForRestoredSource(t *testing.T) {
+func TestResumeRecoverySourceMissingPreservesBackupAndOutput(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "source.sql")
 	outputPath := filepath.Join(dir, "output.sql")
@@ -78,7 +80,6 @@ func TestResumeRecoverySourceMissingUsesBackupModeForRestoredSource(t *testing.T
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = os.Chmod(sourcePath, 0o666)
 		_ = os.Chmod(backupPath, 0o666)
 	})
 
@@ -97,25 +98,37 @@ func TestResumeRecoverySourceMissingUsesBackupModeForRestoredSource(t *testing.T
 	}, true); err != nil {
 		t.Fatal(err)
 	}
+	manifestBefore, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	state, err := InspectRecoveryManifest(manifestPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := ResumeRecovery(state)
+	if _, err := ResumeRecovery(state); !errors.Is(err, ErrRecoveryMutationDisabled) {
+		t.Fatalf("ResumeRecovery error = %v", err)
+	}
+	if _, err := os.Stat(sourcePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source path was created: %v", err)
+	}
+	if got, err := os.ReadFile(outputPath); err != nil || string(got) != "new source" {
+		t.Fatalf("output changed: %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(backupPath); err != nil || string(got) != "old source" {
+		t.Fatalf("backup changed: %q, %v", got, err)
+	}
+	backupInfo, err := os.Stat(backupPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resumed.Manifest.Swapped || resumed.Manifest.Status != "complete" {
-		t.Fatalf("manifest swapped/status = %v/%q", resumed.Manifest.Swapped, resumed.Manifest.Status)
+	if !isReadOnlyMode(backupInfo.Mode()) {
+		t.Fatalf("backup mode = %v, want read-only", backupInfo.Mode().Perm())
 	}
-
-	sourceInfo, err := os.Stat(sourcePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isReadOnlyMode(sourceInfo.Mode()) {
-		t.Fatalf("restored source mode = %v, want backup read-only permission bits", sourceInfo.Mode().Perm())
+	assertModTimeClose(t, backupPath, backupInfo.ModTime(), originalTime)
+	if got, err := os.ReadFile(manifestPath); err != nil || string(got) != string(manifestBefore) {
+		t.Fatalf("manifest changed: %q, %v", got, err)
 	}
 }
 

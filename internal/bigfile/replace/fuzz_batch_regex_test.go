@@ -78,7 +78,7 @@ func FuzzPreviewBatchRegexpConsistentWithReplace(f *testing.F) {
 
 		previewOpts := RegexPreviewOptions{
 			ChunkSize:    chunkSize,
-			MaxHits:      0,
+			MaxHits:      len(src) + 1,
 			PreviewBytes: 16,
 		}
 		regexOpts := RegexOptions{

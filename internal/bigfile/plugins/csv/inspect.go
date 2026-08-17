@@ -3,7 +3,6 @@ package csv
 import (
 	"bytes"
 	"context"
-	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -19,9 +18,13 @@ const (
 )
 
 type InspectOptions struct {
-	MaxBytes   int64
-	MaxRows    int
-	Delimiters []rune
+	MaxBytes       int64
+	MaxRows        int
+	MaxRecordBytes int64
+	Delimiters     []rune
+	// SourceTruncated tells delimiter evaluation to omit the final logical
+	// record unless it ends at a parser-confirmed newline boundary.
+	SourceTruncated bool
 }
 
 type DelimiterCandidate struct {
@@ -57,36 +60,69 @@ func InspectReaderContext(ctx context.Context, r io.Reader, opts InspectOptions)
 	if r == nil {
 		return DelimiterReport{}, errors.New("reader is required")
 	}
-	opts = normalizeInspectOptions(opts)
-	data, err := readBoundedSample(ctx, r, opts.MaxBytes)
+	opts, err := normalizeInspectOptions(opts)
 	if err != nil {
 		return DelimiterReport{}, err
 	}
-
-	truncated := int64(len(data)) > opts.MaxBytes
-	if truncated {
-		data = data[:opts.MaxBytes]
+	sample, err := readBoundedSampleResult(ctx, r, opts.MaxBytes)
+	if err != nil {
+		return DelimiterReport{}, err
 	}
+	data := sample.Data
+	sourceTruncated := sample.Truncated || opts.SourceTruncated
 
 	report := DelimiterReport{
-		BytesScanned:    int64(len(data)),
-		TruncatedSample: truncated,
+		BytesScanned:    sample.BytesScanned,
+		TruncatedSample: sample.Truncated,
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		report.Confidence = "none"
 		report.Warnings = append(report.Warnings, "sample is empty")
 		return report, nil
 	}
-	if truncated {
+	if sample.Truncated {
 		report.Warnings = append(report.Warnings, fmt.Sprintf("sample limited to %d bytes", opts.MaxBytes))
+	}
+	if sourceTruncated {
+		report.TruncatedSample = true
+		report.Warnings = append(report.Warnings, "trailing partial logical record omitted from delimiter inspection")
 	}
 
 	candidates := make([]DelimiterCandidate, 0, len(opts.Delimiters))
+	var fieldLimitErr error
 	for _, delimiter := range opts.Delimiters {
 		if err := contextErr(ctx); err != nil {
 			return report, err
 		}
-		candidates = append(candidates, inspectDelimiter(data, delimiter, opts.MaxRows))
+		candidateData := data
+		if sourceTruncated {
+			candidateData, _, err = CompleteRecordPrefix(ctx, data, delimiter, opts.MaxRecordBytes, true)
+			if err != nil {
+				if errors.Is(err, ErrCSVRecordTooLarge) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return report, err
+				}
+				if errors.Is(err, ErrCSVTooManyFields) && fieldLimitErr == nil {
+					fieldLimitErr = err
+				}
+				candidates = append(candidates, DelimiterCandidate{
+					Delimiter:  delimiter,
+					Name:       delimiterName(delimiter),
+					ParseError: err.Error(),
+				})
+				continue
+			}
+		}
+		candidate, err := inspectDelimiter(ctx, candidateData, delimiter, opts.MaxRows, opts.MaxRecordBytes)
+		if err != nil {
+			if !errors.Is(err, ErrCSVTooManyFields) {
+				return report, err
+			}
+			if fieldLimitErr == nil {
+				fieldLimitErr = err
+			}
+			candidate.ParseError = err.Error()
+		}
+		candidates = append(candidates, candidate)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].Score != candidates[j].Score {
@@ -96,6 +132,9 @@ func InspectReaderContext(ctx context.Context, r io.Reader, opts InspectOptions)
 	})
 	report.Candidates = candidates
 	if len(candidates) == 0 || candidates[0].Score <= 0 || candidates[0].Columns <= 1 {
+		if fieldLimitErr != nil {
+			return report, fieldLimitErr
+		}
 		report.Confidence = "none"
 		report.Warnings = append(report.Warnings, "no consistent delimiter detected")
 		return report, nil
@@ -106,31 +145,56 @@ func InspectReaderContext(ctx context.Context, r io.Reader, opts InspectOptions)
 	report.DelimiterName = best.Name
 	report.Columns = best.Columns
 	report.RecordsScanned = best.RecordsParsed
-	report.HasHeader = likelyHeader(data, best.Delimiter, opts.MaxRows)
+	headerData := data
+	if sourceTruncated {
+		headerData, _, err = CompleteRecordPrefix(ctx, data, best.Delimiter, opts.MaxRecordBytes, true)
+		if err != nil {
+			return report, err
+		}
+	}
+	report.HasHeader, err = likelyHeader(ctx, headerData, best.Delimiter, opts.MaxRows, opts.MaxRecordBytes)
+	if err != nil {
+		return report, err
+	}
 	report.Confidence = delimiterConfidence(best, candidates)
 	return report, nil
 }
 
-func normalizeInspectOptions(opts InspectOptions) InspectOptions {
-	if opts.MaxBytes <= 0 {
-		opts.MaxBytes = DefaultInspectMaxBytes
+func normalizeInspectOptions(opts InspectOptions) (InspectOptions, error) {
+	maxBytes, err := normalizeSampleByteLimit("inspect sample", opts.MaxBytes, DefaultInspectMaxBytes)
+	if err != nil {
+		return opts, err
 	}
-	if opts.MaxRows <= 0 {
-		opts.MaxRows = DefaultInspectMaxRows
+	maxRows, err := normalizeSampleRowLimit("inspect sample", opts.MaxRows, DefaultInspectMaxRows)
+	if err != nil {
+		return opts, err
 	}
+	opts.MaxBytes = maxBytes
+	opts.MaxRows = maxRows
 	if len(opts.Delimiters) == 0 {
 		opts.Delimiters = []rune{',', '\t', ';', '|'}
 	}
-	return opts
+	for _, delimiter := range opts.Delimiters {
+		if err := ValidateDelimiter(delimiter); err != nil {
+			return opts, err
+		}
+	}
+	limit, err := normalizeLogicalRecordLimit(opts.MaxRecordBytes)
+	if err != nil {
+		return opts, err
+	}
+	opts.MaxRecordBytes = limit
+	return opts, nil
 }
 
-func inspectDelimiter(data []byte, delimiter rune, maxRows int) DelimiterCandidate {
-	reader := csv.NewReader(bytes.NewReader(data))
-	reader.Comma = delimiter
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-	reader.TrimLeadingSpace = true
-	reader.ReuseRecord = false
+func inspectDelimiter(ctx context.Context, data []byte, delimiter rune, maxRows int, maxRecordBytes int64) (DelimiterCandidate, error) {
+	reader, err := newBoundedCSVReader(ctx, bytes.NewReader(data), csvReaderConfig{
+		Delimiter: delimiter, MaxRecordBytes: maxRecordBytes,
+		FieldsPerRecord: -1, LazyQuotes: false, TrimLeadingSpace: true,
+	})
+	if err != nil {
+		return DelimiterCandidate{}, err
+	}
 
 	lengths := make(map[int]int)
 	totalColumns := 0
@@ -144,6 +208,9 @@ func inspectDelimiter(data []byte, delimiter rune, maxRows int) DelimiterCandida
 			break
 		}
 		if err != nil {
+			if errors.Is(err, ErrCSVRecordTooLarge) || errors.Is(err, ErrCSVTooManyFields) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return candidate, err
+			}
 			candidate.ParseError = err.Error()
 			break
 		}
@@ -156,7 +223,7 @@ func inspectDelimiter(data []byte, delimiter rune, maxRows int) DelimiterCandida
 		}
 	}
 	if candidate.RowsWithFields == 0 {
-		return candidate
+		return candidate, nil
 	}
 
 	modalColumns, consistentRows := modalFieldCount(lengths)
@@ -170,7 +237,7 @@ func inspectDelimiter(data []byte, delimiter rune, maxRows int) DelimiterCandida
 	if candidate.ParseError != "" {
 		candidate.Score *= 0.75
 	}
-	return candidate
+	return candidate, nil
 }
 
 func modalFieldCount(lengths map[int]int) (int, int) {
@@ -197,20 +264,34 @@ func delimiterConfidence(best DelimiterCandidate, candidates []DelimiterCandidat
 	return "low"
 }
 
-func likelyHeader(data []byte, delimiter rune, maxRows int) bool {
-	reader := csv.NewReader(bytes.NewReader(data))
-	reader.Comma = delimiter
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-	reader.TrimLeadingSpace = true
+func likelyHeader(ctx context.Context, data []byte, delimiter rune, maxRows int, maxRecordBytes int64) (bool, error) {
+	reader, err := newBoundedCSVReader(ctx, bytes.NewReader(data), csvReaderConfig{
+		Delimiter: delimiter, MaxRecordBytes: maxRecordBytes,
+		FieldsPerRecord: -1, LazyQuotes: false, TrimLeadingSpace: true,
+	})
+	if err != nil {
+		return false, err
+	}
 
 	first, err := readNonEmptyRecord(reader, maxRows)
-	if err != nil || len(first) == 0 {
-		return false
+	if err != nil {
+		if isCSVHardLimitError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
+		return false, nil
+	}
+	if len(first) == 0 {
+		return false, nil
 	}
 	second, err := readNonEmptyRecord(reader, maxRows)
-	if err != nil || len(second) == 0 || len(first) != len(second) {
-		return false
+	if err != nil {
+		if isCSVHardLimitError(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
+		return false, nil
+	}
+	if len(second) == 0 || len(first) != len(second) {
+		return false, nil
 	}
 
 	textyFirst := 0
@@ -223,10 +304,10 @@ func likelyHeader(data []byte, delimiter rune, maxRows int) bool {
 			dataLikeSecond++
 		}
 	}
-	return textyFirst > 0 && dataLikeSecond >= len(second)/2
+	return textyFirst > 0 && dataLikeSecond >= len(second)/2, nil
 }
 
-func readNonEmptyRecord(reader *csv.Reader, maxRows int) ([]string, error) {
+func readNonEmptyRecord(reader interface{ Read() ([]string, error) }, maxRows int) ([]string, error) {
 	for i := 0; i < maxRows; i++ {
 		record, err := reader.Read()
 		if err != nil {

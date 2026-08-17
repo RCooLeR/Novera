@@ -7,11 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"os"
 	"strings"
 
 	"novera/internal/bigfile/document"
 	"novera/internal/bigfile/encodingx"
+	"novera/internal/bigfile/fileio"
 )
 
 func ExportByteRangeText(ctx context.Context, doc document.ReaderAtSize, sourcePath string, outputPath string, start int64, end int64, sourceEncoding string, targetEncoding string, opts Options) (Summary, error) {
@@ -33,12 +33,15 @@ func ExportLineRangeText(ctx context.Context, doc *document.FileDocument, source
 	return exportByteRangeTextCore(ctx, doc, sourcePath, outputPath, startOffset, endOffset, sourceEncoding, targetEncoding, "line-range-text", startLine, endLine, true, opts)
 }
 
-func exportByteRangeTextCore(ctx context.Context, doc document.ReaderAtSize, sourcePath string, outputPath string, start int64, end int64, sourceEncoding string, targetEncoding string, mode string, startLine int64, endLine int64, usedLineRange bool, opts Options) (Summary, error) {
+func exportByteRangeTextCore(ctx context.Context, doc document.ReaderAtSize, sourcePath string, outputPath string, start int64, end int64, sourceEncoding string, targetEncoding string, mode string, startLine int64, endLine int64, usedLineRange bool, opts Options) (_ Summary, retErr error) {
 	if doc == nil {
 		return Summary{}, errors.New("document is required")
 	}
-	if outputPath == "" {
-		return Summary{}, errors.New("output path is required")
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := fileio.ValidateExactOutputPath(outputPath); err != nil {
+		return Summary{}, err
 	}
 	if start < 0 {
 		start = 0
@@ -50,17 +53,6 @@ func exportByteRangeTextCore(ctx context.Context, doc document.ReaderAtSize, sou
 	if end < start {
 		return Summary{}, errors.New("end offset must be greater than or equal to start offset")
 	}
-	if same, err := samePath(sourcePath, outputPath); err != nil {
-		return Summary{}, err
-	} else if same {
-		return Summary{}, errors.New("output path must be different from source path")
-	}
-	if _, err := os.Stat(outputPath); err == nil {
-		return Summary{}, errors.New("output file already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return Summary{}, err
-	}
-
 	sourceEncoding = strings.TrimSpace(sourceEncoding)
 	if sourceEncoding == "" {
 		sourceEncoding = "UTF-8"
@@ -92,21 +84,19 @@ func exportByteRangeTextCore(ctx context.Context, doc document.ReaderAtSize, sou
 	}
 	if shouldWriteExportManifest(opts) {
 		summary.ManifestPath = exportManifestPathFor(outputPath, opts.ManifestPath)
-		if err := ensureExportManifestAvailable(summary.ManifestPath); err != nil {
+		if err := ensureExportManifestAvailable(summary.ManifestPath, sourcePath, outputPath); err != nil {
 			return summary, err
 		}
 	}
 
-	dst, err := openCreatedOutput(outputPath)
+	if err := ctx.Err(); err != nil {
+		return summary, err
+	}
+	dst, err := openCreatedOutput(outputPath, sourcePath)
 	if err != nil {
 		return summary, err
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = dst.Cleanup()
-		}
-	}()
+	defer func() { retErr = errors.Join(retErr, dst.Cleanup()) }()
 
 	reader := io.NewSectionReader(doc, start, total)
 	progressReader := &progressRangeReader{
@@ -137,26 +127,24 @@ func exportByteRangeTextCore(ctx context.Context, doc document.ReaderAtSize, sou
 	if err := copyTextRange(ctx, decodedReader, encodedWriter); err != nil {
 		return summary, err
 	}
+	if progressReader.done != total {
+		return summary, io.ErrUnexpectedEOF
+	}
 	if closer, ok := encodedWriter.(io.Closer); ok {
 		if err := closer.Close(); err != nil {
 			return summary, err
 		}
 	}
-	if err := dst.Sync(); err != nil {
-		return summary, err
-	}
-	if err := dst.Close(); err != nil {
-		return summary, err
-	}
-
-	cleanup = false
 	summary.BytesWritten = countedDst.written
 	if checksum != nil {
 		summary.SHA256 = hex.EncodeToString(checksum.Sum(nil))
 	}
+	if err := dst.CommitContext(ctx); err != nil {
+		return summary, err
+	}
 	if shouldWriteExportManifest(opts) {
-		if err := writeExportManifest(summary); err != nil {
-			return summary, cleanupOutputAfterManifestFailure(outputPath, err)
+		if err := writeExportManifest(ctx, summary); err != nil {
+			return summary, exportManifestPublicationError(summary, err)
 		}
 	}
 	return summary, nil
@@ -218,6 +206,9 @@ func copyTextRange(ctx context.Context, src io.Reader, dst io.Writer) error {
 		}
 		if readErr != nil {
 			return readErr
+		}
+		if n == 0 {
+			return io.ErrNoProgress
 		}
 	}
 }

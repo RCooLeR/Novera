@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"novera/internal/bigfile/regularfile"
 	"novera/internal/bigfile/search"
 )
 
@@ -34,8 +35,11 @@ type SpaceEstimate struct {
 
 // EstimatePlainOutputSize returns the exact output size for a plain replace.
 func EstimatePlainOutputSize(ctx context.Context, r ReaderAtSize, pattern []byte, repl []byte, opts SpaceOptions) (SpaceEstimate, error) {
-	if len(pattern) == 0 {
-		return SpaceEstimate{}, errors.New("empty pattern")
+	if err := validatePlainTransformInputs(pattern, repl, opts.ChunkSize); err != nil {
+		return SpaceEstimate{}, err
+	}
+	if r.Size() < 0 {
+		return SpaceEstimate{}, errors.New("source size must not be negative")
 	}
 
 	estimate := SpaceEstimate{
@@ -72,7 +76,7 @@ func EstimatePlainOutputSize(ctx context.Context, r ReaderAtSize, pattern []byte
 
 // CheckPlainReplaceSpace estimates output size and compares it to free space in the output directory.
 func CheckPlainReplaceSpace(ctx context.Context, sourcePath string, outputPath string, pattern []byte, repl []byte, opts SpaceOptions) (SpaceEstimate, error) {
-	src, err := os.Open(sourcePath)
+	src, err := regularfile.Open(sourcePath)
 	if err != nil {
 		return SpaceEstimate{}, err
 	}

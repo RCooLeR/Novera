@@ -23,6 +23,7 @@ export default function ArtifactsView() {
   const setArchived = useStore((s) => s.setArtifactArchived);
   const deleteArtifact = useStore((s) => s.deleteArtifact);
   const openFile = useStore((s) => s.openFile);
+  const workspaceTransitioning = useStore((s) => s.workspaceTransitioning);
   const [showArchived, setShowArchived] = useState(false);
 
   useEffect(() => {
@@ -47,7 +48,7 @@ export default function ArtifactsView() {
           Archived
         </button>
         <span style={{ flex: 1 }} />
-        <button className="icon-btn" title="Refresh" onClick={() => void loadArtifacts()}>
+        <button className="icon-btn" title="Refresh" aria-label="Refresh artifacts" disabled={workspaceTransitioning} onClick={() => void loadArtifacts()}>
           <RefreshCw size={13} />
         </button>
       </div>
@@ -69,7 +70,7 @@ export default function ArtifactsView() {
               <button
                 className="artifacts__main"
                 title={a.missing ? "Content file is missing" : `Open ${a.path}`}
-                disabled={a.missing}
+                disabled={a.missing || workspaceTransitioning}
                 onClick={() => void openFile(a.path, baseName(a.path))}
               >
                 <span className={`artifacts__kind kind--${a.kind}`}>{a.kind}</span>
@@ -95,11 +96,19 @@ export default function ArtifactsView() {
                 <button
                   className="icon-btn"
                   title={a.archived ? "Restore" : "Archive"}
+                  aria-label={`${a.archived ? "Restore" : "Archive"} ${a.title}`}
+                  disabled={workspaceTransitioning}
                   onClick={() => void setArchived(a.id, !a.archived)}
                 >
                   {a.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
                 </button>
-                <button className="icon-btn" title="Remove from registry (keeps the file)" onClick={() => void deleteArtifact(a.id)}>
+                <button
+                  className="icon-btn"
+                  title="Remove from registry (keeps the file)"
+                  aria-label={`Remove ${a.title} from the artifact registry`}
+                  disabled={workspaceTransitioning}
+                  onClick={() => void deleteArtifact(a.id)}
+                >
                   <Trash2 size={13} />
                 </button>
               </div>

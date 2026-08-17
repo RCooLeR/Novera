@@ -42,6 +42,27 @@ func IndexFolded(haystack []byte, foldedNeedle []byte) int {
 	return -1
 }
 
+// LastIndexFolded returns the last byte offset of foldedNeedle in haystack
+// using ASCII-only case folding. foldedNeedle must already be folded with Fold.
+func LastIndexFolded(haystack []byte, foldedNeedle []byte) int {
+	if len(foldedNeedle) == 0 {
+		return len(haystack)
+	}
+	if len(foldedNeedle) > len(haystack) {
+		return -1
+	}
+	first := foldedNeedle[0]
+	for i := len(haystack) - len(foldedNeedle); i >= 0; i-- {
+		if Lower(haystack[i]) != first {
+			continue
+		}
+		if equalFoldedAt(haystack[i:i+len(foldedNeedle)], foldedNeedle) {
+			return i
+		}
+	}
+	return -1
+}
+
 func equalFoldedAt(haystack []byte, foldedNeedle []byte) bool {
 	for i, c := range foldedNeedle {
 		if Lower(haystack[i]) != c {

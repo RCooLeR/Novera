@@ -50,34 +50,35 @@ func TestParseColumnsBacktickKeywordName(t *testing.T) {
 }
 
 func TestDiffBacktickKeywordColumnChange(t *testing.T) {
-	a := []Table{{Name: "settings", Columns: ParseColumns([]byte("CREATE TABLE `settings` (`id` int, `key` varchar(50));"))}}
-	b := []Table{{Name: "settings", Columns: ParseColumns([]byte("CREATE TABLE `settings` (`id` int, `key` varchar(100));"))}}
+	a := []Table{{Name: "settings", Definition: ParseTable([]byte("CREATE TABLE `settings` (`id` int, `key` varchar(50));"))}}
+	b := []Table{{Name: "settings", Definition: ParseTable([]byte("CREATE TABLE `settings` (`id` int, `key` varchar(100));"))}}
 	res := Diff(a, b)
 	if len(res.ChangedTables) != 1 || len(res.ChangedTables[0].ChangedColumns) != 1 {
 		t.Fatalf("change on `key` column not detected: %+v", res)
 	}
 }
 
-func TestDiffCaseInsensitiveTableNames(t *testing.T) {
+func TestDiffKeepsCaseDistinctTableNamesSeparate(t *testing.T) {
 	a := []Table{{Name: "Users", Columns: []Column{{Name: "id", Definition: "int"}}}}
 	b := []Table{{Name: "users", Columns: []Column{{Name: "id", Definition: "bigint"}}}}
 	res := Diff(a, b)
-	if len(res.AddedTables) != 0 || len(res.RemovedTables) != 0 {
-		t.Fatalf("Users/users treated as different tables: %+v", res)
+	if len(res.AddedTables) != 1 || res.AddedTables[0] != "users" ||
+		len(res.RemovedTables) != 1 || res.RemovedTables[0] != "Users" {
+		t.Fatalf("case-distinct tables were folded together: %+v", res)
 	}
-	if len(res.ChangedTables) != 1 {
-		t.Fatalf("column change across case-different table name missed: %+v", res)
+	if len(res.ChangedTables) != 0 {
+		t.Fatalf("case-distinct tables produced an in-place change: %+v", res)
 	}
 }
 
 func TestDiff(t *testing.T) {
 	a := []Table{
-		{Name: "users", Columns: []Column{{Name: "id", Definition: "int"}, {Name: "name", Definition: "varchar(50)"}}},
-		{Name: "old_table", Columns: []Column{{Name: "x", Definition: "int"}}},
+		{Name: "users", Definition: ParseTable([]byte("CREATE TABLE users (id int, name varchar(50));"))},
+		{Name: "old_table", Definition: ParseTable([]byte("CREATE TABLE old_table (x int);"))},
 	}
 	b := []Table{
-		{Name: "users", Columns: []Column{{Name: "id", Definition: "int"}, {Name: "name", Definition: "varchar(100)"}, {Name: "email", Definition: "varchar(255)"}}},
-		{Name: "new_table", Columns: []Column{{Name: "y", Definition: "int"}}},
+		{Name: "users", Definition: ParseTable([]byte("CREATE TABLE users (id int, name varchar(100), email varchar(255));"))},
+		{Name: "new_table", Definition: ParseTable([]byte("CREATE TABLE new_table (y int);"))},
 	}
 	res := Diff(a, b)
 	if len(res.AddedTables) != 1 || res.AddedTables[0] != "new_table" {

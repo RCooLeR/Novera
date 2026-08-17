@@ -1,8 +1,9 @@
 # Wails runtime containment and upgrade policy
 
-Novera currently pins Wails `v3.0.0-alpha.79`. It is a pre-stable dependency,
-so updates are isolated security/compatibility migrations rather than routine
-version bumps.
+Novera currently pins Wails `v3.0.0-beta.9`. It is still a pre-stable
+dependency, so updates are isolated security/compatibility migrations rather
+than routine version bumps. The Go module, frontend runtime, CLI, generated
+bindings, and build images must move together.
 
 ## Containment boundary
 
@@ -25,7 +26,7 @@ or concrete service registration have already been migrated to final facades.
 
 The first stable Wails v3 release that supports all maintained desktop targets
 opens a dedicated migration milestone. Public release remains blocked if the
-current alpha prevents a required security or platform update. Exit criteria:
+current beta prevents a required security or platform update. Exit criteria:
 
 1. Read upstream release/migration notes and enumerate API, binding, event,
    WebView, packaging, and platform changes.
@@ -44,6 +45,6 @@ current alpha prevents a required security or platform update. Exit criteria:
 7. Record performance and memory comparisons and update the changelog/support
    matrix before merging.
 
-Alpha-to-alpha security updates use the same checklist. If an update cannot
+Beta-to-beta security updates use the same checklist. If an update cannot
 pass, document the exact upstream blocker and keep release frozen; do not paper
 over it by weakening tests or widening the bridge.

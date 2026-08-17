@@ -134,6 +134,38 @@ func TestLLMNormalizeOnlyDefaultsModelForOllama(t *testing.T) {
 	}
 }
 
+func TestSanitizeBaseURLRemovesCredentialsFromMalformedAuthority(t *testing.T) {
+	const secret = "top-secret"
+	got := sanitizeBaseURL("https://user:" + secret + "@[/v1")
+	if got != "https://[/v1" || strings.Contains(got, secret) {
+		t.Fatalf("sanitized malformed URL = %q", got)
+	}
+	if got := sanitizeBaseURL("local-user@example.test"); got != "local-user@example.test" {
+		t.Fatalf("non-URL text was rewritten: %q", got)
+	}
+	if got := sanitizeBaseURL("https://[::1]/path@revision"); got != "https://[::1]/path@revision" {
+		t.Fatalf("path at-sign was mistaken for userinfo: %q", got)
+	}
+}
+
+func TestSaveDoesNotPersistCredentialsFromMalformedBaseURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	svc := &Service{path: path}
+	in := defaults()
+	in.LLM.Provider = "custom"
+	in.LLM.BaseURL = "https://user:plaintext-secret@[/v1"
+	if err := svc.Save(in); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("plaintext-secret")) || !bytes.Contains(raw, []byte(`"baseURL": "https://[/v1"`)) {
+		t.Fatalf("persisted settings retained malformed URL credentials: %s", raw)
+	}
+}
+
 func TestSaveRejectsInvalidRequestTimeouts(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
 	for _, value := range []int{-1, MinRequestTimeoutSec - 1, MaxRequestTimeoutSec + 1, maxInt} {

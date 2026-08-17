@@ -46,12 +46,15 @@ type ReaderAtSize interface {
 
 // PreviewPlain returns bounded before/after snippets for the first matches.
 func PreviewPlain(ctx context.Context, r ReaderAtSize, pattern []byte, repl []byte, opts PreviewOptions) ([]Preview, error) {
-	if len(pattern) == 0 {
-		return nil, errors.New("empty pattern")
+	if err := validatePlainTransformInputs(pattern, repl, opts.ChunkSize); err != nil {
+		return nil, err
 	}
-	radius := opts.PreviewBytes
-	if radius <= 0 {
-		radius = 48
+	radius, err := validatePreviewBase(opts.ChunkSize, opts.MaxHits, opts.PreviewBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePreviewBudget(opts.MaxHits, radius, len(pattern), len(repl), 0); err != nil {
+		return nil, err
 	}
 
 	results, err := search.CollectPlain(ctx, r, pattern, search.PlainOptions{

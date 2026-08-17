@@ -1,7 +1,6 @@
 package plugins
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -38,19 +37,23 @@ const (
 // Descriptor is intentionally declarative for now. Implementations can later hang
 // handlers off these IDs without hard-wiring every tool into the main window.
 type Descriptor struct {
-	ID           string           `json:"id"`
-	DisplayName  string           `json:"displayName"`
-	Category     string           `json:"category"`
-	Description  string           `json:"description"`
-	FilePatterns []string         `json:"filePatterns"`
-	Capabilities []Capability     `json:"capabilities"`
-	Formatters   []FormatterHook  `json:"formatters,omitempty"`
-	Symbols      []SymbolHook     `json:"symbols,omitempty"`
-	Completions  []CompletionHook `json:"completions,omitempty"`
-	Decorations  []DecorationHook `json:"decorations,omitempty"`
-	Modes        []Mode           `json:"modes"`
-	HugeFileSafe bool             `json:"hugeFileSafe"`
-	Notes        []string         `json:"notes,omitempty"`
+	ID           string                `json:"id"`
+	DisplayName  string                `json:"displayName"`
+	Category     string                `json:"category"`
+	Description  string                `json:"description"`
+	FilePatterns []string              `json:"filePatterns"`
+	Capabilities []Capability          `json:"capabilities"`
+	Operations   []OperationCapability `json:"operations,omitempty"`
+	Formatters   []FormatterHook       `json:"formatters,omitempty"`
+	Symbols      []SymbolHook          `json:"symbols,omitempty"`
+	Completions  []CompletionHook      `json:"completions,omitempty"`
+	Decorations  []DecorationHook      `json:"decorations,omitempty"`
+	Modes        []Mode                `json:"modes"`
+	// Deprecated: a plugin-wide boolean cannot describe mixed bounded,
+	// streaming, and materializing operations. Validation rejects true; use
+	// Operations to declare each execution model explicitly.
+	HugeFileSafe bool     `json:"hugeFileSafe,omitempty"`
+	Notes        []string `json:"notes,omitempty"`
 }
 
 // FormatterHook is a declarative formatter integration point. It is discovery
@@ -78,13 +81,13 @@ type FormatterMatch struct {
 // can later populate outlines and autocomplete seeds from normal buffers or
 // explicit editable slices without parsing an unbounded huge file.
 type SymbolHook struct {
-	ID           string   `json:"id"`
-	DisplayName  string   `json:"displayName"`
-	Strategy     string   `json:"strategy"`
-	FilePatterns []string `json:"filePatterns,omitempty"`
-	Kinds        []string `json:"kinds,omitempty"`
-	MaxBytes     int64    `json:"maxBytes,omitempty"`
-	Notes        []string `json:"notes,omitempty"`
+	ID           string       `json:"id"`
+	DisplayName  string       `json:"displayName"`
+	Strategy     HookStrategy `json:"strategy"`
+	FilePatterns []string     `json:"filePatterns,omitempty"`
+	Kinds        []string     `json:"kinds,omitempty"`
+	MaxBytes     int64        `json:"maxBytes,omitempty"`
+	Notes        []string     `json:"notes,omitempty"`
 }
 
 type SymbolMatch struct {
@@ -96,14 +99,14 @@ type SymbolMatch struct {
 // completions can come from; execution remains bounded to normal buffers or
 // explicit editable slices until deeper language integration is proven safe.
 type CompletionHook struct {
-	ID                string   `json:"id"`
-	DisplayName       string   `json:"displayName"`
-	Strategy          string   `json:"strategy"`
-	FilePatterns      []string `json:"filePatterns,omitempty"`
-	Sources           []string `json:"sources,omitempty"`
-	TriggerCharacters []string `json:"triggerCharacters,omitempty"`
-	MaxBytes          int64    `json:"maxBytes,omitempty"`
-	Notes             []string `json:"notes,omitempty"`
+	ID                string       `json:"id"`
+	DisplayName       string       `json:"displayName"`
+	Strategy          HookStrategy `json:"strategy"`
+	FilePatterns      []string     `json:"filePatterns,omitempty"`
+	Sources           []string     `json:"sources,omitempty"`
+	TriggerCharacters []string     `json:"triggerCharacters,omitempty"`
+	MaxBytes          int64        `json:"maxBytes,omitempty"`
+	Notes             []string     `json:"notes,omitempty"`
 }
 
 type CompletionMatch struct {
@@ -115,12 +118,12 @@ type CompletionMatch struct {
 // brackets. Implementations must operate only on normal buffers, active slices,
 // or visible ranges supplied by the caller.
 type DecorationHook struct {
-	ID           string   `json:"id"`
-	DisplayName  string   `json:"displayName"`
-	Strategy     string   `json:"strategy"`
-	FilePatterns []string `json:"filePatterns,omitempty"`
-	MaxBytes     int64    `json:"maxBytes,omitempty"`
-	Notes        []string `json:"notes,omitempty"`
+	ID           string       `json:"id"`
+	DisplayName  string       `json:"displayName"`
+	Strategy     HookStrategy `json:"strategy"`
+	FilePatterns []string     `json:"filePatterns,omitempty"`
+	MaxBytes     int64        `json:"maxBytes,omitempty"`
+	Notes        []string     `json:"notes,omitempty"`
 }
 
 type DecorationMatch struct {
@@ -130,7 +133,9 @@ type DecorationMatch struct {
 
 // RuntimePlugin is the stable runtime-facing contract for built-in and future
 // loaded plugins. Tool-specific optional interfaces can hang off this root
-// without requiring the editor shell to know every plugin package.
+// without requiring the editor shell to know every plugin package. Registry
+// construction captures only immutable descriptor snapshots; callers that need
+// optional executable interfaces must retain the validated concrete adapter.
 type RuntimePlugin interface {
 	Descriptor() Descriptor
 }
@@ -140,37 +145,46 @@ type StaticPlugin struct {
 }
 
 func NewStaticPlugin(descriptor Descriptor) StaticPlugin {
-	return StaticPlugin{descriptor: descriptor}
+	return StaticPlugin{descriptor: descriptor.Clone()}
 }
 
 func (p StaticPlugin) Descriptor() Descriptor {
-	return p.descriptor
+	return p.descriptor.Clone()
 }
 
 type Registry struct {
-	plugins []RuntimePlugin
-	byID    map[string]RuntimePlugin
+	descriptors []Descriptor
+	byID        map[string]int
 }
 
 func NewRegistry(plugins ...RuntimePlugin) (*Registry, error) {
-	registry := &Registry{
-		plugins: make([]RuntimePlugin, 0, len(plugins)),
-		byID:    make(map[string]RuntimePlugin, len(plugins)),
+	if len(plugins) > maxRegistryPlugins {
+		return nil, fmt.Errorf("plugin registry contains %d plugins; maximum is %d", len(plugins), maxRegistryPlugins)
 	}
-	for _, plugin := range plugins {
-		if plugin == nil {
-			return nil, errors.New("plugin registry contains nil plugin")
+
+	descriptors := make([]Descriptor, 0, len(plugins))
+	seenIDs := make(map[string]int, len(plugins))
+	for i, plugin := range plugins {
+		descriptor, err := snapshotRuntimeDescriptor(plugin)
+		if err != nil {
+			return nil, fmt.Errorf("plugins[%d]: %w", i, err)
 		}
-		descriptor := plugin.Descriptor()
 		if err := descriptor.Validate(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("plugins[%d]: %w", i, err)
 		}
-		id := strings.TrimSpace(descriptor.ID)
-		if _, exists := registry.byID[id]; exists {
-			return nil, fmt.Errorf("duplicate plugin id %q", id)
+		if previous, exists := seenIDs[descriptor.ID]; exists {
+			return nil, fmt.Errorf("plugins[%d].id: duplicate plugin id %q (already used by plugins[%d])", i, descriptor.ID, previous)
 		}
-		registry.plugins = append(registry.plugins, plugin)
-		registry.byID[id] = plugin
+		seenIDs[descriptor.ID] = i
+		descriptors = append(descriptors, descriptor)
+	}
+
+	registry := &Registry{
+		descriptors: descriptors,
+		byID:        make(map[string]int, len(descriptors)),
+	}
+	for i, descriptor := range descriptors {
+		registry.byID[descriptor.ID] = i
 	}
 	return registry, nil
 }
@@ -186,6 +200,9 @@ func MustRegistry(plugins ...RuntimePlugin) *Registry {
 }
 
 func NewStaticRegistry(descriptors []Descriptor) (*Registry, error) {
+	if len(descriptors) > maxRegistryPlugins {
+		return nil, fmt.Errorf("plugin registry contains %d descriptors; maximum is %d", len(descriptors), maxRegistryPlugins)
+	}
 	plugins := make([]RuntimePlugin, 0, len(descriptors))
 	for _, descriptor := range descriptors {
 		plugins = append(plugins, NewStaticPlugin(descriptor))
@@ -207,16 +224,20 @@ func (r *Registry) Plugins() []RuntimePlugin {
 	if r == nil {
 		return nil
 	}
-	return append([]RuntimePlugin(nil), r.plugins...)
+	out := make([]RuntimePlugin, 0, len(r.descriptors))
+	for _, descriptor := range r.descriptors {
+		out = append(out, NewStaticPlugin(descriptor))
+	}
+	return out
 }
 
 func (r *Registry) Descriptors() []Descriptor {
 	if r == nil {
 		return nil
 	}
-	out := make([]Descriptor, 0, len(r.plugins))
-	for _, plugin := range r.plugins {
-		out = append(out, plugin.Descriptor())
+	out := make([]Descriptor, 0, len(r.descriptors))
+	for _, descriptor := range r.descriptors {
+		out = append(out, descriptor.Clone())
 	}
 	return out
 }
@@ -225,8 +246,11 @@ func (r *Registry) ByID(id string) (RuntimePlugin, bool) {
 	if r == nil {
 		return nil, false
 	}
-	plugin, ok := r.byID[strings.TrimSpace(id)]
-	return plugin, ok
+	index, ok := r.byID[strings.TrimSpace(id)]
+	if !ok {
+		return nil, false
+	}
+	return NewStaticPlugin(r.descriptors[index]), true
 }
 
 func (r *Registry) MatchPath(path string) []Descriptor {
@@ -251,7 +275,7 @@ func (r *Registry) FormatterHooksForPath(path string) []FormatterMatch {
 			if !formatter.matchesPath(path) {
 				continue
 			}
-			out = append(out, FormatterMatch{Plugin: descriptor, Formatter: formatter})
+			out = append(out, FormatterMatch{Plugin: descriptor.Clone(), Formatter: cloneFormatterHook(formatter)})
 		}
 	}
 	return out
@@ -271,7 +295,7 @@ func (r *Registry) SymbolHooksForPath(path string) []SymbolMatch {
 			if !symbol.matchesPath(path) {
 				continue
 			}
-			out = append(out, SymbolMatch{Plugin: descriptor, Symbol: symbol})
+			out = append(out, SymbolMatch{Plugin: descriptor.Clone(), Symbol: cloneSymbolHook(symbol)})
 		}
 	}
 	return out
@@ -291,7 +315,7 @@ func (r *Registry) CompletionHooksForPath(path string) []CompletionMatch {
 			if !completion.matchesPath(path) {
 				continue
 			}
-			out = append(out, CompletionMatch{Plugin: descriptor, Completion: completion})
+			out = append(out, CompletionMatch{Plugin: descriptor.Clone(), Completion: cloneCompletionHook(completion)})
 		}
 	}
 	return out
@@ -311,15 +335,19 @@ func (r *Registry) DecorationHooksForPath(path string) []DecorationMatch {
 			if !decoration.matchesPath(path) {
 				continue
 			}
-			out = append(out, DecorationMatch{Plugin: descriptor, Decoration: decoration})
+			out = append(out, DecorationMatch{Plugin: descriptor.Clone(), Decoration: cloneDecorationHook(decoration)})
 		}
 	}
 	return out
 }
 
 var (
-	SQLFilePatterns        = []string{"*.sql", "*.dump"}
-	CSVFilePatterns        = []string{"*.csv", "*.tsv", "*.tab"}
+	canonicalSQLFilePatterns = []string{"*.sql", "*.dump"}
+	canonicalCSVFilePatterns = []string{"*.csv", "*.tsv", "*.tab"}
+	// SQLFilePatterns and CSVFilePatterns remain for source compatibility.
+	// Deprecated: use SQLPatterns and CSVPatterns so callers receive a copy.
+	SQLFilePatterns        = cloneStrings(canonicalSQLFilePatterns)
+	CSVFilePatterns        = cloneStrings(canonicalCSVFilePatterns)
 	LogFilePatterns        = []string{"*.log", "*.out", "*.trace", "*.jsonl", "*.ndjson"}
 	YAMLFilePatterns       = []string{"*.yaml", "*.yml"}
 	MarkupFilePatterns     = []string{"*.html", "*.htm", "*.xml", "*.svg", "*.vue", "*.svelte", "*.md", "*.markdown", "*.rst", "*.adoc", "*.css", "*.scss", "*.less"}
@@ -346,46 +374,12 @@ var (
 	ConverterFilePatterns  = []string{"*"}
 )
 
+func SQLPatterns() []string { return cloneStrings(canonicalSQLFilePatterns) }
+
+func CSVPatterns() []string { return cloneStrings(canonicalCSVFilePatterns) }
+
 func (d Descriptor) Validate() error {
-	if strings.TrimSpace(d.ID) == "" {
-		return errors.New("plugin id is required")
-	}
-	if strings.TrimSpace(d.DisplayName) == "" {
-		return fmt.Errorf("plugin %q display name is required", d.ID)
-	}
-	if strings.TrimSpace(d.Category) == "" {
-		return fmt.Errorf("plugin %q category is required", d.ID)
-	}
-	if len(d.Modes) == 0 {
-		return fmt.Errorf("plugin %q must declare at least one mode", d.ID)
-	}
-	if d.HasCapability(CapabilityFormat) && len(d.Formatters) == 0 {
-		return fmt.Errorf("plugin %q declares format capability but no formatter hooks", d.ID)
-	}
-	if d.HasCapability(CapabilityDecorate) && len(d.Decorations) == 0 {
-		return fmt.Errorf("plugin %q declares decorate capability but no decoration hooks", d.ID)
-	}
-	for _, formatter := range d.Formatters {
-		if err := formatter.Validate(d.ID); err != nil {
-			return err
-		}
-	}
-	for _, symbol := range d.Symbols {
-		if err := symbol.Validate(d.ID); err != nil {
-			return err
-		}
-	}
-	for _, completion := range d.Completions {
-		if err := completion.Validate(d.ID); err != nil {
-			return err
-		}
-	}
-	for _, decoration := range d.Decorations {
-		if err := decoration.Validate(d.ID); err != nil {
-			return err
-		}
-	}
-	return nil
+	return validateDescriptor(d)
 }
 
 func (d Descriptor) HasCapability(capability Capability) bool {
@@ -398,21 +392,7 @@ func (d Descriptor) HasCapability(capability Capability) bool {
 }
 
 func (h FormatterHook) Validate(pluginID string) error {
-	if strings.TrimSpace(h.ID) == "" {
-		return fmt.Errorf("plugin %q formatter id is required", pluginID)
-	}
-	if strings.TrimSpace(h.DisplayName) == "" {
-		return fmt.Errorf("plugin %q formatter %q display name is required", pluginID, h.ID)
-	}
-	if strings.TrimSpace(h.Command) == "" {
-		return fmt.Errorf("plugin %q formatter %q command is required", pluginID, h.ID)
-	}
-	for _, pattern := range h.FilePatterns {
-		if strings.TrimSpace(pattern) == "" {
-			return fmt.Errorf("plugin %q formatter %q file pattern is empty", pluginID, h.ID)
-		}
-	}
-	return nil
+	return validateFormatterHook(h, pluginID)
 }
 
 func (h FormatterHook) matchesPath(path string) bool {
@@ -429,24 +409,7 @@ func (h FormatterHook) matchesPath(path string) bool {
 }
 
 func (h SymbolHook) Validate(pluginID string) error {
-	if strings.TrimSpace(h.ID) == "" {
-		return fmt.Errorf("plugin %q symbol hook id is required", pluginID)
-	}
-	if strings.TrimSpace(h.DisplayName) == "" {
-		return fmt.Errorf("plugin %q symbol hook %q display name is required", pluginID, h.ID)
-	}
-	if strings.TrimSpace(h.Strategy) == "" {
-		return fmt.Errorf("plugin %q symbol hook %q strategy is required", pluginID, h.ID)
-	}
-	if h.MaxBytes < 0 {
-		return fmt.Errorf("plugin %q symbol hook %q max bytes must be non-negative", pluginID, h.ID)
-	}
-	for _, pattern := range h.FilePatterns {
-		if strings.TrimSpace(pattern) == "" {
-			return fmt.Errorf("plugin %q symbol hook %q file pattern is empty", pluginID, h.ID)
-		}
-	}
-	return nil
+	return validateSymbolHook(h, pluginID)
 }
 
 func (h SymbolHook) matchesPath(path string) bool {
@@ -463,24 +426,7 @@ func (h SymbolHook) matchesPath(path string) bool {
 }
 
 func (h CompletionHook) Validate(pluginID string) error {
-	if strings.TrimSpace(h.ID) == "" {
-		return fmt.Errorf("plugin %q completion hook id is required", pluginID)
-	}
-	if strings.TrimSpace(h.DisplayName) == "" {
-		return fmt.Errorf("plugin %q completion hook %q display name is required", pluginID, h.ID)
-	}
-	if strings.TrimSpace(h.Strategy) == "" {
-		return fmt.Errorf("plugin %q completion hook %q strategy is required", pluginID, h.ID)
-	}
-	if h.MaxBytes < 0 {
-		return fmt.Errorf("plugin %q completion hook %q max bytes must be non-negative", pluginID, h.ID)
-	}
-	for _, pattern := range h.FilePatterns {
-		if strings.TrimSpace(pattern) == "" {
-			return fmt.Errorf("plugin %q completion hook %q file pattern is empty", pluginID, h.ID)
-		}
-	}
-	return nil
+	return validateCompletionHook(h, pluginID)
 }
 
 func (h CompletionHook) matchesPath(path string) bool {
@@ -497,24 +443,7 @@ func (h CompletionHook) matchesPath(path string) bool {
 }
 
 func (h DecorationHook) Validate(pluginID string) error {
-	if strings.TrimSpace(h.ID) == "" {
-		return fmt.Errorf("plugin %q decoration hook id is required", pluginID)
-	}
-	if strings.TrimSpace(h.DisplayName) == "" {
-		return fmt.Errorf("plugin %q decoration hook %q display name is required", pluginID, h.ID)
-	}
-	if strings.TrimSpace(h.Strategy) == "" {
-		return fmt.Errorf("plugin %q decoration hook %q strategy is required", pluginID, h.ID)
-	}
-	if h.MaxBytes < 0 {
-		return fmt.Errorf("plugin %q decoration hook %q max bytes must be non-negative", pluginID, h.ID)
-	}
-	for _, pattern := range h.FilePatterns {
-		if strings.TrimSpace(pattern) == "" {
-			return fmt.Errorf("plugin %q decoration hook %q file pattern is empty", pluginID, h.ID)
-		}
-	}
-	return nil
+	return validateDecorationHook(h, pluginID)
 }
 
 func (h DecorationHook) matchesPath(path string) bool {
@@ -569,7 +498,7 @@ func matchPath(path string, descriptors []Descriptor, includeWildcard bool) []De
 	})
 	out := make([]Descriptor, 0, len(matches))
 	for _, match := range matches {
-		out = append(out, match.descriptor)
+		out = append(out, match.descriptor.Clone())
 	}
 	return out
 }

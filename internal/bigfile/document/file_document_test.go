@@ -1,6 +1,7 @@
 package document
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -266,6 +267,18 @@ func TestStartIndexingMarksEmptyDocumentDone(t *testing.T) {
 	if progress := doc.IndexProgress(); !progress.Done {
 		t.Fatalf("progress = %#v, want done", progress)
 	}
+	if err := doc.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if progress := reopened.IndexProgress(); !progress.Done {
+		t.Fatalf("reopened progress = %#v, want validated empty-file cache hit", progress)
+	}
 }
 
 func TestOpenFileLoadsCompletedIndexCache(t *testing.T) {
@@ -351,6 +364,39 @@ func TestOpenFileWithOptionsReportsMetadataAndCacheStages(t *testing.T) {
 		if !openProgressStagesContain(stages, want) {
 			t.Fatalf("stages = %#v, want %s", stages, want)
 		}
+	}
+}
+
+func TestOpenFileWithoutIndexCacheDoesNotFingerprintSource(t *testing.T) {
+	oldPersist := persistentIndexCacheEnabled()
+	SetPersistentIndexCache(true)
+	defer SetPersistentIndexCache(oldPersist)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "uncached.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stages []OpenStage
+	doc, err := OpenFileWithOptions(path, OpenOptions{
+		Progress: func(progress OpenProgress) {
+			stages = append(stages, progress.Stage)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+
+	if doc.indexSampleHash != "" {
+		t.Fatal("first open without a cache candidate fingerprinted the complete source")
+	}
+	if !openProgressStagesContain(stages, OpenStageIndexCacheCheck) {
+		t.Fatalf("stages = %#v, want bounded cache-candidate check", stages)
+	}
+	if openProgressStagesContain(stages, OpenStageIndexCacheLoaded) {
+		t.Fatalf("stages = %#v, did not expect an index-cache hit", stages)
 	}
 }
 
@@ -454,24 +500,14 @@ func TestOpenFileDefersHugeIndexCacheHydrationUntilExplicitIndexing(t *testing.T
 		t.Fatal(err)
 	}
 
-	idx := lineindex.New(4096)
-	idx.MarkDone(42, info.Size())
-	data, err := json.MarshalIndent(indexCacheFile{
-		Version:         indexCacheVersion,
-		Path:            path,
-		Size:            info.Size(),
-		ModTimeUnixNano: info.ModTime().UnixNano(),
-		SampleHash:      sampleHash,
-		Index:           idx.Snapshot(),
-	}, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cachePath := indexCachePath(path)
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cachePath, append(data, '\n'), 0o600); err != nil {
+	idx := lineindex.FromSnapshot(lineindex.Snapshot{
+		EveryLines: 4096,
+		Entries:    []lineindex.Entry{{Line: 1, Offset: 0}},
+		Lines:      42,
+		Bytes:      info.Size(),
+		Done:       true,
+	})
+	if err := saveIndexCache(path, info.Size(), info.ModTime(), sampleHash, idx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -505,6 +541,73 @@ func TestOpenFileDefersHugeIndexCacheHydrationUntilExplicitIndexing(t *testing.T
 	}
 	if doc.indexSampleHash == "" {
 		t.Fatal("explicit indexing did not compute the deferred index-cache sample hash")
+	}
+}
+
+func TestOpenFileRejectsMiddleOnlyRewriteWithRestoredMetadata(t *testing.T) {
+	oldPersist := persistentIndexCacheEnabled()
+	SetPersistentIndexCache(true)
+	defer SetPersistentIndexCache(oldPersist)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "middle-rewritten.txt")
+	body := bytes.Repeat([]byte("abcdefghijklmno\n"), 140_000)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.StartIndexing(context.Background()); err != nil {
+		_ = doc.Close()
+		t.Fatal(err)
+	}
+	if err := doc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	middle := int64(len(body) / 2)
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteAt([]byte{'Z'}, middle); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, original.ModTime(), original.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewritten.Size() != original.Size() || rewritten.ModTime().UnixNano() != original.ModTime().UnixNano() {
+		t.Fatalf(
+			"test setup did not restore cache metadata: size/modtime = %d/%d, want %d/%d",
+			rewritten.Size(),
+			rewritten.ModTime().UnixNano(),
+			original.Size(),
+			original.ModTime().UnixNano(),
+		)
+	}
+
+	reopened, err := OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if progress := reopened.IndexProgress(); progress.Done {
+		t.Fatalf("progress = %#v, want full-digest mismatch to reject cached anchors", progress)
 	}
 }
 

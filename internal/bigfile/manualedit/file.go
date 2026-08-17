@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"novera/internal/bigfile/fileio"
+	"novera/internal/bigfile/regularfile"
 )
 
 var (
-	openSourceFile = os.Open
+	openSourceFile = regularfile.Open
 	openExclusive  = func(path string) (syncWriteCloser, error) {
 		return fileio.OpenExclusiveOutput(path, 0o600)
 	}
@@ -29,7 +30,10 @@ var (
 	}
 )
 
-var ErrSourceModifiedDuringOperation = errors.New("source file modified during operation")
+var (
+	ErrSourceModifiedDuringOperation = errors.New("source file modified during operation")
+	ErrSwapOriginalDisabled          = errors.New("manual-edit source replacement is disabled; save a copy instead")
+)
 
 const (
 	manifestProgressFlushBytes    int64 = 16 * 1024 * 1024
@@ -78,6 +82,15 @@ type sourceSnapshot struct {
 }
 
 func ApplyFileEdit(ctx context.Context, sourcePath string, outputPath string, edit Edit, opts FileOptions) (FileSummary, error) {
+	if opts.SwapOriginal {
+		return FileSummary{
+			OutputPath: outputPath,
+			ModifiedRange: Range{
+				Start: edit.Start,
+				End:   max64(edit.End, edit.Start+int64(len(edit.Text))),
+			},
+		}, ErrSwapOriginalDisabled
+	}
 	summary, backupPath, err := prepareManualEditOutput(sourcePath, outputPath, opts, Range{
 		Start: edit.Start,
 		End:   max64(edit.End, edit.Start+int64(len(edit.Text))),
@@ -160,6 +173,9 @@ func ApplyFileEdit(ctx context.Context, sourcePath string, outputPath string, ed
 }
 
 func WriteSessionToFile(ctx context.Context, sourcePath string, outputPath string, session *Session, opts FileOptions) (FileSummary, error) {
+	if opts.SwapOriginal {
+		return FileSummary{OutputPath: outputPath}, ErrSwapOriginalDisabled
+	}
 	if session == nil || !session.HasEdits() {
 		return FileSummary{}, errors.New("session has no staged edits")
 	}
@@ -167,6 +183,9 @@ func WriteSessionToFile(ctx context.Context, sourcePath string, outputPath strin
 }
 
 func prepareManualEditOutput(sourcePath string, outputPath string, opts FileOptions, modified Range) (FileSummary, string, error) {
+	if opts.SwapOriginal {
+		return FileSummary{OutputPath: outputPath, ModifiedRange: modified}, "", ErrSwapOriginalDisabled
+	}
 	same, err := samePath(sourcePath, outputPath)
 	if err != nil {
 		return FileSummary{}, "", err
@@ -333,6 +352,9 @@ func finalizeManualEditOutput(sourcePath string, outputPath string, backupPath s
 }
 
 func writeTableToFile(ctx context.Context, sourcePath string, outputPath string, table *PieceTable, modified []Range, opts FileOptions, operation string) (FileSummary, error) {
+	if opts.SwapOriginal {
+		return FileSummary{OutputPath: outputPath}, ErrSwapOriginalDisabled
+	}
 	modifiedRange := Range{}
 	if len(modified) > 0 {
 		modifiedRange = modified[0]

@@ -3,7 +3,6 @@ package csv
 import (
 	"bytes"
 	"context"
-	stdcsv "encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -22,10 +21,11 @@ const (
 )
 
 type PreviewOptions struct {
-	Delimiter rune
-	HasHeader bool
-	MaxBytes  int64
-	MaxRows   int
+	Delimiter      rune
+	HasHeader      bool
+	MaxBytes       int64
+	MaxRows        int
+	MaxRecordBytes int64
 }
 
 type PreviewReport struct {
@@ -50,33 +50,41 @@ func PreviewRowsContext(ctx context.Context, r io.Reader, opts PreviewOptions) (
 		return PreviewReport{}, err
 	}
 
-	data, err := readBoundedSample(ctx, r, opts.MaxBytes)
+	sample, err := readBoundedSampleResult(ctx, r, opts.MaxBytes)
 	if err != nil {
 		return PreviewReport{}, err
 	}
-	truncated := int64(len(data)) > opts.MaxBytes
-	if truncated {
-		data = data[:opts.MaxBytes]
+	data := sample.Data
+	partialOmitted := false
+	if sample.Truncated {
+		data, partialOmitted, err = CompleteRecordPrefix(ctx, data, opts.Delimiter, opts.MaxRecordBytes, true)
+		if err != nil {
+			return PreviewReport{}, err
+		}
 	}
 
 	report := PreviewReport{
-		BytesScanned:    int64(len(data)),
-		TruncatedSample: truncated,
+		BytesScanned:    sample.BytesScanned,
+		TruncatedSample: sample.Truncated,
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		report.Warnings = append(report.Warnings, "sample is empty")
 		return report, nil
 	}
-	if truncated {
+	if sample.Truncated {
 		report.Warnings = append(report.Warnings, fmt.Sprintf("sample limited to %d bytes", opts.MaxBytes))
 	}
+	if partialOmitted {
+		report.Warnings = append(report.Warnings, "trailing partial logical record omitted from preview")
+	}
 
-	reader := stdcsv.NewReader(bytes.NewReader(data))
-	reader.Comma = opts.Delimiter
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-	reader.TrimLeadingSpace = true
-	reader.ReuseRecord = false
+	reader, err := newBoundedCSVReader(ctx, bytes.NewReader(data), csvReaderConfig{
+		Delimiter: opts.Delimiter, MaxRecordBytes: opts.MaxRecordBytes,
+		FieldsPerRecord: -1, LazyQuotes: false,
+	})
+	if err != nil {
+		return report, err
+	}
 
 	if opts.HasHeader {
 		header, err := reader.Read()
@@ -134,18 +142,27 @@ func FormatPreviewReport(report PreviewReport) string {
 }
 
 func normalizePreviewOptions(opts PreviewOptions) (PreviewOptions, error) {
+	maxBytes, err := normalizeSampleByteLimit("preview sample", opts.MaxBytes, DefaultPreviewMaxBytes)
+	if err != nil {
+		return opts, err
+	}
+	maxRows, err := normalizeSampleRowLimit("preview sample", opts.MaxRows, DefaultPreviewMaxRows)
+	if err != nil {
+		return opts, err
+	}
+	opts.MaxBytes = maxBytes
+	opts.MaxRows = maxRows
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}
 	if !validProjectDelimiter(opts.Delimiter) {
 		return opts, fmt.Errorf("invalid delimiter %q", opts.Delimiter)
 	}
-	if opts.MaxBytes <= 0 {
-		opts.MaxBytes = DefaultPreviewMaxBytes
+	limit, err := normalizeLogicalRecordLimit(opts.MaxRecordBytes)
+	if err != nil {
+		return opts, err
 	}
-	if opts.MaxRows <= 0 {
-		opts.MaxRows = DefaultPreviewMaxRows
-	}
+	opts.MaxRecordBytes = limit
 	return opts, nil
 }
 

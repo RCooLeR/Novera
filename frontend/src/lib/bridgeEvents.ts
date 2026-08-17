@@ -102,14 +102,22 @@ export interface LLMEventPayload {
 }
 
 export interface BigFileJobStart {
+  [key: string]: unknown;
   id: string;
+  sequence: number;
   title: string;
-}
-
-export interface BigFileJobProgress {
-  id: string;
+  kind: string;
+  fileId: string;
+  completed: number;
+  total: number;
   records: number;
   note: string;
+}
+
+export type BigFileJobProgress = BigFileJobStart;
+
+export interface BigFileJobEnd extends BigFileJobStart {
+  status: "completed" | "failed" | "cancelled" | "panicked";
 }
 
 export function parseLLMEvent(data: unknown): LLMEventPayload | null {
@@ -133,26 +141,59 @@ export function parseLLMEvent(data: unknown): LLMEventPayload | null {
 
 export function parseBigFileJobStart(data: unknown): BigFileJobStart | null {
   const value = record(eventPayload(data));
-  return value && nonEmptyString(value.id) && nonEmptyString(value.title)
-    ? { id: value.id, title: value.title }
-    : null;
+  return parseBigFileJobPayload(value);
 }
 
 export function parseBigFileJobProgress(data: unknown): BigFileJobProgress | null {
   const value = record(eventPayload(data));
-  return value &&
-    nonEmptyString(value.id) &&
-    typeof value.records === "number" &&
-    Number.isSafeInteger(value.records) &&
-    value.records >= 0 &&
-    typeof value.note === "string"
-    ? { id: value.id, records: value.records, note: value.note }
-    : null;
+  return parseBigFileJobPayload(value);
 }
 
-export function parseBigFileJobEnd(data: unknown): { id: string } | null {
+export function parseBigFileJobEnd(data: unknown): BigFileJobEnd | null {
   const value = record(eventPayload(data));
-  return value && nonEmptyString(value.id) ? { id: value.id } : null;
+  const payload = parseBigFileJobPayload(value);
+  if (
+    !payload ||
+    !value ||
+    (value.status !== "completed" && value.status !== "failed" && value.status !== "cancelled" && value.status !== "panicked")
+  ) {
+    return null;
+  }
+  return { ...payload, status: value.status };
+}
+
+function parseBigFileJobPayload(value: Record<string, unknown> | null): BigFileJobStart | null {
+  if (
+    !value ||
+    !nonEmptyString(value.id) ||
+    typeof value.sequence !== "number" ||
+    !Number.isSafeInteger(value.sequence) ||
+    value.sequence <= 0 ||
+    !nonEmptyString(value.title) ||
+    !nonEmptyString(value.kind) ||
+    typeof value.fileId !== "string" ||
+    !nonNegativeSafeInteger(value.completed) ||
+    !nonNegativeSafeInteger(value.total) ||
+    !nonNegativeSafeInteger(value.records) ||
+    typeof value.note !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    sequence: value.sequence,
+    title: value.title,
+    kind: value.kind,
+    fileId: value.fileId,
+    completed: value.completed,
+    total: value.total,
+    records: value.records,
+    note: value.note,
+  };
+}
+
+function nonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function hasRequiredAgentFields(value: Record<string, unknown>): boolean {

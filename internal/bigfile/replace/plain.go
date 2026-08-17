@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"unicode/utf8"
 
 	"novera/internal/bigfile/asciifold"
 )
@@ -44,15 +45,18 @@ type PlainOptions struct {
 // ReplacePlain streams src to dst while replacing pattern with repl.
 // It never loads the full file into memory.
 func ReplacePlain(ctx context.Context, src *os.File, dst syncWriter, pattern []byte, repl []byte, opts PlainOptions) (int64, error) {
-	if len(pattern) == 0 {
-		return 0, errors.New("empty pattern")
+	if err := validatePlainTransformInputs(pattern, repl, opts.ChunkSize); err != nil {
+		return 0, err
 	}
-	if opts.ChunkSize <= 0 {
-		opts.ChunkSize = 64 * 1024 * 1024
+	minimumChunk := 1
+	if opts.WholeWord {
+		minimumChunk = len(pattern) + utf8.UTFMax
 	}
-	if opts.WholeWord && opts.ChunkSize < len(pattern)+2 {
-		opts.ChunkSize = len(pattern) + 2
+	chunkSize, err := normalizedPlainChunkSize(opts.ChunkSize, 64*1024*1024, minimumChunk)
+	if err != nil {
+		return 0, err
 	}
+	opts.ChunkSize = chunkSize
 
 	st, err := src.Stat()
 	if err != nil {
@@ -64,7 +68,7 @@ func ReplacePlain(ctx context.Context, src *os.File, dst syncWriter, pattern []b
 	bufferedDst := bufio.NewWriterSize(dst, plainReplaceWriteBufferSize)
 	keepSize := len(pattern) - 1
 	if opts.WholeWord {
-		keepSize = len(pattern) + 1
+		keepSize = len(pattern) + utf8.UTFMax
 	}
 	carry := make([]byte, 0, keepSize)
 	window := make([]byte, 0, opts.ChunkSize+keepSize)
@@ -145,7 +149,7 @@ func writeReplacedPrefix(dst io.Writer, window []byte, processLimit int, needle 
 	}
 	writePos := 0
 	searchPos := 0
-	for searchPos < processLimit {
+	for searchPos < len(window) {
 		idx := indexPlain(window[searchPos:], needle, caseInsensitive)
 		if idx < 0 {
 			break
@@ -153,7 +157,22 @@ func writeReplacedPrefix(dst io.Writer, window []byte, processLimit int, needle 
 
 		matchStart := searchPos + idx
 		if matchStart >= processLimit {
-			break
+			// Preserve the complete rune before a deferred whole-word
+			// candidate. Consuming exactly to matchStart would make the next
+			// window begin at the pattern and lose the boundary context.
+			safeStart := matchStart - utf8.UTFMax
+			if safeStart > processLimit {
+				safeStart = processLimit
+			}
+			if safeStart < writePos {
+				safeStart = writePos
+			}
+			if writePos < safeStart {
+				if _, err := dst.Write(window[writePos:safeStart]); err != nil {
+					return consumed, count, err
+				}
+			}
+			return safeStart, count, nil
 		}
 		if !replaceWordBoundaryOK(window, matchStart, len(old), windowStart, total, wholeWord) {
 			searchPos = matchStart + 1

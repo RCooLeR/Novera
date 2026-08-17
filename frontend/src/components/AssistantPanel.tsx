@@ -7,6 +7,7 @@ import { visibleAssistantContent } from "./assistantContent";
 import { approvalIntentPages } from "./approvalIntent";
 import { writeClipboardText } from "../lib/clipboard";
 import ConfirmModal from "./ConfirmModal";
+import { toolCardPresentation } from "./toolCardPresentation";
 
 const DEFAULT_REQUEST_TIMEOUT_SEC = 1800;
 const MAX_REQUEST_TIMEOUT_SEC = 21600;
@@ -92,51 +93,21 @@ function ApprovalIntentDetail({ msg }: { msg: ChatMsg }) {
 
 function ToolCard({ msg }: { msg: ChatMsg }) {
   const approveAgent = useStore((s) => s.approveAgent);
-  let args: Record<string, string> = {};
-  try {
-    args = JSON.parse(msg.args || "{}");
-  } catch {
-    /* keep empty */
-  }
   const toolName = msg.tool ?? "tool";
-  const summary =
-    args.url ??
-    args.command ??
-    args.path ??
-    args.outPath ??
-    args.connectionId ??
-    args.table ??
-    args.sql ??
-    (args.query ? `"${args.query}"` : "");
-
-  // Tool-specific approval prompt + the exact thing being approved.
-  let prompt = "Allow this action?";
-  let detail: string | null = null;
-  if (toolName === "run_command") {
-    prompt = "Run this shell command in the workspace?";
-    detail = args.command ?? "";
-  } else if (toolName === "http_request") {
-    prompt = "Send this HTTP request?";
-    detail = `${args.method || "GET"} ${args.url || ""}`;
-    if (args.body) detail += `\nRequest body: ${args.body.length.toLocaleString()} characters (shown in full below)`;
-  } else if (toolName === "db_query") {
-    prompt = "Run this database query?";
-    detail = args.sql ?? "";
-  } else if (toolName === "write_file") {
-    prompt = `Create or overwrite ${args.path}?`;
-    detail = `${(args.content ?? "").length.toLocaleString()} characters (shown in full below)`;
-  } else if (toolName === "apply_edit") {
-    prompt = `Apply this edit to ${args.path}?`;
-    detail = `Replace ${(args.oldText ?? "").length.toLocaleString()} characters with ${(args.newText ?? "").length.toLocaleString()} characters (shown in full below)`;
-  }
+  const { summary, prompt, detail, argumentError, approvalSafe } = toolCardPresentation(toolName, msg.args);
 
   return (
     <div className="toolcard">
       <div className="toolcard__head">
         <Wrench size={13} />
         <span className="toolcard__name">{toolName}</span>
-        <span className="toolcard__arg">{String(summary)}</span>
+        <span className="toolcard__arg">{summary}</span>
       </div>
+      {argumentError && (
+        <div className="toolcard__intenterror" role="alert">
+          {argumentError}
+        </div>
+      )}
       {msg.approval === "pending" && msg.callId && (
         <div className="toolcard__approve">
           <span className={toolName === "run_command" || toolName === "http_request" ? "toolcard__warn" : ""}>{prompt}</span>
@@ -146,7 +117,7 @@ function ToolCard({ msg }: { msg: ChatMsg }) {
             <button
               type="button"
               className="btn btn--primary"
-              disabled={!msg.intent || !msg.intentDigest}
+              disabled={!approvalSafe || !msg.intent || !msg.intentDigest}
               onClick={() => void approveAgent(msg.callId!, true, msg.intentDigest)}
             >
               <Check size={13} /> Allow
@@ -200,6 +171,7 @@ export default function AssistantPanel() {
   const models = useStore((s) => s.models);
   const settings = useStore((s) => s.settings);
   const settingsError = useStore((s) => s.settingsError);
+  const workspaceTransitioning = useStore((s) => s.workspaceTransitioning);
   const llmAPIKeyAvailable = useStore((s) => s.llmAPIKeyAvailable);
   const llmAPIKeyStatus = useStore((s) => s.llmAPIKeyStatus);
   const llmAPIKeyStatusMessage = useStore((s) => s.llmAPIKeyStatusMessage);
@@ -252,7 +224,7 @@ export default function AssistantPanel() {
 
   const submit = () => {
     const t = input;
-    if (!t.trim() || chatStreaming) return;
+    if (!t.trim() || chatStreaming || workspaceTransitioning) return;
     stickToBottomRef.current = true;
     setInput("");
     if (agentMode) void sendAgent(t);
@@ -483,9 +455,11 @@ export default function AssistantPanel() {
       <div className="assistant__input">
         <textarea
           value={input}
-          disabled={chatStreaming}
+          disabled={chatStreaming || workspaceTransitioning}
           placeholder={
-            chatStreaming
+            workspaceTransitioning
+              ? "Switching workspaces…"
+              : chatStreaming
               ? "Stop the current response to send another message…"
               : "Ask Novera…  (Enter to send, Shift+Enter for newline)"
           }
@@ -505,7 +479,7 @@ export default function AssistantPanel() {
           <button
             className="btn btn--primary assistant__send"
             onClick={submit}
-            disabled={!input.trim()}
+            disabled={workspaceTransitioning || !input.trim()}
             title="Send (Enter)"
           >
             <Send size={14} />

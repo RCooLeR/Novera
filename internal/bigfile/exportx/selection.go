@@ -6,22 +6,20 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"os"
 
 	"novera/internal/bigfile/encodingx"
+	"novera/internal/bigfile/fileio"
 )
 
 func ExportVisibleText(ctx context.Context, outputPath string, text string, encodingName string) (Summary, error) {
 	return ExportVisibleTextWithOptions(ctx, outputPath, text, encodingName, Options{})
 }
 
-func ExportVisibleTextWithOptions(ctx context.Context, outputPath string, text string, encodingName string, opts Options) (Summary, error) {
-	if outputPath == "" {
-		return Summary{}, errors.New("output path is required")
+func ExportVisibleTextWithOptions(ctx context.Context, outputPath string, text string, encodingName string, opts Options) (_ Summary, retErr error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if _, err := os.Stat(outputPath); err == nil {
-		return Summary{}, errors.New("output file already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := fileio.ValidateExactOutputPath(outputPath); err != nil {
 		return Summary{}, err
 	}
 
@@ -51,7 +49,7 @@ func ExportVisibleTextWithOptions(ctx context.Context, outputPath string, text s
 	}
 	if shouldWriteExportManifest(opts) {
 		summary.ManifestPath = exportManifestPathFor(outputPath, opts.ManifestPath)
-		if err := ensureExportManifestAvailable(summary.ManifestPath); err != nil {
+		if err := ensureExportManifestAvailable(summary.ManifestPath, outputPath); err != nil {
 			return summary, err
 		}
 	}
@@ -60,28 +58,19 @@ func ExportVisibleTextWithOptions(ctx context.Context, outputPath string, text s
 	if err != nil {
 		return summary, err
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = dst.Cleanup()
-		}
-	}()
+	defer func() { retErr = errors.Join(retErr, dst.Cleanup()) }()
 	if n, err := dst.Write(data); err != nil {
 		return summary, err
 	} else if n != len(data) {
 		return summary, io.ErrShortWrite
 	}
-	if err := dst.Sync(); err != nil {
+	if err := dst.CommitContext(ctx); err != nil {
 		return summary, err
 	}
-	if err := dst.Close(); err != nil {
-		return summary, err
-	}
-	cleanup = false
 
 	if shouldWriteExportManifest(opts) {
-		if err := writeExportManifest(summary); err != nil {
-			return summary, cleanupOutputAfterManifestFailure(outputPath, err)
+		if err := writeExportManifest(ctx, summary); err != nil {
+			return summary, exportManifestPublicationError(summary, err)
 		}
 	}
 	return summary, nil

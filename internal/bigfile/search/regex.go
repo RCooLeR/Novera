@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 
@@ -10,6 +11,8 @@ import (
 )
 
 const defaultRegexMatchWindow = 1 * 1024 * 1024
+const maxBackwardRegexHits = MaxCollectedHits
+const maxRegexChunkSize = MaxChunkBytes
 
 // RegexOptions controls chunked regex search.
 type RegexOptions struct {
@@ -24,8 +27,21 @@ type RegexOptions struct {
 
 // CollectRegexp returns up to opts.MaxHits regex matches with previews.
 func CollectRegexp(ctx context.Context, r ReaderAtSize, pattern []byte, opts RegexOptions, previewBytes int) ([]Result, error) {
-	re, err := compileRegexp(pattern, opts.CaseInsensitive)
+	if err := validateRegexOptions(opts); err != nil {
+		return nil, err
+	}
+	if err := validateCollectRequest(len(pattern), opts.MaxHits, previewBytes); err != nil {
+		return nil, err
+	}
+	opts = normalizeRegexOptions(opts)
+	if err := validateRegexOptions(opts); err != nil {
+		return nil, err
+	}
+	re, analysis, err := regexutil.CompileBounded(pattern, opts.CaseInsensitive, opts.MaxMatchWindow)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCollectRequest(int(analysis.MaxMatchBytes), opts.MaxHits, previewBytes); err != nil {
 		return nil, err
 	}
 
@@ -58,8 +74,17 @@ func FindRegexp(ctx context.Context, r ReaderAtSize, re *regexp.Regexp, opts Reg
 		return errors.New("nil regexp")
 	}
 
+	if err := validateRegexOptions(opts); err != nil {
+		return err
+	}
 	opts = normalizeRegexOptions(opts)
+	if err := regexutil.ValidateCompiledBounded(re, opts.MaxMatchWindow); err != nil {
+		return err
+	}
 	size := r.Size()
+	if size < 0 {
+		return errors.New("source size must not be negative")
+	}
 	startOffset := clampOffset(opts.StartOffset, size)
 	hits := 0
 	var window []byte // reused across chunks (grow-only), like the plain path
@@ -91,6 +116,9 @@ func FindRegexp(ctx context.Context, r ReaderAtSize, re *regexp.Regexp, opts Reg
 		readWindow, windowErr := r.ReadAt(window, windowStart)
 		if windowErr != nil && !errors.Is(windowErr, io.EOF) {
 			return windowErr
+		}
+		if readWindow != len(window) {
+			return io.ErrUnexpectedEOF
 		}
 		window = window[:readWindow]
 		availableEnd := windowStart + int64(readWindow)
@@ -149,39 +177,54 @@ func FindRegexp(ctx context.Context, r ReaderAtSize, re *regexp.Regexp, opts Reg
 	return nil
 }
 
-// FindRegexpBackward scans forward up to opts.StartOffset and emits matches in descending order.
+// FindRegexpBackward scans from opts.StartOffset toward the beginning and emits
+// matches in descending order. A positive MaxHits bounds the retained tail for
+// each chunk; an unbounded request fails if one chunk exceeds the fixed safety
+// ceiling instead of materializing every match in a dense window.
 func FindRegexpBackward(ctx context.Context, r ReaderAtSize, re *regexp.Regexp, opts RegexOptions, emit func(Match) error) error {
 	if re == nil {
 		return errors.New("nil regexp")
 	}
 
+	if err := validateRegexOptions(opts); err != nil {
+		return err
+	}
 	opts = normalizeRegexOptions(opts)
+	if err := regexutil.ValidateCompiledBounded(re, opts.MaxMatchWindow); err != nil {
+		return err
+	}
+	if opts.MaxHits > maxBackwardRegexHits {
+		return errors.New("maximum hits exceeds the backward-search safety limit")
+	}
 	size := r.Size()
+	if size < 0 {
+		return errors.New("source size must not be negative")
+	}
 	endOffset := opts.StartOffset
 	if endOffset <= 0 || endOffset > size {
 		endOffset = size
 	}
 
 	hits := 0
-	var matches []Match
 	var window []byte // reused across chunks (grow-only)
 
-	for off := int64(0); off < endOffset; {
+	var processed int64
+	for end := endOffset; end > 0; {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		primaryEnd := off + int64(opts.ChunkSize)
-		if primaryEnd > endOffset {
-			primaryEnd = endOffset
+		chunkStart := end - int64(opts.ChunkSize)
+		if chunkStart < 0 {
+			chunkStart = 0
 		}
-		windowStart := off - int64(opts.MaxMatchWindow)
+		windowStart := chunkStart - int64(opts.MaxMatchWindow)
 		if windowStart < 0 {
 			windowStart = 0
 		}
-		windowEnd := primaryEnd + int64(opts.MaxMatchWindow)
+		windowEnd := end + int64(opts.MaxMatchWindow)
 		if windowEnd > endOffset {
 			windowEnd = endOffset
 		}
@@ -194,48 +237,72 @@ func FindRegexpBackward(ctx context.Context, r ReaderAtSize, re *regexp.Regexp, 
 		if windowErr != nil && !errors.Is(windowErr, io.EOF) {
 			return windowErr
 		}
+		if readWindow != len(window) {
+			return io.ErrUnexpectedEOF
+		}
 		window = window[:readWindow]
-		availableEnd := windowStart + int64(readWindow)
-		if availableEnd < primaryEnd {
-			primaryEnd = availableEnd
+		remaining := maxBackwardRegexHits
+		if opts.MaxHits > 0 {
+			remaining = opts.MaxHits - hits
 		}
-		if primaryEnd <= off {
-			break
-		}
-
-		locs := re.FindAllIndex(window, -1)
-		for _, loc := range locs {
-			absStart := windowStart + int64(loc[0])
-			if absStart < off {
-				continue
-			}
-			if absStart >= primaryEnd {
+		matches := make([]Match, 0, remaining)
+		ringStart := 0
+		for pos := 0; pos <= len(window); {
+			loc := re.FindIndex(window[pos:])
+			if loc == nil {
 				break
 			}
-			matches = append(matches, Match{Offset: absStart, Length: loc[1] - loc[0]})
-			hits++
-			if opts.MaxHits > 0 && len(matches) > opts.MaxHits {
-				copy(matches, matches[1:])
-				matches = matches[:opts.MaxHits]
+			matchStart, matchEnd := pos+loc[0], pos+loc[1]
+			absStart := windowStart + int64(matchStart)
+			if absStart < chunkStart {
+				// The match belongs to the preceding chunk.
+			} else if absStart >= end {
+				break
+			} else if len(matches) < remaining {
+				matches = append(matches, Match{Offset: absStart, Length: matchEnd - matchStart})
+			} else if opts.MaxHits == 0 {
+				return errors.New("backward regex search exceeded the safe per-chunk match limit; specify MaxHits")
+			} else {
+				matches[ringStart] = Match{Offset: absStart, Length: matchEnd - matchStart}
+				ringStart = (ringStart + 1) % len(matches)
+			}
+
+			if loc[1] > loc[0] {
+				pos = matchEnd
+			} else {
+				pos = matchEnd + 1
 			}
 		}
 
-		off = primaryEnd
+		for i := len(matches) - 1; i >= 0; i-- {
+			index := i
+			if ringStart != 0 {
+				index = (ringStart + i) % len(matches)
+			}
+			if err := emit(matches[index]); err != nil {
+				return err
+			}
+			hits++
+			if opts.MaxHits > 0 && hits >= opts.MaxHits {
+				break
+			}
+		}
+
+		processed += end - chunkStart
+		end = chunkStart
 
 		if opts.Progress != nil {
 			opts.Progress(Progress{
-				BytesProcessed: off,
+				BytesProcessed: processed,
 				BytesTotal:     endOffset,
 				Matches:        int64(hits),
 			})
 		}
-	}
-
-	for i := len(matches) - 1; i >= 0; i-- {
-		if err := emit(matches[i]); err != nil {
-			return err
+		if opts.MaxHits > 0 && hits >= opts.MaxHits {
+			return nil
 		}
 	}
+
 	return nil
 }
 
@@ -244,16 +311,35 @@ func compileRegexp(pattern []byte, caseInsensitive bool) (*regexp.Regexp, error)
 }
 
 func normalizeRegexOptions(opts RegexOptions) RegexOptions {
-	if opts.ChunkSize <= 0 {
+	if opts.ChunkSize == 0 {
 		opts.ChunkSize = 4 * 1024 * 1024
 	}
-	if opts.MaxMatchWindow <= 0 {
+	if opts.MaxMatchWindow == 0 {
 		opts.MaxMatchWindow = defaultRegexMatchWindow
 	}
 	if opts.MaxMatchWindow > opts.ChunkSize {
 		opts.MaxMatchWindow = opts.ChunkSize
 	}
 	return opts
+}
+
+func validateRegexOptions(opts RegexOptions) error {
+	if opts.ChunkSize < 0 {
+		return fmt.Errorf("%w: search chunk size must not be negative", regexutil.ErrRegexResourceLimit)
+	}
+	if opts.ChunkSize > maxRegexChunkSize {
+		return fmt.Errorf("%w: search chunk %d exceeds %d bytes", regexutil.ErrRegexResourceLimit, opts.ChunkSize, maxRegexChunkSize)
+	}
+	if opts.MaxMatchWindow < 0 {
+		return fmt.Errorf("%w: regex match window must not be negative", regexutil.ErrRegexResourceLimit)
+	}
+	if opts.MaxMatchWindow > regexutil.MaxExactMatchWindowBytes {
+		return fmt.Errorf("%w: match window %d exceeds %d bytes", regexutil.ErrRegexResourceLimit, opts.MaxMatchWindow, regexutil.MaxExactMatchWindowBytes)
+	}
+	if opts.MaxHits < 0 {
+		return searchLimit("maximum hits must not be negative")
+	}
+	return nil
 }
 
 func clampOffset(offset int64, size int64) int64 {

@@ -9,6 +9,6 @@ export async function writeClipboardText(text: string, clipboard?: ClipboardWrit
     await writer.writeText(text);
   } catch (error) {
     const detail = error instanceof Error && error.message ? `: ${error.message}` : "";
-    throw new Error(`Could not copy to the clipboard${detail}`);
+    throw new Error(`Could not copy to the clipboard${detail}`, { cause: error });
   }
 }

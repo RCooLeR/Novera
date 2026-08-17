@@ -59,10 +59,13 @@ func WriteFileAtomic(path string, data []byte, opts AtomicWriteOptions) (AtomicW
 	}
 	backupPath := path + ".quarry.overwrite.bak"
 
-	if recovered, err := RecoverOverwriteBackup(path); err != nil {
+	// Adjacent recovery artifacts are evidence, not authorization to mutate a
+	// destination. A forged or stale backup must never be replayed merely
+	// because an unrelated write selected the same path.
+	if _, err := statPath(backupPath); err == nil {
+		return summary, fmt.Errorf("%w: %s", ErrBackupExists, backupPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return summary, err
-	} else if recovered {
-		return summary, fmt.Errorf("%w: %s", ErrBackupRecovered, path)
 	}
 
 	if _, err := statPath(summary.TempPath); err == nil {
@@ -78,11 +81,6 @@ func WriteFileAtomic(path string, data []byte, opts AtomicWriteOptions) (AtomicW
 		summary.Overwritten = true
 		if existingMode := info.Mode().Perm(); existingMode != 0 {
 			mode = existingMode
-		}
-		if _, err := statPath(backupPath); err == nil {
-			return summary, fmt.Errorf("%w: %s", ErrBackupExists, backupPath)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return summary, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return summary, err
@@ -162,9 +160,8 @@ func WriteFileAtomic(path string, data []byte, opts AtomicWriteOptions) (AtomicW
 	return summary, nil
 }
 
-// RecoverOverwriteBackup restores the source file when a previous overwrite
-// crashed after moving the old destination to the legacy-compatible backup path but before
-// publishing the new temp file.
+// RecoverOverwriteBackup is retained as an inspection-only compatibility
+// boundary. Adjacent unauthenticated artifacts cannot authorize replay.
 func RecoverOverwriteBackup(path string) (bool, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -182,13 +179,7 @@ func RecoverOverwriteBackup(path string) (bool, error) {
 		}
 		return false, err
 	}
-	if err := renamePath(backupPath, path); err != nil {
-		return false, err
-	}
-	if err := syncDirPath(path); err != nil {
-		return true, err
-	}
-	return true, nil
+	return false, fmt.Errorf("%w: recovery artifact requires explicit inspection: %s", ErrBackupExists, backupPath)
 }
 
 func syncDirectory(path string) error {

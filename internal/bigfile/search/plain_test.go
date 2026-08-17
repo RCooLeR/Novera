@@ -2,9 +2,11 @@ package search
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 type memReaderAt struct {
@@ -341,5 +343,115 @@ func TestFindPlainWholeWordAcrossBoundaryNeedsNextByte(t *testing.T) {
 		if offsets[i] != want[i] {
 			t.Fatalf("offsets = %#v, want %#v", offsets, want)
 		}
+	}
+}
+
+func TestFindPlainWholeWordUnicodeBoundariesAreChunkInvariant(t *testing.T) {
+	const supplementaryLetter = "𐐀" // Deseret capital letter; four UTF-8 bytes.
+	for chunkSize := len("cat") + utf8.UTFMax; chunkSize <= 13; chunkSize++ {
+		for padding := 0; padding < chunkSize; padding++ {
+			data := strings.Repeat(".", padding) + supplementaryLetter + "cat cat cat" + supplementaryLetter
+			want := int64(padding + len(supplementaryLetter) + len("cat "))
+			name := fmt.Sprintf("chunk=%d/padding=%d", chunkSize, padding)
+			t.Run(name, func(t *testing.T) {
+				r := memReaderAt{data: []byte(data)}
+				for _, backward := range []bool{false, true} {
+					var offsets []int64
+					find := FindPlain
+					if backward {
+						find = FindPlainBackward
+					}
+					err := find(context.Background(), r, []byte("cat"), PlainOptions{
+						ChunkSize: chunkSize,
+						WholeWord: true,
+					}, func(m Match) error {
+						offsets = append(offsets, m.Offset)
+						return nil
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(offsets) != 1 || offsets[0] != want {
+						t.Fatalf("backward=%v offsets=%v, want [%d]", backward, offsets, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestFindPlainWholeWordTreatsMarksAndInvalidSeamsConservatively(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want int64
+	}{
+		{name: "combining mark", data: []byte("e\u0301 e"), want: int64(len("e\u0301 "))},
+		{name: "invalid preceding byte", data: []byte{0xff, 'e', ' ', 'e'}, want: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var offsets []int64
+			err := FindPlain(context.Background(), memReaderAt{data: tt.data}, []byte("e"), PlainOptions{
+				ChunkSize: len("e") + utf8.UTFMax,
+				WholeWord: true,
+			}, func(m Match) error {
+				offsets = append(offsets, m.Offset)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(offsets) != 1 || offsets[0] != tt.want {
+				t.Fatalf("offsets=%v, want [%d]", offsets, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindPlainHonorsUTF16CodeUnitAlignmentAcrossChunks(t *testing.T) {
+	// The UTF-16LE bytes for "A" occur first at unaligned byte 1 and then at
+	// aligned byte 4. Exact encoded search must never report the false seam.
+	r := memReaderAt{data: []byte{0x00, 0x41, 0x00, 0x42, 0x41, 0x00}}
+	for chunkSize := 2; chunkSize <= 7; chunkSize++ {
+		for _, backward := range []bool{false, true} {
+			var offsets []int64
+			find := FindPlain
+			if backward {
+				find = FindPlainBackward
+			}
+			err := find(context.Background(), r, []byte{0x41, 0x00}, PlainOptions{
+				ChunkSize:     chunkSize,
+				ByteAlignment: 2,
+			}, func(m Match) error {
+				offsets = append(offsets, m.Offset)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(offsets) != 1 || offsets[0] != 4 {
+				t.Fatalf("chunk=%d backward=%v offsets=%v, want [4]", chunkSize, backward, offsets)
+			}
+		}
+	}
+}
+
+func TestFindPlainRejectsInvalidAlignmentContracts(t *testing.T) {
+	r := memReaderAt{data: []byte("abc")}
+	for name, opts := range map[string]PlainOptions{
+		"unsupported alignment":  {ByteAlignment: 3},
+		"unaligned pattern":      {ByteAlignment: 2},
+		"fixed width whole word": {ByteAlignment: 2, WholeWord: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pattern := []byte("a")
+			if name == "fixed width whole word" {
+				pattern = []byte("aa")
+			}
+			if err := FindPlain(context.Background(), r, pattern, opts, func(Match) error { return nil }); err == nil {
+				t.Fatal("expected alignment contract rejection")
+			}
+		})
 	}
 }

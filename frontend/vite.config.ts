@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import wails from "@wailsio/runtime/plugins/vite";
-import { cspForVite } from "./src/lib/cspPolicy";
+import { cspForVite } from "./src/lib/cspPolicy.ts";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {

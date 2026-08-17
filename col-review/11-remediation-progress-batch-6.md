@@ -113,3 +113,11 @@ The correct release evidence remains a clean hosted run that executes the full n
 ## Release decision
 
 Batch 6 closes the remaining bounded frontend bugs, moves the two open backend findings into materially safer partial states, adds missing governance/performance/supply-chain enforcement, and leaves only AR-008 and AR-011 wholly open. The review is nevertheless **not done as a production-readiness program**: 51 partial records still contain high-impact architectural or external acceptance criteria. Public release remains frozen.
+
+## Later focused synchronization
+
+The 2026-07-23 Quarry-derived large-file tool comparison, subsequent ports, and
+their own validation/residual record are documented in
+[12-quarry-tool-sync.md](12-quarry-tool-sync.md). That later pass intentionally
+does not rewrite Batch 6's historical 89/51/2 reconciliation or imply that the
+release freeze has been lifted.

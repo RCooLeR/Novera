@@ -14,11 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.26.5"
+  GO_VERSION: "1.26.6"
   GOTOOLCHAIN: local
-  NODE_VERSION: "24"
-  TASK_VERSION: "v3.51.1"
-  WAILS_VERSION: "v3.0.0-alpha.79"
+  NODE_VERSION: "24.19.0"
+  TASK_VERSION: "v3.52.0"
+  WAILS_VERSION: "v3.0.0-beta.9"
 
 jobs:
   goreleaser-check:
@@ -33,7 +33,7 @@ jobs:
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           distribution: goreleaser
-          version: "~> v2"
+          version: "v2.17.1"
           install-only: true
 
       - name: Check GoReleaser config
@@ -156,7 +156,7 @@ jobs:
           printf '<!doctype html><title>govulncheck placeholder</title>\n' > frontend/dist/index.html
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
 
       - name: Scan reachable Go vulnerabilities
         run: govulncheck . ./internal/...

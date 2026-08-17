@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { File as FileIcon, ChevronRight } from "lucide-react";
 import { useStore } from "../state/store";
 import { formatActiveDocument } from "../lib/editorBridge";
+import { useDialogFocus } from "../lib/useDialogFocus";
 
 interface Command {
   id: string;
@@ -67,12 +68,12 @@ export default function CommandPalette() {
   const [debTerm, setDebTerm] = useState(""); // debounced file-search term
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const dialogRef = useDialogFocus(open, close, inputRef);
 
   useEffect(() => {
     if (open) {
       setQuery(mode === "commands" ? ">" : "");
       setSel(0);
-      setTimeout(() => inputRef.current?.focus(), 0);
     }
   }, [open, mode]);
 
@@ -159,10 +160,22 @@ export default function CommandPalette() {
 
   return (
     <div className="palette-overlay" onMouseDown={close}>
-      <div className="palette" onMouseDown={(e) => e.stopPropagation()}>
+      <div
+        ref={dialogRef}
+        className="palette"
+        role="dialog"
+        aria-modal="true"
+        aria-label={isCommandMode ? "Command palette" : "Go to file"}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <input
           ref={inputRef}
           className="palette__input"
+          role="combobox"
+          aria-label={isCommandMode ? "Search commands" : "Search workspace files"}
+          aria-expanded="true"
+          aria-controls="command-palette-results"
+          aria-activedescendant={count > 0 ? `command-palette-option-${sel}` : undefined}
           value={query}
           spellCheck={false}
           placeholder={isCommandMode ? "Type a command…" : "Go to file…  (prefix with > for commands)"}
@@ -180,13 +193,10 @@ export default function CommandPalette() {
             } else if (e.key === "Enter") {
               e.preventDefault();
               choose(sel);
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              close();
             }
           }}
         />
-        <div className="palette__list">
+        <div id="command-palette-results" className="palette__list" role="listbox">
           {count === 0 &&
             (isCommandMode ? (
               <div className="palette__empty">No matches</div>
@@ -205,8 +215,11 @@ export default function CommandPalette() {
           {isCommandMode
             ? commandResults.map((c, i) => (
                 <div
+                  id={`command-palette-option-${i}`}
                   key={c.id}
                   className={`palette__item ${i === sel ? "selected" : ""}`}
+                  role="option"
+                  aria-selected={i === sel}
                   onMouseEnter={() => setSel(i)}
                   onMouseDown={(e) => {
                     e.preventDefault();
@@ -219,8 +232,11 @@ export default function CommandPalette() {
               ))
             : fileResults.map((f, i) => (
                 <div
+                  id={`command-palette-option-${i}`}
                   key={f}
                   className={`palette__item ${i === sel ? "selected" : ""}`}
+                  role="option"
+                  aria-selected={i === sel}
                   onMouseEnter={() => setSel(i)}
                   onMouseDown={(e) => {
                     e.preventDefault();

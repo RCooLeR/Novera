@@ -6,14 +6,12 @@
 import { Create as $Create } from "@wailsio/runtime";
 
 /**
- * Column is one parsed column of a CREATE TABLE.
+ * Column is one parsed column of a CREATE TABLE statement. Definition retains
+ * literal and identifier spelling while normalizing comments and syntax-only
+ * whitespace for readable diff output.
  */
 export class Column {
     "name": string;
-
-    /**
-     * type + modifiers, normalized
-     */
     "definition": string;
 
     /** Creates a new Column instance. */
@@ -70,18 +68,109 @@ export class ColumnChange {
 }
 
 /**
- * TableDiff is the per-table column-level diff for a table in both dumps.
+ * DiffStatus reports whether a returned table is changed or cannot be compared
+ * safely. Unchanged tables are counted and do not appear in ChangedTables.
+ */
+export enum DiffStatus {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    DiffChanged = "changed",
+    DiffUnknown = "unknown",
+};
+
+/**
+ * IdentityChange reports that the same analyzer key resolved to different
+ * qualified table identifiers in the parsed DDL.
+ */
+export class IdentityChange {
+    "old": string;
+    "new": string;
+
+    /** Creates a new IdentityChange instance. */
+    constructor($$source: Partial<IdentityChange> = {}) {
+        if (!("old" in $$source)) {
+            this["old"] = "";
+        }
+        if (!("new" in $$source)) {
+            this["new"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new IdentityChange instance from a string or object.
+     */
+    static createFrom($$source: any = {}): IdentityChange {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new IdentityChange($$parsedSource as Partial<IdentityChange>);
+    }
+}
+
+/**
+ * OptionChange describes a table option or CREATE modifier change.
+ */
+export class OptionChange {
+    "name": string;
+    "old": string;
+    "new": string;
+
+    /** Creates a new OptionChange instance. */
+    constructor($$source: Partial<OptionChange> = {}) {
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+        if (!("old" in $$source)) {
+            this["old"] = "";
+        }
+        if (!("new" in $$source)) {
+            this["new"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new OptionChange instance from a string or object.
+     */
+    static createFrom($$source: any = {}): OptionChange {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new OptionChange($$parsedSource as Partial<OptionChange>);
+    }
+}
+
+/**
+ * TableDiff is the per-table structural diff. Status unknown is deliberately
+ * carried in ChangedTables so current service consumers cannot mistake an
+ * incomplete parse for equality.
  */
 export class TableDiff {
     "name": string;
+    "status": DiffStatus;
+    "reason"?: string;
+    "identityChanged"?: IdentityChange | null;
     "addedColumns": Column[];
     "removedColumns": Column[];
     "changedColumns": ColumnChange[];
+    "columnOrderChanged": boolean;
+    "oldColumnOrder": string[];
+    "newColumnOrder": string[];
+    "addedConstraints": string[];
+    "removedConstraints": string[];
+    "addedIndexes": string[];
+    "removedIndexes": string[];
+    "changedOptions": OptionChange[];
 
     /** Creates a new TableDiff instance. */
     constructor($$source: Partial<TableDiff> = {}) {
         if (!("name" in $$source)) {
             this["name"] = "";
+        }
+        if (!("status" in $$source)) {
+            this["status"] = DiffStatus.$zero;
         }
         if (!("addedColumns" in $$source)) {
             this["addedColumns"] = [];
@@ -92,6 +181,30 @@ export class TableDiff {
         if (!("changedColumns" in $$source)) {
             this["changedColumns"] = [];
         }
+        if (!("columnOrderChanged" in $$source)) {
+            this["columnOrderChanged"] = false;
+        }
+        if (!("oldColumnOrder" in $$source)) {
+            this["oldColumnOrder"] = [];
+        }
+        if (!("newColumnOrder" in $$source)) {
+            this["newColumnOrder"] = [];
+        }
+        if (!("addedConstraints" in $$source)) {
+            this["addedConstraints"] = [];
+        }
+        if (!("removedConstraints" in $$source)) {
+            this["removedConstraints"] = [];
+        }
+        if (!("addedIndexes" in $$source)) {
+            this["addedIndexes"] = [];
+        }
+        if (!("removedIndexes" in $$source)) {
+            this["removedIndexes"] = [];
+        }
+        if (!("changedOptions" in $$source)) {
+            this["changedOptions"] = [];
+        }
 
         Object.assign(this, $$source);
     }
@@ -100,25 +213,62 @@ export class TableDiff {
      * Creates a new TableDiff instance from a string or object.
      */
     static createFrom($$source: any = {}): TableDiff {
-        const $$createField1_0 = $$createType1;
-        const $$createField2_0 = $$createType1;
-        const $$createField3_0 = $$createType3;
+        const $$createField3_0 = $$createType1;
+        const $$createField4_0 = $$createType3;
+        const $$createField5_0 = $$createType3;
+        const $$createField6_0 = $$createType5;
+        const $$createField8_0 = $$createType6;
+        const $$createField9_0 = $$createType6;
+        const $$createField10_0 = $$createType6;
+        const $$createField11_0 = $$createType6;
+        const $$createField12_0 = $$createType6;
+        const $$createField13_0 = $$createType6;
+        const $$createField14_0 = $$createType8;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("identityChanged" in $$parsedSource) {
+            $$parsedSource["identityChanged"] = $$createField3_0($$parsedSource["identityChanged"]);
+        }
         if ("addedColumns" in $$parsedSource) {
-            $$parsedSource["addedColumns"] = $$createField1_0($$parsedSource["addedColumns"]);
+            $$parsedSource["addedColumns"] = $$createField4_0($$parsedSource["addedColumns"]);
         }
         if ("removedColumns" in $$parsedSource) {
-            $$parsedSource["removedColumns"] = $$createField2_0($$parsedSource["removedColumns"]);
+            $$parsedSource["removedColumns"] = $$createField5_0($$parsedSource["removedColumns"]);
         }
         if ("changedColumns" in $$parsedSource) {
-            $$parsedSource["changedColumns"] = $$createField3_0($$parsedSource["changedColumns"]);
+            $$parsedSource["changedColumns"] = $$createField6_0($$parsedSource["changedColumns"]);
+        }
+        if ("oldColumnOrder" in $$parsedSource) {
+            $$parsedSource["oldColumnOrder"] = $$createField8_0($$parsedSource["oldColumnOrder"]);
+        }
+        if ("newColumnOrder" in $$parsedSource) {
+            $$parsedSource["newColumnOrder"] = $$createField9_0($$parsedSource["newColumnOrder"]);
+        }
+        if ("addedConstraints" in $$parsedSource) {
+            $$parsedSource["addedConstraints"] = $$createField10_0($$parsedSource["addedConstraints"]);
+        }
+        if ("removedConstraints" in $$parsedSource) {
+            $$parsedSource["removedConstraints"] = $$createField11_0($$parsedSource["removedConstraints"]);
+        }
+        if ("addedIndexes" in $$parsedSource) {
+            $$parsedSource["addedIndexes"] = $$createField12_0($$parsedSource["addedIndexes"]);
+        }
+        if ("removedIndexes" in $$parsedSource) {
+            $$parsedSource["removedIndexes"] = $$createField13_0($$parsedSource["removedIndexes"]);
+        }
+        if ("changedOptions" in $$parsedSource) {
+            $$parsedSource["changedOptions"] = $$createField14_0($$parsedSource["changedOptions"]);
         }
         return new TableDiff($$parsedSource as Partial<TableDiff>);
     }
 }
 
 // Private type creation functions
-const $$createType0 = Column.createFrom;
-const $$createType1 = $Create.Array($$createType0);
-const $$createType2 = ColumnChange.createFrom;
+const $$createType0 = IdentityChange.createFrom;
+const $$createType1 = $Create.Nullable($$createType0);
+const $$createType2 = Column.createFrom;
 const $$createType3 = $Create.Array($$createType2);
+const $$createType4 = ColumnChange.createFrom;
+const $$createType5 = $Create.Array($$createType4);
+const $$createType6 = $Create.Array($Create.Any);
+const $$createType7 = OptionChange.createFrom;
+const $$createType8 = $Create.Array($$createType7);

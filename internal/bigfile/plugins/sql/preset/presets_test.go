@@ -115,7 +115,7 @@ func TestChangeCharsetPresetRewritesVariants(t *testing.T) {
 		"CHARSET=`utf8`":          "CHARSET=`utf8mb4`",
 		"SET NAMES utf8":          "SET NAMES utf8mb4",
 		"charset=UTF8":            "charset=utf8mb4", // case-insensitive keyword + value
-		"CHARSET=utf8mb4":         "CHARSET=utf8mb4",  // already correct, must be untouched
+		"CHARSET=utf8mb4":         "CHARSET=utf8mb4", // already correct, must be untouched
 		"CHARSET=utf8mb4_general": "CHARSET=utf8mb4_general",
 	}
 	for in, want := range cases {
@@ -142,10 +142,10 @@ func TestChangeCharsetPresetRewritesCollation(t *testing.T) {
 		t.Fatal("no COLLATE rule built")
 	}
 	for in, want := range map[string]string{
-		"COLLATE=utf8_general_ci":       "COLLATE=utf8mb4_general_ci",
-		"COLLATE utf8_general_ci":       "COLLATE utf8mb4_general_ci",
-		"COLLATE = `utf8_general_ci`":   "COLLATE = `utf8mb4_general_ci`",
-		"COLLATE=utf8mb4_general_ci":    "COLLATE=utf8mb4_general_ci",
+		"COLLATE=utf8_general_ci":     "COLLATE=utf8mb4_general_ci",
+		"COLLATE utf8_general_ci":     "COLLATE utf8mb4_general_ci",
+		"COLLATE = `utf8_general_ci`": "COLLATE = `utf8mb4_general_ci`",
+		"COLLATE=utf8mb4_general_ci":  "COLLATE=utf8mb4_general_ci",
 	} {
 		if got := collate.ReplaceAllString(in, repl); got != want {
 			t.Fatalf("collate apply(%q) = %q, want %q", in, got, want)

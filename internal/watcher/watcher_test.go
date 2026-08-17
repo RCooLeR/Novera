@@ -30,6 +30,7 @@ type fakeWatchBackend struct {
 	addCalls  []string
 	closeErr  error
 	closes    int
+	closed    bool
 }
 
 func newFakeWatchBackend() *fakeWatchBackend {
@@ -46,6 +47,9 @@ func (w *fakeWatchBackend) Add(path string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.addCalls = append(w.addCalls, path)
+	if w.closed {
+		return fsnotify.ErrClosed
+	}
 	if err := w.addErr[path]; err != nil {
 		return err
 	}
@@ -56,6 +60,9 @@ func (w *fakeWatchBackend) Add(path string) error {
 func (w *fakeWatchBackend) Remove(path string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		return fsnotify.ErrClosed
+	}
 	if err := w.removeErr[path]; err != nil {
 		return err
 	}
@@ -70,7 +77,8 @@ func (w *fakeWatchBackend) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.closes++
-	if w.closes == 1 {
+	if !w.closed {
+		w.closed = true
 		close(w.eventsCh)
 		close(w.errorsCh)
 	}
@@ -88,6 +96,17 @@ func (w *fakeWatchBackend) snapshot() (map[string]bool, []string, int) {
 		added[path] = present
 	}
 	return added, append([]string(nil), w.addCalls...), w.closes
+}
+
+func (w *fakeWatchBackend) failChannels() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
+	w.closed = true
+	close(w.eventsCh)
+	close(w.errorsCh)
 }
 
 type errorSink struct{ ch chan error }
@@ -189,19 +208,259 @@ func TestWatchSurfacesWatcherCreationFailure(t *testing.T) {
 	}
 }
 
-func TestRuntimeFailureIsReportedAndReturnedByWatch(t *testing.T) {
+func TestRuntimeFailureReconstructsAndResynchronizesOnNextWatch(t *testing.T) {
+	root := t.TempDir()
 	backend := newFakeWatchBackend()
+	replacement := newFakeWatchBackend()
 	sink := newErrorSink()
-	service := serviceWithFake(t.TempDir(), backend, sink)
+	var factoryMu sync.Mutex
+	factoryCalls := 0
+	service := newService(staticRoot(root), func() (watchBackend, error) {
+		factoryMu.Lock()
+		defer factoryMu.Unlock()
+		factoryCalls++
+		if factoryCalls == 1 {
+			return backend, nil
+		}
+		return replacement, nil
+	}, sink.report)
 	t.Cleanup(func() { _ = service.ServiceShutdown() })
+	if err := service.Watch([]string{"file.txt"}); err != nil {
+		t.Fatal(err)
+	}
 
 	runtimeFailure := errors.New("event queue overflow")
 	backend.errorsCh <- runtimeFailure
 	if reported := receiveError(t, sink); !errors.Is(reported, runtimeFailure) {
 		t.Fatalf("reported error = %v, want runtime failure", reported)
 	}
-	if err := service.Watch(nil); !errors.Is(err, runtimeFailure) {
-		t.Fatalf("Watch error = %v, want recorded runtime failure", err)
+	if err := service.Watch([]string{"file.txt"}); err != nil {
+		t.Fatalf("Watch recovery error = %v, want successful reconstruction", err)
+	}
+
+	added, _, _ := replacement.snapshot()
+	if !added[root] {
+		t.Fatalf("replacement backend watches = %v, want resynchronized root %q", added, root)
+	}
+	_, _, oldCloses := backend.snapshot()
+	if oldCloses != 1 {
+		t.Fatalf("poisoned backend Close calls = %d, want 1", oldCloses)
+	}
+	service.mu.Lock()
+	healthy := service.w == replacement && service.generation != nil && service.initErr == nil && service.runtimeErr == nil
+	fileWatched := service.files[fsKey(filepath.Join(root, "file.txt"))]
+	service.mu.Unlock()
+	if !healthy || !fileWatched {
+		t.Fatalf("recovered state: healthy=%v fileWatched=%v", healthy, fileWatched)
+	}
+	factoryMu.Lock()
+	gotFactoryCalls := factoryCalls
+	factoryMu.Unlock()
+	if gotFactoryCalls != 2 {
+		t.Fatalf("factory calls = %d, want initial + one reconstruction", gotFactoryCalls)
+	}
+}
+
+func TestClosedRuntimeChannelsAreRecoverable(t *testing.T) {
+	backend := newFakeWatchBackend()
+	replacement := newFakeWatchBackend()
+	sink := newErrorSink()
+	created := 0
+	service := newService(staticRoot(t.TempDir()), func() (watchBackend, error) {
+		created++
+		if created == 1 {
+			return backend, nil
+		}
+		return replacement, nil
+	}, sink.report)
+	t.Cleanup(func() { _ = service.ServiceShutdown() })
+
+	backend.failChannels()
+	if reported := receiveError(t, sink); !strings.Contains(reported.Error(), "channel closed unexpectedly") {
+		t.Fatalf("reported channel failure = %v", reported)
+	}
+	if err := service.Watch(nil); err != nil {
+		t.Fatalf("Watch after channel close = %v, want reconstructed empty watcher", err)
+	}
+	service.mu.Lock()
+	healthy := service.w == replacement && service.runtimeErr == nil && service.initErr == nil
+	service.mu.Unlock()
+	if !healthy {
+		t.Fatal("channel-close recovery did not install a healthy replacement")
+	}
+}
+
+func TestRecoveryFailureStaysLatchedUntilLaterSuccessfulReconstruction(t *testing.T) {
+	root := t.TempDir()
+	backend := newFakeWatchBackend()
+	replacement := newFakeWatchBackend()
+	runtimeFailure := errors.New("queue overflow")
+	createFailure := errors.New("replacement creation failed")
+	sink := newErrorSink()
+	created := 0
+	service := newService(staticRoot(root), func() (watchBackend, error) {
+		created++
+		switch created {
+		case 1:
+			return backend, nil
+		case 2:
+			return nil, createFailure
+		default:
+			return replacement, nil
+		}
+	}, sink.report)
+	t.Cleanup(func() { _ = service.ServiceShutdown() })
+
+	backend.errorsCh <- runtimeFailure
+	_ = receiveError(t, sink)
+	if err := service.Watch([]string{"file.txt"}); !errors.Is(err, runtimeFailure) || !errors.Is(err, createFailure) || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("failed reconstruction error = %v", err)
+	}
+	service.mu.Lock()
+	stillLatched := service.runtimeErr != nil && service.initErr != nil && service.generation == nil && service.w == nil
+	service.mu.Unlock()
+	if !stillLatched {
+		t.Fatal("failed reconstruction cleared the runtime failure or installed a backend")
+	}
+
+	if err := service.Watch([]string{"file.txt"}); err != nil {
+		t.Fatalf("later reconstruction error = %v", err)
+	}
+	service.mu.Lock()
+	cleared := service.runtimeErr == nil && service.initErr == nil && service.w == replacement
+	service.mu.Unlock()
+	if !cleared {
+		t.Fatal("successful reconstruction did not clear latched failures")
+	}
+}
+
+func TestRecoveryDoesNotClearFailureUntilDirectoryResynchronizationSucceeds(t *testing.T) {
+	root := t.TempDir()
+	backend := newFakeWatchBackend()
+	badReplacement := newFakeWatchBackend()
+	goodReplacement := newFakeWatchBackend()
+	addFailure := errors.New("replacement add failed")
+	badReplacement.addErr[root] = addFailure
+	sink := newErrorSink()
+	created := 0
+	service := newService(staticRoot(root), func() (watchBackend, error) {
+		created++
+		switch created {
+		case 1:
+			return backend, nil
+		case 2:
+			return badReplacement, nil
+		default:
+			return goodReplacement, nil
+		}
+	}, sink.report)
+	t.Cleanup(func() { _ = service.ServiceShutdown() })
+	if err := service.Watch([]string{"file.txt"}); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.errorsCh <- errors.New("runtime failure")
+	_ = receiveError(t, sink)
+	if err := service.Watch([]string{"file.txt"}); !errors.Is(err, addFailure) || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("failed resynchronization error = %v", err)
+	}
+	_, _, badCloses := badReplacement.snapshot()
+	if badCloses != 1 {
+		t.Fatalf("partially synchronized backend Close calls = %d, want 1", badCloses)
+	}
+	service.mu.Lock()
+	failedState := service.runtimeErr != nil && service.initErr != nil && service.w == nil && service.generation == nil
+	service.mu.Unlock()
+	if !failedState {
+		t.Fatal("partial directory resynchronization was incorrectly committed")
+	}
+
+	if err := service.Watch([]string{"file.txt"}); err != nil {
+		t.Fatalf("retry after resynchronization failure = %v", err)
+	}
+	added, _, _ := goodReplacement.snapshot()
+	service.mu.Lock()
+	healthy := service.runtimeErr == nil && service.initErr == nil && service.w == goodReplacement
+	service.mu.Unlock()
+	if !healthy || !added[root] {
+		t.Fatalf("successful retry state: healthy=%v watches=%v", healthy, added)
+	}
+}
+
+func TestShutdownWinsRaceWithRuntimeRecoveryCandidate(t *testing.T) {
+	backend := newFakeWatchBackend()
+	candidate := newFakeWatchBackend()
+	sink := newErrorSink()
+	factoryEntered := make(chan struct{}, 1)
+	releaseFactory := make(chan struct{})
+	created := 0
+	service := newService(staticRoot(t.TempDir()), func() (watchBackend, error) {
+		created++
+		if created == 1 {
+			return backend, nil
+		}
+		factoryEntered <- struct{}{}
+		<-releaseFactory
+		return candidate, nil
+	}, sink.report)
+
+	backend.errorsCh <- errors.New("runtime failure")
+	_ = receiveError(t, sink)
+	watchDone := make(chan error, 1)
+	go func() { watchDone <- service.Watch(nil) }()
+	select {
+	case <-factoryEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery did not reach replacement factory")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- service.ServiceShutdown() }()
+	waitForWatcherStopping(t, service)
+	close(releaseFactory)
+	select {
+	case err := <-watchDone:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("recovery racing shutdown error = %v, want ErrStopped", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery did not abort after shutdown")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not finish after recovery candidate was released")
+	}
+
+	_, _, candidateCloses := candidate.snapshot()
+	if candidateCloses != 1 {
+		t.Fatalf("abandoned replacement Close calls = %d, want 1", candidateCloses)
+	}
+	service.mu.Lock()
+	stoppedClean := service.stopping && service.stopped && service.w == nil && service.generation == nil
+	service.mu.Unlock()
+	if !stoppedClean {
+		t.Fatal("recovery resurrected watcher after permanent shutdown admission")
+	}
+}
+
+func waitForWatcherStopping(t *testing.T, service *Service) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		service.mu.Lock()
+		stopping := service.stopping
+		service.mu.Unlock()
+		if stopping {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ServiceShutdown did not publish stopping state")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

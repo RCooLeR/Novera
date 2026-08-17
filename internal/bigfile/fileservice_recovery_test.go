@@ -7,7 +7,6 @@ import (
 	"os"
 	"testing"
 
-	"novera/internal/bigfile/inplace"
 	"novera/internal/bigfile/session"
 )
 
@@ -87,7 +86,7 @@ func TestOpenFilePreservesMalformedRecoveryEvidence(t *testing.T) {
 	}
 }
 
-func TestSavePatchRefusesToOverwritePendingRecoverySidecar(t *testing.T) {
+func TestSavePatchIsDisabledAndPreservesSourceStagingAndRecoveryEvidence(t *testing.T) {
 	original := []byte("trusted-current-data\n")
 	path := writeTempFile(t, "pending-save.txt", original)
 	sidecar := path + ".qrp"
@@ -108,16 +107,17 @@ func TestSavePatchRefusesToOverwritePendingRecoverySidecar(t *testing.T) {
 	}()
 
 	replacement := []byte("TRUSTED-current-data\n")
+	prepareEditSessionForTest(t, svc, meta.FileID)
 	state, err := svc.StageEdit(meta.FileID, 0, int64(len(original)), string(replacement))
 	if err != nil {
 		t.Fatalf("StageEdit: %v", err)
 	}
-	if !state.InPlaceEligible || state.EditCount == 0 {
-		t.Fatalf("expected an in-place staged edit, got %+v", state)
+	if state.InPlaceEligible || state.EditCount == 0 {
+		t.Fatalf("expected copy-only staged edit, got %+v", state)
 	}
 
-	if _, err := svc.SavePatch(meta.FileID); !errors.Is(err, inplace.ErrRecoveryPending) {
-		t.Fatalf("SavePatch error = %v, want ErrRecoveryPending", err)
+	if _, err := svc.SavePatch(meta.FileID); !errors.Is(err, ErrInPlaceSaveDisabled) {
+		t.Fatalf("SavePatch error = %v, want ErrInPlaceSaveDisabled", err)
 	}
 
 	got, err := os.ReadFile(path)
@@ -143,6 +143,15 @@ func TestSavePatchRefusesToOverwritePendingRecoverySidecar(t *testing.T) {
 	}
 }
 
+func TestSavePatchFailsClosedBeforeFileLookup(t *testing.T) {
+	svc := NewFileService()
+	for _, fileID := range []string{"", "unknown-file-id"} {
+		if _, err := svc.SavePatch(fileID); !errors.Is(err, ErrInPlaceSaveDisabled) {
+			t.Fatalf("SavePatch(%q) error = %v, want ErrInPlaceSaveDisabled", fileID, err)
+		}
+	}
+}
+
 func TestRefreshFileRefusesToDiscardStagedEdits(t *testing.T) {
 	original := []byte("alpha\nbeta\n")
 	path := writeTempFile(t, "refresh-staged.txt", original)
@@ -153,6 +162,7 @@ func TestRefreshFileRefusesToDiscardStagedEdits(t *testing.T) {
 	}
 	defer func() { _ = svc.CloseFile(meta.FileID) }()
 
+	prepareEditSessionForTest(t, svc, meta.FileID)
 	if _, err := svc.StageEdit(meta.FileID, 0, 5, "ALPHA"); err != nil {
 		t.Fatal(err)
 	}

@@ -7,8 +7,8 @@ const FOCUSABLE =
 export function useDialogFocus(
   open: boolean,
   onEscape: () => void,
-  initialFocus?: RefObject<HTMLElement>,
-): RefObject<HTMLDivElement> {
+  initialFocus?: RefObject<HTMLElement | null>,
+): RefObject<HTMLDivElement | null> {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const escapeRef = useRef(onEscape);
   escapeRef.current = onEscape;

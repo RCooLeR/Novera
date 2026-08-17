@@ -2,13 +2,14 @@ package manualedit
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestApplyFileEditSwapOriginalPreservesBackupTimeAndSourceReadOnlyMode(t *testing.T) {
+func TestApplyFileEditSwapOriginalPreservesReadOnlySourceByRefusingMutation(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "source.txt")
 	outPath := filepath.Join(dir, "output.txt")
@@ -36,11 +37,11 @@ func TestApplyFileEditSwapOriginalPreservesBackupTimeAndSourceReadOnlyMode(t *te
 		SwapOriginal: true,
 		BackupPath:   backupPath,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrSwapOriginalDisabled) {
+		t.Fatalf("err = %v, want ErrSwapOriginalDisabled", err)
 	}
-	if !summary.Swapped {
-		t.Fatal("expected swapped summary")
+	if summary.Swapped {
+		t.Fatal("disabled source replacement reported a swap")
 	}
 
 	sourceInfo, err := os.Stat(srcPath)
@@ -51,14 +52,15 @@ func TestApplyFileEditSwapOriginalPreservesBackupTimeAndSourceReadOnlyMode(t *te
 		t.Fatalf("swapped source mode = %v, want read-only permission bits preserved", sourceInfo.Mode().Perm())
 	}
 
-	backupInfo, err := os.Stat(backupPath)
-	if err != nil {
-		t.Fatal(err)
+	assertModTimeClose(t, srcPath, sourceInfo.ModTime(), originalTime)
+	if got, readErr := os.ReadFile(srcPath); readErr != nil || string(got) != "hello world" {
+		t.Fatalf("source changed: %q, %v", got, readErr)
 	}
-	if !isReadOnlyMode(backupInfo.Mode()) {
-		t.Fatalf("backup mode = %v, want original read-only permission bits", backupInfo.Mode().Perm())
+	for _, path := range []string{outPath, backupPath, outPath + ".quarry.tmp", outPath + ".quarry.manifest.json"} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("disabled swap created %q: %v", path, statErr)
+		}
 	}
-	assertModTimeClose(t, backupPath, backupInfo.ModTime(), originalTime)
 }
 
 func isReadOnlyMode(mode os.FileMode) bool {

@@ -383,8 +383,9 @@ func configDir() string {
 
 // sanitizeBaseURL strips any embedded userinfo (user:pass@) from a base URL so
 // credentials accidentally pasted into the URL never land in plaintext config;
-// credentials belong in the dedicated secret store. Unparseable input is left
-// untouched (request-time validation rejects it).
+// credentials belong in the dedicated secret store. Even if URL parsing fails,
+// an unambiguous hierarchical authority has its userinfo removed before the
+// invalid remainder is retained for the UI to correct.
 func sanitizeBaseURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -392,11 +393,34 @@ func sanitizeBaseURL(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return raw
+		return stripMalformedURLUserinfo(raw)
 	}
 	if u.User != nil {
 		u.User = nil
 		return u.String()
+	}
+	return raw
+}
+
+func stripMalformedURLUserinfo(raw string) string {
+	authorityStart := -1
+	if strings.HasPrefix(raw, "//") {
+		authorityStart = 2
+	} else if schemeEnd := strings.Index(raw, "://"); schemeEnd > 0 {
+		authorityStart = schemeEnd + 3
+	}
+	if authorityStart < 0 {
+		return raw
+	}
+	authorityEnd := len(raw)
+	for _, separator := range []byte{'/', '?', '#'} {
+		if index := strings.IndexByte(raw[authorityStart:], separator); index >= 0 && authorityStart+index < authorityEnd {
+			authorityEnd = authorityStart + index
+		}
+	}
+	authority := raw[authorityStart:authorityEnd]
+	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+		return raw[:authorityStart] + authority[at+1:] + raw[authorityEnd:]
 	}
 	return raw
 }

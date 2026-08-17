@@ -19,4 +19,16 @@ describe("LatestRequest", () => {
 
     expect(requests.isCurrent(pending)).toBe(false);
   });
+
+  it("does not revive an old request across an A to B to A context change", () => {
+    const requests = new LatestRequest();
+    const firstA = requests.begin();
+
+    requests.invalidate(); // A -> B
+    requests.invalidate(); // B -> A before the next request begins
+    const secondA = requests.begin();
+
+    expect(requests.isCurrent(firstA)).toBe(false);
+    expect(requests.isCurrent(secondA)).toBe(true);
+  });
 });

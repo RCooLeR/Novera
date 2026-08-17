@@ -4,7 +4,48 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"novera/internal/bigfile/plugins"
 )
+
+func TestCSVDescriptorUsesTruthfulPerOperationCapabilities(t *testing.T) {
+	descriptor := Plugin()
+	if err := descriptor.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.HugeFileSafe {
+		t.Fatal("CSV descriptor must not make a plugin-wide huge-file-safety claim")
+	}
+	operations := make(map[string]plugins.OperationCapability, len(descriptor.Operations))
+	for _, operation := range descriptor.Operations {
+		operations[operation.ID] = operation
+	}
+	if got := operations["inspect-sample"]; got.Processing != plugins.ProcessingConfigurableSample || got.MaxInputBytes != 0 || got.MaxUnitBytes != MaxSampleBytes {
+		t.Fatalf("inspect metadata = %+v", got)
+	}
+	if got := operations["project-columns-file"]; got.Processing != plugins.ProcessingStreaming || got.Memory != plugins.MemoryRecordProportional || !got.AtomicOutput {
+		t.Fatalf("projection metadata = %+v", got)
+	}
+	if got := operations["add-column-file"]; got.Processing != plugins.ProcessingStreaming || got.Memory != plugins.MemoryRecordProportional || !got.AtomicOutput {
+		t.Fatalf("add-column metadata = %+v", got)
+	}
+	if got := operations["deduplicate-rows"]; got.Processing != plugins.ProcessingStreaming || got.Memory != plugins.MemoryBounded || !got.AtomicOutput || !strings.Contains(strings.Join(got.Notes, " "), "refuses before") {
+		t.Fatalf("dedupe metadata = %+v", got)
+	}
+	if got := operations["convert-to-sql-file"]; got.Memory != plugins.MemoryBatchProportional || got.MaxUnitBytes != MaxSQLInsertBatchBytes || !got.AtomicOutput {
+		t.Fatalf("SQL conversion metadata = %+v", got)
+	}
+
+	descriptor.FilePatterns[0] = "*.changed"
+	descriptor.Operations[0].Notes[0] = "changed"
+	fresh := Plugin()
+	if got := fresh.FilePatterns[0]; got != "*.csv" {
+		t.Fatalf("mutating returned descriptor changed CSV patterns: %q", got)
+	}
+	if fresh.Operations[0].Notes[0] == "changed" {
+		t.Fatal("mutating returned operation notes changed CSV descriptor metadata")
+	}
+}
 
 func TestCSVRuntimePluginRoutesInspectionSchemaPreviewAndGuide(t *testing.T) {
 	var runtime Runtime = RuntimePlugin()
@@ -70,6 +111,17 @@ func TestCSVRuntimePluginRoutesProjectionAndSQLConversion(t *testing.T) {
 	}
 	if summary.RecordsWritten != 2 || !strings.Contains(projected.String(), "name,id") {
 		t.Fatalf("project summary/output = %#v/%q", summary, projected.String())
+	}
+
+	var added strings.Builder
+	addSummary, err := runtime.AddColumn(context.Background(), strings.NewReader(input), &added, AddColumnOptions{
+		Delimiter: ',', Position: 1, Value: "constant",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addSummary.RecordsWritten != 2 || added.String() != "id,constant,name\n1,constant,Ada\n" {
+		t.Fatalf("add-column summary/output = %#v/%q", addSummary, added.String())
 	}
 
 	var sql strings.Builder

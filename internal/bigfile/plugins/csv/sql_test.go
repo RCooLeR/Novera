@@ -20,7 +20,7 @@ func TestConvertToSQLUsesHeaderAndEscapesValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "INSERT INTO `people` (`id`, `name`, `note`) VALUES\n  ('1', 'Ada', 'hello'),\n  ('2', 'O''Neil', NULL);\nINSERT INTO `people` (`id`, `name`, `note`) VALUES\n  ('3', 'Grace', 'C:\\\\Users\\\\Public');\n"
+	want := "INSERT INTO `people` (`id`, `name`, `note`) VALUES\n  ('1', 'Ada', 'hello'),\n  ('2', 'O''Neil', NULL);\nINSERT INTO `people` (`id`, `name`, `note`) VALUES\n  ('3', 'Grace', CONVERT(X'433A5C55736572735C5075626C6963' USING utf8mb4));\n"
 	if got := out.String(); got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
@@ -38,7 +38,7 @@ func TestQuoteSQLStringEscapesMySQLSpecials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `'line\nnext\rtab\tback\bslash\\quote''nul\0ctrlz\Z'`
+	want := "CONVERT(X'6C696E650A6E6578740D746162096261636B08736C6173685C71756F7465276E756C006374726C7A1A' USING utf8mb4)"
 	if got != want {
 		t.Fatalf("quoteSQLString() = %q, want %q", got, want)
 	}
@@ -378,7 +378,7 @@ func TestConvertToSQLRejectsUTF16Input(t *testing.T) {
 	}
 }
 
-func TestConvertToSQLTrimsLeadingSpaceForNullMatch(t *testing.T) {
+func TestConvertToSQLPreservesUnquotedLeadingSpace(t *testing.T) {
 	var out strings.Builder
 	_, err := ConvertToSQL(context.Background(), strings.NewReader("1, NULL\n"), &out, SQLConvertOptions{
 		TableName:  "t",
@@ -388,8 +388,8 @@ func TestConvertToSQLTrimsLeadingSpaceForNullMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "'1', NULL)") {
-		t.Fatalf("unquoted ' NULL' should match the NULL set and emit NULL, got: %q", out.String())
+	if !strings.Contains(out.String(), "'1', ' NULL')") {
+		t.Fatalf("unquoted leading whitespace should be preserved, got: %q", out.String())
 	}
 }
 
@@ -447,12 +447,12 @@ func TestConvertToSQLSkipRowPolicyDropsBadRecord(t *testing.T) {
 	}
 }
 
-func TestConvertToSQLFileKeepsPartialOutputOnDataError(t *testing.T) {
+func TestConvertToSQLFileDoesNotPublishPartialOutputOnDataError(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "input.csv")
 	output := filepath.Join(dir, "output.sql")
 	// Rows 1-2 are clean; row 3 has a control byte. Default policy (fail) aborts
-	// at row 3, but the already-written rows must be retained.
+	// at row 3 and the staged partial file must never reach the final path.
 	if err := os.WriteFile(input, []byte("1,ok\n2,fine\n3,bad\x01value\n"), 0o666); err != nil {
 		t.Fatal(err)
 	}
@@ -464,12 +464,8 @@ func TestConvertToSQLFileKeepsPartialOutputOnDataError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a data error on row 3")
 	}
-	data, statErr := os.ReadFile(output)
-	if statErr != nil {
-		t.Fatalf("partial output should be retained on a data error: %v", statErr)
-	}
-	if !strings.Contains(string(data), "'ok'") {
-		t.Fatalf("partial output should contain the first written row, got: %q", string(data))
+	if _, statErr := os.Stat(output); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial output was published on a data error: %v", statErr)
 	}
 }
 

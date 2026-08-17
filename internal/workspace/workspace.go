@@ -4,6 +4,7 @@
 package workspace
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -14,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -509,7 +511,7 @@ func (s *Service) Search(query string, caseSensitive bool) (SearchResult, error)
 		if info, e := d.Info(); e != nil || info.Size() > maxSearchFileBytes {
 			return nil
 		}
-		data, e := os.ReadFile(path)
+		data, _, e := readRegularFileBounded(path, maxSearchFileBytes)
 		if e != nil || isBinary(data) {
 			return nil
 		}
@@ -600,7 +602,7 @@ func (s *Service) Diagnostics() (DiagnosticsResult, error) {
 		if info, e := d.Info(); e != nil || info.Size() > maxSearchFileBytes {
 			return nil
 		}
-		data, e := os.ReadFile(path)
+		data, _, e := readRegularFileBounded(path, maxSearchFileBytes)
 		if e != nil || isBinary(data) {
 			return nil
 		}
@@ -674,6 +676,16 @@ const (
 	// maxXlsxBytes guards the on-disk size of an XLSX (a zip, so a decompression
 	// bomb risk). CSV/TSV are streamed and have no size cap.
 	maxXlsxBytes = 50 << 20 // 50 MiB
+	// maxXlsxUncompressedBytes is an independent aggregate ceiling for all ZIP
+	// entries. Excelize otherwise defaults to 16 GiB, so a small compressed
+	// workbook could consume unreasonable disk/memory before table row caps act.
+	maxXlsxUncompressedBytes = 256 << 20 // 256 MiB
+	// maxXlsxXMLMemoryBytes keeps large worksheet/shared-string XML on an
+	// Excelize temporary file rather than retaining it as one in-memory slice.
+	maxXlsxXMLMemoryBytes = 16 << 20 // 16 MiB
+	// maxXlsxArchiveEntries prevents a tiny workbook from amplifying into an
+	// excessive central-directory/file object graph before row parsing begins.
+	maxXlsxArchiveEntries = 8192
 )
 
 // InferTableSchema infers a SQL-ish column schema for a CSV/TSV file from a
@@ -1656,7 +1668,7 @@ func openTableIter(abs, rel, delim string) ([]string, *tableIter, error) {
 	ext := strings.ToLower(filepath.Ext(rel))
 	switch ext {
 	case ".xlsx", ".xlsm":
-		f, err := excelize.OpenFile(abs)
+		f, err := openWorkbookWithLimits(abs, maxXlsxBytes, maxXlsxUncompressedBytes, maxXlsxXMLMemoryBytes)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1733,6 +1745,63 @@ func openTableIter(abs, rel, delim string) ([]string, *tableIter, error) {
 		return header, &tableIter{next: next, close: func() { _ = f.Close() }, delim: delimName}, nil
 	}
 	return nil, nil, fmt.Errorf("not a tabular file: %s", ext)
+}
+
+func openWorkbookWithLimits(abs string, compressedLimit, uncompressedLimit, xmlMemoryLimit int64) (*excelize.File, error) {
+	if compressedLimit < 0 || uncompressedLimit <= 0 || xmlMemoryLimit <= 0 || xmlMemoryLimit > uncompressedLimit {
+		return nil, errors.New("invalid workbook acquisition limits")
+	}
+	data, _, err := readRegularFileBounded(abs, compressedLimit)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateWorkbookArchive(data, uncompressedLimit, maxXlsxArchiveEntries); err != nil {
+		return nil, err
+	}
+	return excelize.OpenReader(bytes.NewReader(data), excelize.Options{
+		UnzipSizeLimit:    uncompressedLimit,
+		UnzipXMLSizeLimit: xmlMemoryLimit,
+	})
+}
+
+// validateWorkbookArchive measures actual decompressed bytes from the immutable
+// snapshot rather than trusting ZIP header sizes. This both enforces the
+// aggregate ceiling against forged size metadata and makes Excelize's later
+// header-based limit a defense-in-depth check.
+func validateWorkbookArchive(data []byte, uncompressedLimit int64, entryLimit int) error {
+	if uncompressedLimit <= 0 || entryLimit <= 0 {
+		return errors.New("invalid workbook archive limits")
+	}
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return fmt.Errorf("invalid workbook archive: %w", err)
+	}
+	if len(zr.File) > entryLimit {
+		return fmt.Errorf("workbook archive has %d entries; limit is %d", len(zr.File), entryLimit)
+	}
+	remaining := uncompressedLimit
+	for _, entry := range zr.File {
+		if entry.UncompressedSize64 > uint64(remaining) {
+			return fmt.Errorf("workbook expands beyond the %d-byte limit", uncompressedLimit)
+		}
+		r, err := entry.Open()
+		if err != nil {
+			return fmt.Errorf("open workbook archive entry %q: %w", entry.Name, err)
+		}
+		written, copyErr := io.Copy(io.Discard, io.LimitReader(r, remaining+1))
+		closeErr := r.Close()
+		if written > remaining {
+			return fmt.Errorf("workbook expands beyond the %d-byte limit", uncompressedLimit)
+		}
+		if copyErr != nil {
+			return fmt.Errorf("validate workbook archive entry %q: %w", entry.Name, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close workbook archive entry %q: %w", entry.Name, closeErr)
+		}
+		remaining -= written
+	}
+	return nil
 }
 
 // delimiters maps a name to its rune, in tie-break preference order.
@@ -2068,12 +2137,12 @@ func (s *Service) ReadFile(rel string) (FileContent, error) {
 	if err != nil {
 		return FileContent{}, err
 	}
-	st, err := os.Stat(abs)
-	if err != nil {
-		return FileContent{}, err
+	data, st, err := readRegularFileBounded(abs, maxEditorBytes)
+	out := FileContent{Path: rel}
+	if st != nil {
+		out.Size = st.Size()
 	}
-	out := FileContent{Path: rel, Size: st.Size()}
-	if st.Size() > maxEditorBytes {
+	if errors.Is(err, ErrRawTooLarge) {
 		out.TooLarge = true
 		// Derive the revision from the file's metadata rather than reading the
 		// whole (potentially huge) file just to hash it — oversized files are
@@ -2084,7 +2153,6 @@ func (s *Service) ReadFile(rel string) (FileContent, error) {
 		}
 		return out, nil
 	}
-	data, err := os.ReadFile(abs)
 	if err != nil {
 		return FileContent{}, err
 	}
@@ -2173,61 +2241,68 @@ func (s *Service) writeFileInWorkspace(root string, generation uint64, rel, cont
 	return WriteResult{Path: rel, Revision: revisionOfBytes(data)}, nil
 }
 
-// ReadRaw returns a file's exact bytes (existed=false, nil data if absent). It
-// is a package function rather than a Service method so this internal primitive
-// cannot be Wails-bound to renderer JavaScript.
-func ReadRaw(s *Service, rel string) (data []byte, existed bool, err error) {
-	abs, err := paths.Resolve(s.Root(), rel)
-	if err != nil {
-		return nil, false, err
-	}
-	b, err := os.ReadFile(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	return b, true, nil
-}
-
 // ReadRawBounded returns exact bytes only when the target is a regular file no
 // larger than maxBytes. It stats before allocating and still reads through a
 // max+1 limiter so concurrent growth cannot bypass the cap.
 func ReadRawBounded(s *Service, rel string, maxBytes int64) (data []byte, existed bool, err error) {
-	if maxBytes < 0 {
-		return nil, false, errors.New("raw read limit must be non-negative")
-	}
 	abs, err := paths.Resolve(s.Root(), rel)
 	if err != nil {
 		return nil, false, err
 	}
-	f, err := os.Open(abs)
+	b, _, err := readRegularFileBounded(abs, maxBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
 		}
-		return nil, false, err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
 		return nil, true, err
 	}
-	if !info.Mode().IsRegular() {
-		return nil, true, fmt.Errorf("%w: %s", ErrRawNotRegular, rel)
+	return b, true, nil
+}
+
+// readRegularFileBounded validates the path and the exact opened file before
+// allocating, then enforces the same byte ceiling while reading. The opened
+// identity comparison closes the ordinary lstat-to-open symlink substitution
+// race; the max+1 read closes the size-check-to-read growth race.
+func readRegularFileBounded(path string, maxBytes int64) ([]byte, os.FileInfo, error) {
+	if maxBytes < 0 {
+		return nil, nil, errors.New("raw read limit must be non-negative")
 	}
-	if info.Size() > maxBytes {
-		return nil, true, fmt.Errorf("%w: %s is %d bytes (limit %d)", ErrRawTooLarge, rel, info.Size(), maxBytes)
+	if maxBytes == math.MaxInt64 {
+		return nil, nil, errors.New("raw read limit is too large to detect overflow safely")
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		return nil, pathInfo, fmt.Errorf("%w: %s", ErrRawNotRegular, path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(pathInfo, openedInfo) {
+		return nil, openedInfo, fmt.Errorf("%w: %s changed while opening", ErrRawNotRegular, path)
+	}
+	if openedInfo.Size() > maxBytes {
+		return nil, openedInfo, fmt.Errorf("%w: %s is %d bytes (limit %d)", ErrRawTooLarge, path, openedInfo.Size(), maxBytes)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
-		return nil, true, err
+		return nil, openedInfo, err
+	}
+	if currentInfo, statErr := f.Stat(); statErr == nil {
+		openedInfo = currentInfo
 	}
 	if int64(len(b)) > maxBytes {
-		return nil, true, fmt.Errorf("%w: %s grew while being read (limit %d)", ErrRawTooLarge, rel, maxBytes)
+		return nil, openedInfo, fmt.Errorf("%w: %s grew while being read (limit %d)", ErrRawTooLarge, path, maxBytes)
 	}
-	return b, true, nil
+	return b, openedInfo, nil
 }
 
 // WriteRaw writes exact bytes atomically (path-contained, watcher-suppressed),
@@ -2380,7 +2455,10 @@ func revisionOfBytes(data []byte) string {
 }
 
 func revisionOfFile(abs string) string {
-	data, err := os.ReadFile(abs)
+	data, info, err := readRegularFileBounded(abs, maxEditorBytes)
+	if errors.Is(err, ErrRawTooLarge) {
+		return revisionOfStat(info)
+	}
 	if err != nil {
 		return ""
 	}

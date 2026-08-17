@@ -22,6 +22,56 @@ func TestDetectSampleUTF16NoBOM(t *testing.T) {
 	}
 }
 
+func TestDetectPrefixSampleAcceptsOnlyValidIncompleteUTF8Tails(t *testing.T) {
+	for _, value := range []string{"¢", "€", "😀"} {
+		encoded := []byte(value)
+		for kept := 1; kept < len(encoded); kept++ {
+			sample := append([]byte("valid prefix "), encoded[:kept]...)
+			if !ValidUTF8Prefix(sample) {
+				t.Fatalf("ValidUTF8Prefix rejected %x (%d/%d bytes)", encoded, kept, len(encoded))
+			}
+			if info := DetectPrefixSample(sample); info.Name != "UTF-8" {
+				t.Fatalf("DetectPrefixSample(%x) = %+v, want UTF-8", sample, info)
+			}
+			if info := DetectSample(sample); info.Name == "UTF-8" {
+				t.Fatalf("complete-sample detector accepted truncated input %x", sample)
+			}
+		}
+	}
+}
+
+func TestValidUTF8PrefixRejectsInvalidTailForms(t *testing.T) {
+	tests := [][]byte{
+		{'o', 'k', 0x80},
+		{'o', 'k', 0xC0},
+		{'o', 'k', 0xE0, 0x80},
+		{'o', 'k', 0xED, 0xA0},
+		{'o', 'k', 0xF0, 0x80},
+		{'o', 'k', 0xF4, 0x90},
+		{'o', 'k', 0xF5},
+		{'o', 'k', 0xE2, 0x28},
+	}
+	for _, sample := range tests {
+		if ValidUTF8Prefix(sample) {
+			t.Fatalf("invalid UTF-8 tail accepted: %x", sample)
+		}
+		if info := DetectPrefixSample(sample); info.Name == "UTF-8" {
+			t.Fatalf("invalid prefix detected as UTF-8: %x", sample)
+		}
+	}
+}
+
+func TestDetectBOMlessUTF16AmbiguityRequiresConfirmation(t *testing.T) {
+	data := []byte{
+		0x4E, 0x9F, 0x4F, 0x9E, 0x50, 0x9D, 0x51, 0x9C,
+		0x52, 0x9B, 0x53, 0x9A, 0x54, 0x99, 0x55, 0x98,
+	}
+	info := DetectSample(data)
+	if !info.RequiresConfirmation || info.Name != ambiguousUTF16Name {
+		t.Fatalf("ambiguous UTF-16 = %+v, want explicit confirmation", info)
+	}
+}
+
 func TestDetectSampleWindows1251(t *testing.T) {
 	info := DetectSample([]byte{0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2}) // Привет
 	if info.Name != "Windows-1251" {

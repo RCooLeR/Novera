@@ -2,9 +2,9 @@ import { useRef } from "react";
 import { useStore } from "../state/store";
 import { useDialogFocus } from "../lib/useDialogFocus";
 
-// Shown when closing an editor tab with unsaved edits. Large-file staging is
-// deliberately saved from its editor, where the user can choose in-place or a
-// copy; this dialog only permits an explicit discard.
+// Shown when closing an editor tab with unsaved edits. Large-file staging can
+// only be saved as a new copy from its editor; this dialog permits an explicit
+// discard but never offers direct source replacement.
 export default function CloseTabModal() {
   const path = useStore((state) => state.pendingTabClose);
   const saving = useStore((state) => state.pendingTabCloseSaving);
@@ -35,7 +35,7 @@ export default function CloseTabModal() {
         </div>
         <div className="modal__text">
           {largeFileDirty
-            ? "Large-file edits must be saved from the editor. Discard & Close is explicit and cannot be undone."
+            ? "Return to the editor to save these edits as a new copy. Discard & Close is explicit and cannot be undone."
             : "Your changes will be lost if you don't save them."}
         </div>
         <div className="modal__actions">

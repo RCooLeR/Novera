@@ -58,8 +58,10 @@ const SQL_KEYWORDS = new Set(
 );
 
 // 1 comment  2 'string'  3 "string"  4 `ident`  5 number  6 word
+// [^!-\uFFFF] means an ASCII control/space byte (U+0000 through U+0020)
+// without embedding a control-character escape that eslint rejects.
 const SQL_TOKEN =
-  /(--[ \t][^\n]*|--$|#[^\n]*|\/\*[\s\S]*?\*\/|\/\*[^\n]*)|('(?:\\.|''|[^'\\])*'?)|("(?:\\.|""|[^"\\])*"?)|(`(?:``|[^`])*`?)|(\b\d[\d.]*\b)|([A-Za-z_][A-Za-z0-9_$]*)/g;
+  /(--(?=$|[^!-\uFFFF])[^\r\n]*|#[^\r\n]*|\/\*[\s\S]*?\*\/|\/\*[^\r\n]*)|('(?:\\.|''|[^'\\])*'?)|("(?:\\.|""|[^"\\])*"?)|(`(?:``|[^`])*`?)|(\b\d[\d.]*\b)|([A-Za-z_][A-Za-z0-9_$]*)/g;
 
 const sqlTokenizer = tokenizeWith(SQL_TOKEN, (m) => {
   if (m[1] !== undefined) return "hl-comment";

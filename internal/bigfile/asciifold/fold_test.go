@@ -55,3 +55,23 @@ func TestIndexFoldedEmptyAndOversizedNeedles(t *testing.T) {
 		t.Fatalf("IndexFolded oversized needle = %d, want -1", got)
 	}
 }
+
+func TestLastIndexFoldedUsesByteStableASCIIFold(t *testing.T) {
+	haystack := []byte("Key one KEY \xe2\x84\xaa")
+	foldedNeedle := Fold([]byte("key"))
+	if got := LastIndexFolded(haystack, foldedNeedle); got != 8 {
+		t.Fatalf("LastIndexFolded ASCII match = %d, want 8", got)
+	}
+	if got := LastIndexFolded(haystack[12:], Fold([]byte("k"))); got != -1 {
+		t.Fatalf("LastIndexFolded matched Unicode kelvin sign at %d", got)
+	}
+}
+
+func TestLastIndexFoldedEmptyAndOversizedNeedles(t *testing.T) {
+	if got := LastIndexFolded([]byte("abc"), nil); got != 3 {
+		t.Fatalf("LastIndexFolded empty needle = %d, want 3", got)
+	}
+	if got := LastIndexFolded([]byte("abc"), []byte("abcd")); got != -1 {
+		t.Fatalf("LastIndexFolded oversized needle = %d, want -1", got)
+	}
+}

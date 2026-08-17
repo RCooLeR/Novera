@@ -61,7 +61,7 @@ func TestReplaceBatchRegexpFileReportsLockedOutputDuringFinalize(t *testing.T) {
 	defer restore()
 
 	rules := []BatchRule{
-		{Name: "Rule 1", Find: []byte(`id=(\d+)`), Replace: []byte(`row-$1`), Priority: 0},
+		{Name: "Rule 1", Find: []byte(`id=(\d{2})`), Replace: []byte(`row-$1`), Priority: 0},
 	}
 	summary, err := ReplaceBatchRegexpFile(context.Background(), srcPath, outPath, rules, FileOptions{}, RegexOptions{
 		ChunkSize:      8,

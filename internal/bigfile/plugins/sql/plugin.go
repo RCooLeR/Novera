@@ -113,12 +113,18 @@ func (BuiltIn) ExtractTable(ctx context.Context, doc ReaderAtSize, sourcePath st
 }
 
 func Plugin() plugins.Descriptor {
+	const (
+		visibleWindowLimit   = int64(8 << 20)
+		reshapeUnitLimit     = int64(64 << 20)
+		fixtureSampleLimit   = int64(8 << 20)
+		schemaStatementLimit = int64(2 << 20)
+	)
 	return plugins.Descriptor{
 		ID:           "sql",
 		DisplayName:  "SQL Dumps",
 		Category:     "data",
-		Description:  "SQL dump highlighting, analysis, navigation, cleanup presets, and future table extraction/splitting tools.",
-		FilePatterns: plugins.SQLFilePatterns,
+		Description:  "SQL dump highlighting, analysis, navigation, reshape, fixture, schema-diff, and table extraction/splitting tools.",
+		FilePatterns: plugins.SQLPatterns(),
 		Capabilities: []plugins.Capability{
 			plugins.CapabilitySyntax,
 			plugins.CapabilityAnalyze,
@@ -126,10 +132,54 @@ func Plugin() plugins.Descriptor {
 			plugins.CapabilityNavigate,
 			plugins.CapabilityExtract,
 		},
-		Modes:        []plugins.Mode{plugins.ModeInteractive, plugins.ModeStreaming},
-		HugeFileSafe: true,
+		Operations: []plugins.OperationCapability{
+			{
+				ID: "highlight-visible", Capability: plugins.CapabilitySyntax,
+				Processing: plugins.ProcessingBoundedWindow, Memory: plugins.MemoryBounded,
+				MaxInputBytes: visibleWindowLimit,
+				Notes:         []string{"Highlighting consumes only the bounded visible window supplied by the editor."},
+			},
+			{
+				ID: "analyze-dump", Capability: plugins.CapabilityAnalyze,
+				Processing: plugins.ProcessingStreaming, Memory: plugins.MemoryMetadataProportional,
+				Cancellable: true,
+				Notes:       []string{"Input scanning is streaming; retained table and statement metadata grows with dump cardinality."},
+			},
+			{
+				ID: "navigate-tables", Capability: plugins.CapabilityNavigate,
+				Processing: plugins.ProcessingStreaming, Memory: plugins.MemoryMetadataProportional,
+				Cancellable: true,
+				Notes:       []string{"Navigation uses analyzer metadata and inherits its cardinality-proportional retention."},
+			},
+			{
+				ID: "reshape-inserts", Capability: plugins.CapabilityTransform,
+				Processing: plugins.ProcessingStreaming, Memory: plugins.MemoryStatementProportional,
+				MaxUnitBytes: reshapeUnitLimit, Cancellable: true, AtomicOutput: true,
+				Notes: []string{"The integrated tool stages output and caps one parsed statement at 64 MiB; batching is additionally capped at 10,000 rows and 8 MiB."},
+			},
+			{
+				ID: "extract-tables", Capability: plugins.CapabilityExtract,
+				Processing: plugins.ProcessingStreaming, Memory: plugins.MemoryMetadataProportional,
+				Cancellable: true,
+				Notes:       []string{"Table ranges stream from the source, but split extraction is a multi-output operation and is not all-or-none; committed outputs can remain if a later output or manifest fails."},
+			},
+			{
+				ID: "fixture-sample", Capability: plugins.CapabilityExtract,
+				Processing: plugins.ProcessingStreaming, Memory: plugins.MemorySampleProportional,
+				MaxUnitBytes: fixtureSampleLimit, Cancellable: true, AtomicOutput: true,
+				Notes: []string{"Fixture generation streams table ranges and materializes at most 8 MiB of INSERT input per table, returns at most 10,000 rows per table, and refuses when a complete requested table sample cannot be proven inside that per-table cap."},
+			},
+			{
+				ID: "schema-diff", Capability: plugins.CapabilityAnalyze,
+				Processing: plugins.ProcessingStreaming, Memory: plugins.MemoryMetadataProportional,
+				MaxUnitBytes: schemaStatementLimit, Cancellable: true,
+				Notes: []string{"Dump discovery is streaming; each CREATE TABLE statement is capped at 2 MiB while retained table/column metadata grows with schema cardinality."},
+			},
+		},
+		Modes: []plugins.Mode{plugins.ModeInteractive, plugins.ModeStreaming},
 		Notes: []string{
-			"SQL analyzer, cleanup presets, visible SQL highlighting, split/extract manifest previews, and streaming SQL table writes are routed through this built-in plugin adapter.",
+			"Safety is declared per operation; no plugin-wide huge-file-safety promise is made.",
+			"Cleanup presets are not advertised because service execution remains disabled until token-aware transformations preserve structural SQL and serialized values.",
 		},
 	}
 }
@@ -153,7 +203,16 @@ func HighlightVisible(text string) []Token {
 // BatchRules returns the replacement rules for callers that need an explicit
 // replace package type while keeping preset construction owned by the SQL plugin.
 func BatchRules(cfg PresetConfig) []replacepkg.BatchRule {
-	return append([]replacepkg.BatchRule(nil), cfg.BatchRules...)
+	if cfg.BatchRules == nil {
+		return nil
+	}
+	rules := make([]replacepkg.BatchRule, len(cfg.BatchRules))
+	for i, rule := range cfg.BatchRules {
+		rules[i] = rule
+		rules[i].Find = append([]byte(nil), rule.Find...)
+		rules[i].Replace = append([]byte(nil), rule.Replace...)
+	}
+	return rules
 }
 
 func SplitByTablePreview(summary Summary, sourceSize int64, opts ExtractPlanOptions) (ExtractManifestPreview, error) {

@@ -65,22 +65,60 @@ func (w *fsnotifyBackend) Errors() <-chan error          { return w.Watcher.Erro
 type watcherFactory func() (watchBackend, error)
 type errorReporter func(error)
 
+type watchGeneration struct {
+	backend watchBackend
+	stop    chan struct{}
+	done    chan struct{}
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func newWatchGeneration(backend watchBackend) *watchGeneration {
+	return &watchGeneration{
+		backend: backend,
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+func (generation *watchGeneration) closeBackend() error {
+	if generation == nil {
+		return nil
+	}
+	generation.closeOnce.Do(func() {
+		close(generation.stop)
+		generation.closeErr = generation.backend.Close()
+	})
+	return generation.closeErr
+}
+
+func (generation *watchGeneration) shutdown() error {
+	if generation == nil {
+		return nil
+	}
+	err := generation.closeBackend()
+	<-generation.done
+	return err
+}
+
 // Service is the bound Wails watcher service.
 type Service struct {
 	roots RootProvider
 
-	mu         sync.Mutex
-	w          watchBackend
-	files      map[string]bool      // abs file paths to report on
-	dirs       map[string]bool      // abs dirs currently added to fsnotify
-	suppress   map[string]time.Time // abs file path -> ignore-our-own-write deadline
-	initErr    error
-	runtimeErr error
-	stopping   bool
-	stopped    bool
+	lifecycleMu sync.Mutex
+	mu          sync.Mutex
+	w           watchBackend
+	generation  *watchGeneration
+	files       map[string]bool      // abs file paths to report on
+	dirs        map[string]bool      // abs dirs currently added to fsnotify
+	suppress    map[string]time.Time // abs file path -> ignore-our-own-write deadline
+	initErr     error
+	runtimeErr  error
+	stopping    bool
+	stopped     bool
 
-	stop         chan struct{}
-	loopWG       sync.WaitGroup
+	factory      watcherFactory
 	shutdownOnce sync.Once
 	shutdownErr  error
 	report       errorReporter
@@ -106,12 +144,16 @@ func newService(roots RootProvider, factory watcherFactory, report errorReporter
 		files:    map[string]bool{},
 		dirs:     map[string]bool{},
 		suppress: map[string]time.Time{},
-		stop:     make(chan struct{}),
+		factory:  factory,
 		report:   report,
 	}
 	w, err := factory()
 	if err != nil {
-		s.initErr = fmt.Errorf("%w: %w", ErrUnavailable, err)
+		var closeErr error
+		if w != nil {
+			closeErr = w.Close()
+		}
+		s.initErr = errors.Join(fmt.Errorf("%w: %w", ErrUnavailable, err), closeErr)
 		s.report(s.initErr)
 		return s
 	}
@@ -120,9 +162,10 @@ func newService(roots RootProvider, factory watcherFactory, report errorReporter
 		s.report(s.initErr)
 		return s
 	}
+	generation := newWatchGeneration(w)
 	s.w = w
-	s.loopWG.Add(1)
-	go s.loop(w, s.stop)
+	s.generation = generation
+	go s.loop(generation)
 	return s
 }
 
@@ -137,24 +180,29 @@ func reportError(err error) {
 // the OS watch handles aren't leaked.
 func (s *Service) ServiceShutdown() error {
 	s.shutdownOnce.Do(func() {
+		// Publish the permanent admission gate before waiting for a Watch that is
+		// currently rebuilding a backend. That Watch will recheck before install
+		// and dispose of its candidate instead of resurrecting the service.
 		s.mu.Lock()
 		s.stopping = true
-		w := s.w
-		close(s.stop)
 		s.mu.Unlock()
 
-		if w != nil {
-			s.shutdownErr = w.Close()
-		}
-		s.loopWG.Wait()
-
+		s.lifecycleMu.Lock()
 		s.mu.Lock()
+		generation := s.generation
 		s.w = nil
+		s.generation = nil
 		s.files = map[string]bool{}
 		s.dirs = map[string]bool{}
 		s.suppress = map[string]time.Time{}
+		s.mu.Unlock()
+
+		s.shutdownErr = generation.shutdown()
+
+		s.mu.Lock()
 		s.stopped = true
 		s.mu.Unlock()
+		s.lifecycleMu.Unlock()
 	})
 	return s.shutdownErr
 }
@@ -164,8 +212,15 @@ func (s *Service) ServiceShutdown() error {
 // external change. It is a package function, rather than an exported Service
 // method, so this producer-only primitive cannot be Wails-bound.
 func Suppress(s *Service, abs string) {
+	if s == nil {
+		return
+	}
 	now := time.Now()
 	s.mu.Lock()
+	if s.stopping || s.stopped {
+		s.mu.Unlock()
+		return
+	}
 	// Prune expired entries so the map stays bounded to roughly the open-tab set.
 	for k, until := range s.suppress {
 		if now.After(until) {
@@ -189,27 +244,18 @@ func fsKey(p string) string {
 // Watch sets the workspace-relative files to monitor (the open editor tabs).
 // It (re)watches their parent directories and drops directories no longer needed.
 func (s *Service) Watch(rels []string) error {
-	root := s.roots.Root()
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
 	s.mu.Lock()
 	if s.stopping || s.stopped {
 		s.mu.Unlock()
 		return ErrStopped
 	}
-	if s.w == nil {
-		err := s.initErr
-		if err == nil {
-			err = ErrUnavailable
-		}
-		s.mu.Unlock()
-		s.report(err)
-		return err
-	}
+	s.mu.Unlock()
 
-	type candidate struct {
-		rel string
-		key string
-	}
-	byDir := map[string][]candidate{}
+	root := s.roots.Root()
+	byDir := map[string][]watchCandidate{}
 	var operationErrs []error
 	for _, rel := range rels {
 		abs, err := paths.Resolve(root, rel)
@@ -218,9 +264,24 @@ func (s *Service) Watch(rels []string) error {
 			continue
 		}
 		dir := filepath.Dir(abs)
-		byDir[dir] = append(byDir[dir], candidate{rel: rel, key: fsKey(abs)})
+		byDir[dir] = append(byDir[dir], watchCandidate{rel: rel, key: fsKey(abs)})
 	}
 
+	s.mu.Lock()
+	if s.stopping || s.stopped {
+		s.mu.Unlock()
+		return ErrStopped
+	}
+	unhealthy := s.generation == nil || s.w == nil || s.initErr != nil || s.runtimeErr != nil
+	s.mu.Unlock()
+	if unhealthy {
+		return s.rebuildWatcher(byDir, operationErrs)
+	}
+
+	s.mu.Lock()
+	// The current generation cannot be replaced while lifecycleMu is held.
+	// recordRuntimeError also takes mu before it closes that generation, so the
+	// backend stays usable for the duration of this update.
 	newFiles := map[string]bool{}
 	needDirs := map[string]bool{}
 	for d, candidates := range byDir {
@@ -250,44 +311,165 @@ func (s *Service) Watch(rels []string) error {
 	}
 	s.files = newFiles
 	operationErr := errors.Join(operationErrs...)
-	resultErr := errors.Join(operationErr, s.runtimeErr)
 	s.mu.Unlock()
 
 	if operationErr != nil {
 		s.report(operationErr)
 	}
-	return resultErr
+	return operationErr
 }
 
-func (s *Service) loop(w watchBackend, stop <-chan struct{}) {
-	defer s.loopWG.Done()
+type watchCandidate struct {
+	rel string
+	key string
+}
+
+func (s *Service) rebuildWatcher(byDir map[string][]watchCandidate, pathErrs []error) error {
+	s.mu.Lock()
+	if s.stopping || s.stopped {
+		s.mu.Unlock()
+		return ErrStopped
+	}
+	oldGeneration := s.generation
+	previousFailure := errors.Join(s.initErr, s.runtimeErr)
+	s.generation = nil
+	s.w = nil
+	s.files = map[string]bool{}
+	s.dirs = map[string]bool{}
+	s.mu.Unlock()
+
+	// Detach before Close so a channel-close notification from the poisoned
+	// generation cannot race in and overwrite the replacement's health state.
+	teardownErr := oldGeneration.shutdown()
+	if s.shutdownRequested() {
+		return errors.Join(ErrStopped, teardownErr)
+	}
+
+	backend, createErr := s.factory()
+	if createErr == nil && backend == nil {
+		createErr = errors.New("watcher factory returned nil")
+	}
+	if s.shutdownRequested() {
+		var closeErr error
+		if backend != nil {
+			closeErr = backend.Close()
+		}
+		return errors.Join(ErrStopped, teardownErr, closeErr)
+	}
+	if createErr != nil {
+		var closeErr error
+		if backend != nil {
+			closeErr = backend.Close()
+		}
+		recoveryErr := fmt.Errorf("%w: watcher reconstruction: %w", ErrUnavailable, createErr)
+		s.latchRecoveryFailure(recoveryErr)
+		result := errors.Join(errors.Join(pathErrs...), previousFailure, teardownErr, recoveryErr, closeErr)
+		s.report(result)
+		return result
+	}
+
+	newFiles := map[string]bool{}
+	newDirs := map[string]bool{}
+	var resyncErrs []error
+	for dir, candidates := range byDir {
+		if err := backend.Add(dir); err != nil {
+			for _, file := range candidates {
+				resyncErrs = append(resyncErrs, fmt.Errorf("watch %q (parent %q): %w", file.rel, dir, err))
+			}
+			continue
+		}
+		newDirs[dir] = true
+		for _, file := range candidates {
+			newFiles[file.key] = true
+		}
+	}
+	if s.shutdownRequested() {
+		return errors.Join(ErrStopped, teardownErr, backend.Close())
+	}
+	if resyncErr := errors.Join(resyncErrs...); resyncErr != nil {
+		closeErr := backend.Close()
+		recoveryErr := fmt.Errorf("%w: watcher resynchronization: %w", ErrUnavailable, resyncErr)
+		s.latchRecoveryFailure(recoveryErr)
+		result := errors.Join(errors.Join(pathErrs...), previousFailure, teardownErr, recoveryErr, closeErr)
+		s.report(result)
+		return result
+	}
+
+	generation := newWatchGeneration(backend)
+	s.mu.Lock()
+	if s.stopping || s.stopped {
+		s.mu.Unlock()
+		_ = backend.Close()
+		return ErrStopped
+	}
+	s.w = backend
+	s.generation = generation
+	s.files = newFiles
+	s.dirs = newDirs
+	// Clear both startup and runtime failures only after factory creation and
+	// the complete desired-directory resynchronization have succeeded.
+	s.initErr = nil
+	s.runtimeErr = nil
+	s.mu.Unlock()
+	go s.loop(generation)
+
+	result := errors.Join(errors.Join(pathErrs...), teardownErr)
+	if result != nil {
+		s.report(result)
+	}
+	return result
+}
+
+func (s *Service) latchRecoveryFailure(err error) {
+	s.mu.Lock()
+	if !s.stopping && !s.stopped {
+		s.initErr = err
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) shutdownRequested() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopping || s.stopped
+}
+
+func (s *Service) loop(generation *watchGeneration) {
+	defer close(generation.done)
 	for {
 		select {
-		case <-stop:
+		case <-generation.stop:
 			return
-		case e, ok := <-w.Events():
+		case e, ok := <-generation.backend.Events():
 			if !ok {
-				s.recordRuntimeError(errors.New("event channel closed unexpectedly"))
+				s.recordRuntimeError(generation, errors.New("event channel closed unexpectedly"))
+				_ = generation.closeBackend()
 				return
 			}
 			s.handle(e)
-		case err, ok := <-w.Errors():
+		case err, ok := <-generation.backend.Errors():
 			if !ok {
-				s.recordRuntimeError(errors.New("error channel closed unexpectedly"))
+				s.recordRuntimeError(generation, errors.New("error channel closed unexpectedly"))
+				_ = generation.closeBackend()
 				return
 			}
-			s.recordRuntimeError(err)
+			if err == nil {
+				err = errors.New("watcher reported a nil runtime error")
+			}
+			s.recordRuntimeError(generation, err)
+			_ = generation.closeBackend()
+			return
 		}
 	}
 }
 
-func (s *Service) recordRuntimeError(err error) {
+func (s *Service) recordRuntimeError(generation *watchGeneration, err error) {
 	if err == nil {
 		return
 	}
 	wrapped := fmt.Errorf("file watcher runtime failure: %w", err)
 	s.mu.Lock()
-	if s.stopping || s.stopped {
+	if s.stopping || s.stopped || s.generation != generation {
 		s.mu.Unlock()
 		return
 	}

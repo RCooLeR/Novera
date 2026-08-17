@@ -542,6 +542,51 @@ describe("file-operation ordering and generation safety", () => {
     expect(useStore.getState().searching).toBe(false);
   });
 
+  it("keeps only the newest workspace search across an A to B to A query cycle", async () => {
+    installWorkspace([fileTab("notes.txt")]);
+    type Result = {
+      matches: { path: string; line: number; column: number; text: string }[];
+      fileCount: number;
+      truncated: boolean;
+    };
+    const firstA = deferred<Result>();
+    const middleB = deferred<Result>();
+    const secondA = deferred<Result>();
+    mocks.search
+      .mockReturnValueOnce(firstA.promise)
+      .mockReturnValueOnce(middleB.promise)
+      .mockReturnValueOnce(secondA.promise);
+
+    const firstPending = useStore.getState().runSearch("alpha");
+    useStore.getState().setSearchQuery("beta");
+    const middlePending = useStore.getState().runSearch("beta");
+    useStore.getState().setSearchQuery("alpha");
+    const latestPending = useStore.getState().runSearch("alpha");
+
+    secondA.resolve({
+      matches: [{ path: "notes.txt", line: 3, column: 1, text: "latest alpha" }],
+      fileCount: 1,
+      truncated: false,
+    });
+    await latestPending;
+    firstA.resolve({
+      matches: [{ path: "notes.txt", line: 1, column: 1, text: "stale alpha" }],
+      fileCount: 1,
+      truncated: false,
+    });
+    middleB.resolve({
+      matches: [{ path: "notes.txt", line: 2, column: 1, text: "stale beta" }],
+      fileCount: 1,
+      truncated: false,
+    });
+    await Promise.all([firstPending, middlePending]);
+
+    expect(useStore.getState().searchResults?.matches).toEqual([
+      expect.objectContaining({ line: 3, text: "latest alpha" }),
+    ]);
+    expect(useStore.getState().searching).toBe(false);
+  });
+
   it("watches table resources and invalidates their window and derived indexes on change", async () => {
     const table = tableTab("data/items.csv");
     installWorkspace([table]);

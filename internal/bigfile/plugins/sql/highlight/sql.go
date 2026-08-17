@@ -9,6 +9,13 @@ import (
 type TokenKind = basehighlight.TokenKind
 type Token = basehighlight.Token
 
+type Dialect string
+
+const (
+	DialectMySQL Dialect = "mysql"
+	DialectANSI  Dialect = "ansi"
+)
+
 const (
 	TokenText       = basehighlight.TokenText
 	TokenKeyword    = basehighlight.TokenKeyword
@@ -35,6 +42,14 @@ var sqlKeywords = map[string]bool{
 // It intentionally avoids full-file or multi-line context and only tokenizes what
 // is currently visible inside the viewport.
 func SQLVisible(text string) []Token {
+	return SQLVisibleDialect(text, DialectMySQL)
+}
+
+// SQLVisibleDialect tokenizes a bounded visible SQL slice with explicit
+// line-comment rules. Novera's dump workbench defaults to MySQL semantics:
+// '#' starts a comment, while '--' requires following whitespace/control so
+// subtraction-like text such as "1--2" is not swallowed.
+func SQLVisibleDialect(text string, dialect Dialect) []Token {
 	tokens := make([]Token, 0, len(text)/8)
 	flushText := func(start, end int) {
 		if end > start {
@@ -46,10 +61,13 @@ func SQLVisible(text string) []Token {
 	textStart := 0
 	for i < len(text) {
 		switch {
-		case hasPrefixAt(text, i, "--") || text[i] == '#':
+		case startsSQLLineComment(text, i, dialect):
 			flushText(textStart, i)
-			tokens = append(tokens, Token{Start: i, End: len(text), Kind: TokenComment})
-			return mergeAdjacentTextTokens(tokens)
+			end := scanSQLLineComment(text, i)
+			tokens = append(tokens, Token{Start: i, End: end, Kind: TokenComment})
+			i = end
+			textStart = i
+			continue
 		case hasPrefixAt(text, i, "/*"):
 			flushText(textStart, i)
 			end := strings.Index(text[i+2:], "*/")
@@ -112,6 +130,32 @@ func SQLVisible(text string) []Token {
 
 	flushText(textStart, len(text))
 	return mergeAdjacentTextTokens(tokens)
+}
+
+func startsSQLLineComment(text string, index int, dialect Dialect) bool {
+	if index < 0 || index >= len(text) {
+		return false
+	}
+	if text[index] == '#' {
+		return dialect != DialectANSI
+	}
+	if !hasPrefixAt(text, index, "--") {
+		return false
+	}
+	if dialect == DialectANSI {
+		return true
+	}
+	after := index + 2
+	return after >= len(text) || text[after] <= ' '
+}
+
+func scanSQLLineComment(text string, start int) int {
+	for i := start; i < len(text); i++ {
+		if text[i] == '\r' || text[i] == '\n' {
+			return i
+		}
+	}
+	return len(text)
 }
 
 func mergeAdjacentTextTokens(tokens []Token) []Token {

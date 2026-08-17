@@ -5,6 +5,9 @@ import BootSplash from "./components/BootSplash";
 import { runMenuAction } from "./lib/menuActions";
 import {
   parseAgentEvent,
+  parseBigFileJobEnd,
+  parseBigFileJobProgress,
+  parseBigFileJobStart,
   parseChangedPath,
   parseErrorMessage,
   parseLLMEvent,
@@ -31,6 +34,8 @@ import BigToolsModal from "./components/BigToolsModal";
 import AboutModal from "./components/AboutModal";
 import { fitPanelLayout } from "./lib/layoutSizing";
 import { errMessage, Shell } from "./lib/services";
+import { handleNativeCloseRequest } from "./lib/nativeClose";
+import { isRecoverableWatchError, watchRecovery } from "./lib/watchRecovery";
 
 // Monaco and its language workers are by far the largest renderer dependency.
 // Keep them out of the welcome-screen startup graph and load the editor pane
@@ -49,6 +54,8 @@ export default function App() {
   const appReady = useStore((s) => s.appReady);
   const init = useStore((s) => s.init);
   const isOpen = useStore((s) => s.isOpen);
+  const root = useStore((s) => s.root);
+  const workspaceInstanceId = useStore((s) => s.workspaceInstanceId);
   const sidebarVisible = useStore((s) => s.sidebarVisible);
   const panelVisible = useStore((s) => s.panelVisible);
   const panelMounted = useStore((s) => s.panelMounted);
@@ -65,7 +72,9 @@ export default function App() {
   const failStream = useStore((s) => s.failStream);
   const handleAgentEvent = useStore((s) => s.handleAgentEvent);
   const reloadIfChanged = useStore((s) => s.reloadIfChanged);
+  const syncWatches = useStore((s) => s.syncWatches);
   const setStatus = useStore((s) => s.setStatus);
+  const applyBigFileJobEvent = useStore((s) => s.applyBigFileJobEvent);
   const activePath = useStore((s) => s.activePath);
   const activeTabIndex = useStore((s) => s.tabs.findIndex((tab) => tab.path === s.activePath));
   const requestCloseTab = useStore((s) => s.requestCloseTab);
@@ -98,6 +107,12 @@ export default function App() {
     window.addEventListener("beforeunload", protectUnsavedResources);
     return () => window.removeEventListener("beforeunload", protectUnsavedResources);
   }, [hasUnsavedResources]);
+
+  useEffect(() => {
+    // A replacement workspace is a new recovery domain. Do not carry a failed
+    // watcher's retry latch across roots.
+    watchRecovery.reset();
+  }, [workspaceInstanceId]);
 
   // Route streamed LLM tokens from Go events into the chat store.
   useEffect(() => {
@@ -138,8 +153,21 @@ export default function App() {
     });
     const offFsError = Events.On("fs:watch-error", (e: { data: unknown }) => {
       const message = parseErrorMessage(e.data);
-      if (message) setStatus(message, "error");
-      else setStatus("The filesystem watcher reported a malformed error event.", "error");
+      if (message) {
+        setStatus(message, "error");
+        // Runtime watcher failures retire the backend generation. One live
+        // synchronization asks it to rebuild; the coordinator coalesces an
+        // error burst and blocks a failed Watch -> error -> Watch loop.
+        if (isRecoverableWatchError(message)) {
+          watchRecovery.request(async () => {
+            const recovered = await syncWatches();
+            if (recovered) setStatus("File watcher recovered and open files are being monitored again.", "success");
+            return recovered;
+          });
+        }
+      } else {
+        setStatus("The filesystem watcher reported a malformed error event.", "error");
+      }
     });
     const offJobs = Events.On("jobs:changed", () => {
       void useStore.getState().loadJobs();
@@ -147,10 +175,35 @@ export default function App() {
     const offArtifacts = Events.On("artifacts:changed", () => {
       void useStore.getState().loadArtifacts();
     });
+    const rejectBigFileJobEvent = () => setStatus("Ignored a malformed big-file job event.", "error");
+    const offBigFileJobStart = Events.On("bigfile:job-start", (e: { data: unknown }) => {
+      const payload = parseBigFileJobStart(e.data);
+      if (payload) applyBigFileJobEvent("start", payload);
+      else rejectBigFileJobEvent();
+    });
+    const offBigFileJobProgress = Events.On("bigfile:job-progress", (e: { data: unknown }) => {
+      const payload = parseBigFileJobProgress(e.data);
+      if (payload) applyBigFileJobEvent("progress", payload);
+      else rejectBigFileJobEvent();
+    });
+    const offBigFileJobEnd = Events.On("bigfile:job-end", (e: { data: unknown }) => {
+      const payload = parseBigFileJobEnd(e.data);
+      if (payload) applyBigFileJobEvent("end", payload);
+      else rejectBigFileJobEvent();
+    });
     const offMenu = Events.On("menu", (e: { data: unknown }) => {
       const action = parseMenuAction(e.data);
       if (action) runMenuAction(action);
       else setStatus("Ignored an unknown application menu action.", "error");
+    });
+    const offCloseRequested = Events.On("app:close-requested", (e: { data: unknown }) => {
+      void handleNativeCloseRequest(e.data, {
+        // Read directly at request time. The selected React value and the
+        // SetUnsavedResources bridge queue can both lag an immediate edit.
+        hasUnsavedResources: () => useStore.getState().tabs.some(isUnsavedResourceTab),
+        emitDecision: (decision) => Events.Emit("app:close-decision", decision),
+        setStatus,
+      });
     });
     const offCloseBlocked = Events.On("app:close-blocked", () => {
       setStatus("Save or explicitly discard all unsaved changes before closing Novera.", "error");
@@ -164,10 +217,14 @@ export default function App() {
       offFsError();
       offJobs();
       offArtifacts();
+      offBigFileJobStart();
+      offBigFileJobProgress();
+      offBigFileJobEnd();
       offMenu();
+      offCloseRequested();
       offCloseBlocked();
     };
-  }, [appendDelta, finishStream, failStream, handleAgentEvent, reloadIfChanged, setStatus]);
+  }, [appendDelta, applyBigFileJobEvent, finishStream, failStream, handleAgentEvent, reloadIfChanged, setStatus, syncWatches]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -276,7 +333,7 @@ export default function App() {
             </div>
           )}
         </div>
-        {showAssistant ? <AssistantPanel /> : <div style={{ overflow: "hidden" }} />}
+        {showAssistant ? <AssistantPanel key={root} /> : <div style={{ overflow: "hidden" }} />}
       </div>
       <StatusBar />
       <FileContextMenu />

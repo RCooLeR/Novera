@@ -670,7 +670,33 @@ func TestSplitBySizeRejectsExistingPartOutput(t *testing.T) {
 	}
 }
 
-func TestSplitBySizeReportsCreatedPartCleanupFailure(t *testing.T) {
+func TestSplitBySizeRejectsManifestPartAliasBeforeCreatingPart(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "source.txt")
+	basePath := filepath.Join(dir, "split.txt")
+	manifestPath := partPath(basePath, 1)
+	if err := os.WriteFile(srcPath, []byte("abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := document.OpenFile(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+
+	summary, err := SplitBySize(context.Background(), doc, srcPath, basePath, 3, SplitOptions{ManifestPath: manifestPath})
+	if !errors.Is(err, fileio.ErrSourceAlias) {
+		t.Fatalf("error = %v, want ErrSourceAlias", err)
+	}
+	if len(summary.Outputs) != 0 {
+		t.Fatalf("outputs = %v, want none", summary.Outputs)
+	}
+	if _, err := os.Lstat(manifestPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("aliased manifest/part was created: %v", err)
+	}
+}
+
+func TestSplitBySizePreservesCommittedPartWhenLaterPartConflicts(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "source.txt")
 	basePath := filepath.Join(dir, "split.txt")
@@ -688,26 +714,19 @@ func TestSplitBySizeReportsCreatedPartCleanupFailure(t *testing.T) {
 	}
 	defer doc.Close()
 
-	originalRemoveFile := removeFile
-	removeFile = func(path string) error {
-		if strings.Contains(path, "part0001") {
-			return errors.New("cleanup denied")
-		}
-		return originalRemoveFile(path)
+	summary, err := SplitBySize(context.Background(), doc, srcPath, basePath, 3, SplitOptions{})
+	if !errors.Is(err, fileio.ErrExists) {
+		t.Fatalf("err = %v, want ErrExists", err)
 	}
-	defer func() {
-		removeFile = originalRemoveFile
-	}()
-
-	_, err = SplitBySize(context.Background(), doc, srcPath, basePath, 3, SplitOptions{})
-	if err == nil {
-		t.Fatal("expected existing-output and cleanup errors")
+	var incomplete *SplitIncompleteError
+	if !errors.As(err, &incomplete) || len(incomplete.Outputs) != 1 {
+		t.Fatalf("err = %v, want one preserved output", err)
 	}
-	if !strings.Contains(err.Error(), "output file already exists") {
-		t.Fatalf("err = %v, want existing-output context", err)
+	if len(summary.Outputs) != 1 {
+		t.Fatalf("summary outputs = %v, want one preserved output", summary.Outputs)
 	}
-	if !strings.Contains(err.Error(), "cleanup denied") {
-		t.Fatalf("err = %v, want cleanup failure context", err)
+	if got, readErr := os.ReadFile(partPath(basePath, 1)); readErr != nil || string(got) != "abc" {
+		t.Fatalf("first part = %q, %v; want preserved abc", got, readErr)
 	}
 	if got, readErr := os.ReadFile(conflictPath); readErr != nil {
 		t.Fatal(readErr)
@@ -716,7 +735,7 @@ func TestSplitBySizeReportsCreatedPartCleanupFailure(t *testing.T) {
 	}
 }
 
-func TestSplitByLineCountRejectsExistingLaterPartAndDeletesCreatedParts(t *testing.T) {
+func TestSplitByLineCountRejectsExistingLaterPartAndPreservesCommittedParts(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "source.txt")
 	basePath := filepath.Join(dir, "split.txt")
@@ -734,11 +753,16 @@ func TestSplitByLineCountRejectsExistingLaterPartAndDeletesCreatedParts(t *testi
 	}
 	defer doc.Close()
 
-	if _, err := SplitByLineCount(context.Background(), doc, srcPath, basePath, 2, SplitOptions{}); err == nil {
-		t.Fatal("expected existing-output error")
+	summary, err := SplitByLineCount(context.Background(), doc, srcPath, basePath, 2, SplitOptions{})
+	if !errors.Is(err, fileio.ErrExists) {
+		t.Fatalf("error = %v, want ErrExists", err)
 	}
-	if _, err := os.Stat(partPath(basePath, 1)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("created first part should be deleted, stat err = %v", err)
+	var incomplete *SplitIncompleteError
+	if !errors.As(err, &incomplete) || len(incomplete.Outputs) != 1 || len(summary.Outputs) != 1 {
+		t.Fatalf("error = %v, summary outputs = %v; want one preserved part", err, summary.Outputs)
+	}
+	if got, readErr := os.ReadFile(partPath(basePath, 1)); readErr != nil || string(got) != "one\ntwo\n" {
+		t.Fatalf("first part = %q, %v; want preserved lines", got, readErr)
 	}
 	got, err := os.ReadFile(conflictPath)
 	if err != nil {
