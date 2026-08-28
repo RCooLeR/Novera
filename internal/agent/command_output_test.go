@@ -17,13 +17,11 @@ func TestBoundedCommandOutputCapsDuringConcurrentAcquisition(t *testing.T) {
 	chunk := []byte(strings.Repeat("x", 10_000))
 	var writers sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		writers.Add(1)
-		go func() {
-			defer writers.Done()
+		writers.Go(func() {
 			if n, err := output.Write(chunk); err != nil || n != len(chunk) {
 				t.Errorf("Write = (%d, %v), want (%d, nil)", n, err, len(chunk))
 			}
-		}()
+		})
 	}
 	writers.Wait()
 	text := output.String()

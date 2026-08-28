@@ -11,8 +11,8 @@ describe("buildIdentityText", () => {
         buildDate: "2026-07-17T10:00:00Z",
         channel: "stable",
         dirty: false,
-        goVersion: "go1.26.6",
-        wailsVersion: "v3.0.0-beta.9",
+        goVersion: "go1.27.0",
+        wailsVersion: "v3.0.0-beta.15",
       }),
     ).toBe("Novera 1.2.3 · stable · commit abc123 · built 2026-07-17T10:00:00Z");
   });
@@ -26,8 +26,8 @@ describe("buildIdentityText", () => {
         buildDate: "unknown",
         channel: "development",
         dirty: true,
-        goVersion: "go1.26.6",
-        wailsVersion: "v3.0.0-beta.9",
+        goVersion: "go1.27.0",
+        wailsVersion: "v3.0.0-beta.15",
       }),
     ).toContain("locally modified");
   });

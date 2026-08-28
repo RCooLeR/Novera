@@ -162,10 +162,10 @@ func writePreview(ctx context.Context, doc document.ReaderAtSize, sourcePath str
 			},
 		})
 		if err != nil {
-			var publication *fileio.PublicationError
-			if errors.As(err, &publication) && publication.LocationUncertain {
+			publication, ok := errors.AsType[*fileio.PublicationError](err)
+			if ok && publication.LocationUncertain {
 				summary.PublicationUncertain = true
-			} else if errors.As(err, &publication) && publication.FinalPath == table.OutputPath {
+			} else if ok && publication.FinalPath == table.OutputPath {
 				table.Bytes = part.BytesWritten
 				table.SHA256 = part.SHA256
 				summary.Outputs = append(summary.Outputs, table)
@@ -200,8 +200,7 @@ func finishWrite(summary WriteSummary, err error) (WriteSummary, error) {
 	if err == nil {
 		return summary, nil
 	}
-	var publication *fileio.PublicationError
-	if errors.As(err, &publication) {
+	if publication, ok := errors.AsType[*fileio.PublicationError](err); ok {
 		if publication.LocationUncertain {
 			summary.PublicationUncertain = true
 		} else if publication.FinalPath == summary.ManifestPath {

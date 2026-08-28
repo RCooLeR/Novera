@@ -685,13 +685,11 @@ func (r *Registry) BeginShutdown() <-chan struct{} {
 		var wg sync.WaitGroup
 		for _, h := range handles {
 			h := h
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				if err := h.Finish(); err != nil {
 					errs <- err
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		<-openDone
@@ -767,11 +765,9 @@ func (e *entry) startIndexingLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	doc := e.doc
 	e.cancelIndex = cancel
-	e.indexWG.Add(1)
-	go func() {
-		defer e.indexWG.Done()
+	e.indexWG.Go(func() {
 		_ = doc.StartIndexing(ctx)
-	}()
+	})
 }
 
 func (e *entry) cancelIndexing() {

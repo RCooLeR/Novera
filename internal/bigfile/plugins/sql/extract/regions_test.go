@@ -65,7 +65,7 @@ func TestExtractTableConcatenatesOnlyOwnedInterleavedRegions(t *testing.T) {
 	defer doc.Close()
 
 	summary, err := ExtractTable(context.Background(), doc, source, analysis, "`db1`.`records`", WriteOptions{
-		PlanOptions: PlanOptions{OutputDir: outputDir},
+		OutputDir: outputDir,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestAnalyzedExtractionCopiesOnlyExactOwnedStatements(t *testing.T) {
 	defer doc.Close()
 
 	summary, err := ExtractTable(context.Background(), doc, source, analysis, "target", WriteOptions{
-		PlanOptions: PlanOptions{OutputDir: outputDir},
+		OutputDir: outputDir,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +157,7 @@ func TestAnalyzedExtractionPreservesWordPressSerializedPayloadBytes(t *testing.T
 	defer doc.Close()
 
 	summary, err := ExtractTable(context.Background(), doc, source, analysis, "wp_options", WriteOptions{
-		PlanOptions: PlanOptions{OutputDir: outputDir},
+		OutputDir: outputDir,
 	})
 	if err != nil {
 		t.Fatal(err)

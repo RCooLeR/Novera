@@ -476,12 +476,10 @@ func TestServiceShutdownIsConcurrentIdempotentAndWaitsForLoop(t *testing.T) {
 	results := make(chan error, callers)
 	var callersWG sync.WaitGroup
 	for i := 0; i < callers; i++ {
-		callersWG.Add(1)
-		go func() {
-			defer callersWG.Done()
+		callersWG.Go(func() {
 			<-start
 			results <- service.ServiceShutdown()
-		}()
+		})
 	}
 	close(start)
 	callersWG.Wait()

@@ -48,8 +48,8 @@ xterm.js, virtualized grids, and generated Wails bindings.
 
 ## Stack
 
-- Go 1.26.6
-- Wails v3.0.0-beta.9
+- Go 1.27.0
+- Wails v3.0.0-beta.15
 - React 19 + TypeScript 6 + Vite 8
 - Monaco editor
 - xterm.js
@@ -58,12 +58,14 @@ xterm.js, virtualized grids, and generated Wails bindings.
 
 ## Prerequisites
 
-- Go 1.26.6
-- Node 24.x
+- Go 1.27.0
+- Node 24.20.x LTS with npm 11.x
+- macOS 13 or later when building or running the macOS package
+- Linux packages use GTK 4 and WebKitGTK 6.0 (Ubuntu 24.04+ or Debian 13+)
 - Wails v3 CLI:
 
 ```powershell
-go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.15
 ```
 
 ## Development
@@ -124,6 +126,8 @@ bin/Novera.exe
 - iOS simulator and Android builds are experimental and are not CI-verified.
   Android production packaging fails closed until release signing and artifact
   verification exist; the explicitly named debug task is for local testing only.
+  See [Android build status](build/android/README.md) for the current toolchain
+  and the remaining Wails mobile-host/security blocker.
 - Windows MSIX packaging is disabled until a reviewed Wails v3 configuration,
   signing identity, and clean-machine install/upgrade checks are committed. NSIS
   is the only selectable Windows package format in the current task source.

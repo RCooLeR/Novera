@@ -1,8 +1,6 @@
 module novera
 
-go 1.25.0
-
-toolchain go1.26.6
+go 1.27.0
 
 require (
 	github.com/aymanbagabas/go-pty v0.2.3
@@ -13,15 +11,12 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	// Pinned pre-release: keep the Go module, frontend runtime, and CLI aligned,
 	// and require the full native regression matrix for every beta update.
-	github.com/wailsapp/wails/v3 v3.0.0-beta.9
+	github.com/wailsapp/wails/v3 v3.0.0-beta.15
 	github.com/xuri/excelize/v2 v2.11.0
-	modernc.org/sqlite v1.56.0
-)
-
-require (
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.41.0
+	modernc.org/sqlite v1.57.0
 )
 
 require (

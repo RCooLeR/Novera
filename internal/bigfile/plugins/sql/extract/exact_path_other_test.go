@@ -38,7 +38,7 @@ func TestSplitByTableRejectsSymlinkDotDotOutputDirectory(t *testing.T) {
 	rawDir := visible + string(os.PathSeparator) + ".."
 	summary := analyze.Summary{Tables: []analyze.Table{{Name: "orders", CreateOffset: 0, InsertOffset: -1}}}
 
-	_, err = SplitByTable(context.Background(), doc, sourcePath, summary, WriteOptions{PlanOptions: PlanOptions{OutputDir: rawDir}})
+	_, err = SplitByTable(context.Background(), doc, sourcePath, summary, WriteOptions{OutputDir: rawDir})
 	if !errors.Is(err, fileio.ErrInvalidExactPath) {
 		t.Fatalf("split error = %v, want ErrInvalidExactPath", err)
 	}
@@ -69,7 +69,7 @@ func TestSplitByTablePreservesSpacedOutputDirectory(t *testing.T) {
 	outputDir := filepath.Join(root, " output directory ")
 	analysis := analyze.Summary{Tables: []analyze.Table{{Name: "orders", CreateOffset: 0, InsertOffset: -1}}}
 
-	summary, err := SplitByTable(context.Background(), doc, sourcePath, analysis, WriteOptions{PlanOptions: PlanOptions{OutputDir: outputDir}})
+	summary, err := SplitByTable(context.Background(), doc, sourcePath, analysis, WriteOptions{OutputDir: outputDir})
 	if err != nil {
 		t.Fatal(err)
 	}

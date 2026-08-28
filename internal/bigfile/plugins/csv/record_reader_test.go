@@ -256,9 +256,8 @@ func TestBoundedCSVReaderConcurrentInstances(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 	for worker := 0; worker < workers; worker++ {
-		wg.Add(1)
-		go func(step int) {
-			defer wg.Done()
+		step := worker%7 + 1
+		wg.Go(func() {
 			reader, err := newBoundedCSVReader(context.Background(), &seamReader{data: []byte(input), step: step}, csvReaderConfig{
 				Delimiter: ',', MaxRecordBytes: 64, FieldsPerRecord: -1,
 			})
@@ -274,7 +273,7 @@ func TestBoundedCSVReaderConcurrentInstances(t *testing.T) {
 			if len(records) != 3 || records[1][1] != "alpha\nbeta" || records[2][1] != `escaped "quote"` {
 				errs <- errors.New("concurrent reader returned different records")
 			}
-		}(worker%7 + 1)
+		})
 	}
 	wg.Wait()
 	close(errs)

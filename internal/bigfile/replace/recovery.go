@@ -1,10 +1,7 @@
 package replace
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +10,7 @@ import (
 	"time"
 
 	"novera/internal/bigfile/logger"
+	"novera/internal/jsonsafe"
 	"novera/internal/persistfile"
 )
 
@@ -44,16 +42,7 @@ func LoadManifest(path string) (Manifest, error) {
 		return Manifest{}, err
 	}
 	var manifest Manifest
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&manifest); err != nil {
-		return Manifest{}, err
-	}
-	var extra any
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return Manifest{}, errors.New("recovery manifest contains multiple JSON values")
-		}
+	if err := jsonsafe.Unmarshal(data, &manifest); err != nil {
 		return Manifest{}, err
 	}
 	if err := validateRecoveryManifestPaths(path, manifest); err != nil {

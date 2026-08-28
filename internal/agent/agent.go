@@ -2546,8 +2546,7 @@ func (s *Service) runCommand(parent context.Context, command string, timeout tim
 		return text, errors.New("command canceled with its agent run")
 	}
 	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
 			return text, fmt.Errorf("command exited with status %d", exitErr.ExitCode())
 		}
 		if errors.Is(runErr, exec.ErrWaitDelay) {

@@ -9,6 +9,7 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -144,8 +145,8 @@ func (s *Service) ListJobs() []Job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]Job, 0, len(s.jobs))
-	for i := len(s.jobs) - 1; i >= 0; i-- {
-		out = append(out, s.jobs[i].clone(false))
+	for _, job := range slices.Backward(s.jobs) {
+		out = append(out, job.clone(false))
 	}
 	return out
 }

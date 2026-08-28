@@ -193,9 +193,7 @@ func TestRegistryFrozenMetadataConcurrentReadsAndCallerMutation(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for worker := 0; worker < 8; worker++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := 0; i < 500; i++ {
 				descriptors := registry.Descriptors()
 				mutateDescriptor(&descriptors[0])
@@ -211,7 +209,7 @@ func TestRegistryFrozenMetadataConcurrentReadsAndCallerMutation(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	assertDescriptorEqual(t, registry.Descriptors()[0], want)

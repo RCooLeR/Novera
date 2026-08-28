@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/url"
 	"os"
@@ -20,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"novera/internal/jsonsafe"
 	"novera/internal/persistfile"
 )
 
@@ -591,19 +591,7 @@ func decodeSettings(data []byte, out *Settings) error {
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return errors.New("settings must be a JSON object")
 	}
-	if err := rejectDuplicateSettingsKeys(data); err != nil {
-		return err
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(out); err != nil {
-		return err
-	}
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return errors.New("unexpected content after settings object")
-		}
+	if err := jsonsafe.Unmarshal(data, out); err != nil {
 		return err
 	}
 	return validateSettingsStrings(*out)
@@ -637,76 +625,6 @@ func validateSettingsStrings(in Settings) error {
 		if len(item.value) > item.limit {
 			return fmt.Errorf("%s exceeds the %d-byte safety limit", item.label, item.limit)
 		}
-	}
-	return nil
-}
-
-func rejectDuplicateSettingsKeys(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if err := validateUniqueSettingsJSONValue(dec); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple settings JSON values")
-		}
-		return err
-	}
-	return nil
-}
-
-func validateUniqueSettingsJSONValue(dec *json.Decoder) error {
-	token, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		seen := make(map[string]string)
-		for dec.More() {
-			keyToken, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("settings JSON object key is not a string")
-			}
-			canonical := strings.ToLower(key)
-			if prior, exists := seen[canonical]; exists {
-				return fmt.Errorf("duplicate settings JSON object key %q (conflicts with %q)", key, prior)
-			}
-			seen[canonical] = key
-			if err := validateUniqueSettingsJSONValue(dec); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim('}') {
-			return errors.New("malformed settings JSON object")
-		}
-	case '[':
-		for dec.More() {
-			if err := validateUniqueSettingsJSONValue(dec); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim(']') {
-			return errors.New("malformed settings JSON array")
-		}
-	default:
-		return errors.New("unexpected settings JSON delimiter")
 	}
 	return nil
 }

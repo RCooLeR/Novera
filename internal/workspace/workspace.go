@@ -520,7 +520,7 @@ func (s *Service) Search(query string, caseSensitive bool) (SearchResult, error)
 			return nil
 		}
 		lineNo := 0
-		for _, line := range strings.Split(string(data), "\n") {
+		for line := range strings.SplitSeq(string(data), "\n") {
 			lineNo++
 			hay := line
 			if !caseSensitive {
@@ -611,7 +611,7 @@ func (s *Service) Diagnostics() (DiagnosticsResult, error) {
 			return nil
 		}
 		lineNo := 0
-		for _, line := range strings.Split(string(data), "\n") {
+		for line := range strings.SplitSeq(string(data), "\n") {
 			lineNo++
 			start := strings.TrimLeft(line, " \t")
 			// Only the unambiguous conflict markers (start/end) — never "======="

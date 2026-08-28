@@ -177,7 +177,7 @@ func TestSQLRuntimePluginRoutesExtractWrites(t *testing.T) {
 			{Name: "users", CreateOffset: 0, InsertOffset: -1},
 			{Name: "orders", CreateOffset: int64(strings.Index(src, "CREATE TABLE orders")), InsertOffset: -1},
 		},
-	}, "orders", ExtractWriteOptions{PlanOptions: ExtractPlanOptions{OutputDir: outDir}})
+	}, "orders", ExtractWriteOptions{OutputDir: outDir})
 	if err != nil {
 		t.Fatal(err)
 	}

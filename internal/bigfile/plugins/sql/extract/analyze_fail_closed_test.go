@@ -57,7 +57,7 @@ func TestUnsafeClientBoundariesCannotPublishExtractionOutput(t *testing.T) {
 			outDir := filepath.Join(t.TempDir(), "must-not-exist")
 			writeSummary, writeErr := SplitByTable(
 				context.Background(), bytes.NewReader(data), filepath.Join(t.TempDir(), "unsafe.sql"), summary,
-				WriteOptions{PlanOptions: PlanOptions{OutputDir: outDir}},
+				WriteOptions{OutputDir: outDir},
 			)
 			if writeErr == nil {
 				t.Fatal("empty fail-closed analysis unexpectedly started extraction")

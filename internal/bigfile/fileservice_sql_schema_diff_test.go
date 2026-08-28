@@ -393,7 +393,7 @@ func TestCommitSQLSchemaDiffRejectsEstablishedLifecycleBarrier(t *testing.T) {
 	service := NewFileService()
 	fileID := openAndAnalyzeSchemaDiffTestFixture(t, service, "barrier.sql", "CREATE TABLE t (id int);")
 
-	_, err := runServiceJob(service, jobSpec{
+	_, err := service.runServiceJob(jobSpec{
 		Title:   "schema barrier test",
 		Kind:    "sql-schema-diff",
 		FileID:  fileID,

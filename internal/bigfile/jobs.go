@@ -498,7 +498,7 @@ func jobStatus(err error, panicked bool) string {
 	}
 }
 
-func runServiceJob[T any](service *FileService, spec jobSpec, callback func(context.Context, func(int64, int64, string)) (T, error)) (result T, retErr error) {
+func (service *FileService) runServiceJob[T any](spec jobSpec, callback func(context.Context, func(int64, int64, string)) (T, error)) (result T, retErr error) {
 	if service == nil || callback == nil {
 		return result, errors.New("big-file service and job callback are required")
 	}
@@ -535,26 +535,20 @@ func runServiceJob[T any](service *FileService, spec jobSpec, callback func(cont
 	})
 }
 
-// withJob preserves the existing transform callback shape while emitting the
-// richer owned event schema.
-func (s *FileService) withJob(title string, callback func(context.Context, func(int64, string)) (TransformResult, error)) (TransformResult, error) {
-	return withJobResult(s, title, callback)
-}
-
 func (s *FileService) withFileJob(fileID, title string, callback func(context.Context, func(int64, string)) (TransformResult, error)) (TransformResult, error) {
-	return withFileJobResult(s, fileID, title, jobKindTransform, callback)
+	return s.withFileJobResult(fileID, title, jobKindTransform, callback)
 }
 
-func withJobResult[T any](service *FileService, title string, callback func(context.Context, func(int64, string)) (T, error)) (T, error) {
-	return withOwnedJobResult(service, jobSpec{Title: title, Kind: jobKindTransform}, callback)
+func (service *FileService) withJobResult[T any](title string, callback func(context.Context, func(int64, string)) (T, error)) (T, error) {
+	return service.withOwnedJobResult(jobSpec{Title: title, Kind: jobKindTransform}, callback)
 }
 
-func withFileJobResult[T any](service *FileService, fileID, title, kind string, callback func(context.Context, func(int64, string)) (T, error)) (T, error) {
-	return withOwnedJobResult(service, jobSpec{Title: title, Kind: kind, FileID: fileID}, callback)
+func (service *FileService) withFileJobResult[T any](fileID, title, kind string, callback func(context.Context, func(int64, string)) (T, error)) (T, error) {
+	return service.withOwnedJobResult(jobSpec{Title: title, Kind: kind, FileID: fileID}, callback)
 }
 
-func withOwnedJobResult[T any](service *FileService, spec jobSpec, callback func(context.Context, func(int64, string)) (T, error)) (T, error) {
-	return runServiceJob(service, spec, func(ctx context.Context, progress func(int64, int64, string)) (T, error) {
+func (service *FileService) withOwnedJobResult[T any](spec jobSpec, callback func(context.Context, func(int64, string)) (T, error)) (T, error) {
+	return service.runServiceJob(spec, func(ctx context.Context, progress func(int64, int64, string)) (T, error) {
 		return callback(ctx, func(completed int64, note string) {
 			progress(completed, spec.Total, note)
 		})

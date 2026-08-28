@@ -90,6 +90,10 @@ tasks:
     dir: build
     cmds:
       - wails3 update build-assets -name "{{.APP_NAME}}" -binaryname "{{.APP_NAME}}" -config config.yml -dir .
+      # Wails beta.15 still emits a macOS 12 plist, while Go 1.27 requires
+      # macOS 13. Reapply and validate the repository's supported floor after
+      # every generated-asset refresh.
+      - go run ./scripts/enforce_platform_floors.go
 
   server:disabled:
     internal: true

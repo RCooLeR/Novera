@@ -169,12 +169,10 @@ func TestSchemaColumnsForSQLSplitsNamesAndTypes(t *testing.T) {
 
 func TestPreviewSQLConversionUsesBoundedRowsAndFormatsReport(t *testing.T) {
 	report, err := PreviewSQLConversion(strings.NewReader("id,name\n1,Ada\n2,Grace\n3,Linus\n"), SQLPreviewOptions{
-		SQLConvertOptions: SQLConvertOptions{
-			TableName:       "people",
-			HasHeader:       true,
-			InsertBatchSize: 2,
-		},
-		MaxRows: 2,
+		TableName:       "people",
+		HasHeader:       true,
+		InsertBatchSize: 2,
+		MaxRows:         2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -196,13 +194,11 @@ func TestPreviewSQLConversionUsesBoundedRowsAndFormatsReport(t *testing.T) {
 
 func TestPreviewSQLConversionInfersCreateTableFromSample(t *testing.T) {
 	report, err := PreviewSQLConversion(strings.NewReader("id,price,active,note\n1,12.5,true,hello\n2,14,false,NULL\n"), SQLPreviewOptions{
-		SQLConvertOptions: SQLConvertOptions{
-			TableName:          "items",
-			HasHeader:          true,
-			NullValues:         []string{"NULL"},
-			IncludeCreateTable: true,
-		},
-		MaxRows: 2,
+		TableName:          "items",
+		HasHeader:          true,
+		NullValues:         []string{"NULL"},
+		IncludeCreateTable: true,
+		MaxRows:            2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -219,12 +215,10 @@ func TestPreviewSQLConversionInfersCreateTableFromSample(t *testing.T) {
 
 func TestPreviewSQLConversionTrimsTrailingPartialRecord(t *testing.T) {
 	report, err := PreviewSQLConversion(strings.NewReader("id,name\n1,Ada\n2,\"unterminated"), SQLPreviewOptions{
-		SQLConvertOptions: SQLConvertOptions{
-			TableName: "people",
-			HasHeader: true,
-		},
-		MaxBytes: 19,
-		MaxRows:  10,
+		TableName: "people",
+		HasHeader: true,
+		MaxBytes:  19,
+		MaxRows:   10,
 	})
 	if err != nil {
 		t.Fatal(err)

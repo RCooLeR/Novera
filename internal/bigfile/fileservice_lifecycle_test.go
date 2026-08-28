@@ -59,7 +59,7 @@ func startTwoFileLeaseJob(service *FileService, firstID, secondID string) (<-cha
 		readyOnce.Do(func() { ready <- err })
 	}
 	go func() {
-		_, err := runServiceJob(service, jobSpec{
+		_, err := service.runServiceJob(jobSpec{
 			Title:   "two-file lifecycle test",
 			Kind:    jobKindTransform,
 			FileID:  firstID,
@@ -287,7 +287,7 @@ func TestCloseBlocksRegistrationBeforeCancellingAndDraining(t *testing.T) {
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- service.CloseFile(meta.FileID) }()
 	waitForFileJobBlock(t, service, meta.FileID)
-	if _, err := withFileJobResult(service, meta.FileID, "late job", jobKindTransform, func(context.Context, func(int64, string)) (int, error) {
+	if _, err := service.withFileJobResult(meta.FileID, "late job", jobKindTransform, func(context.Context, func(int64, string)) (int, error) {
 		return 1, nil
 	}); !errors.Is(err, ErrFileJobsBlocked) {
 		t.Fatalf("late job error = %v, want ErrFileJobsBlocked", err)

@@ -70,13 +70,11 @@ func TestCorruptEncryptedStoreRemainsFailClosedUnderConcurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, workers*3)
 	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs <- s.Health()
 			errs <- s.Set("llm.apikey.v1.example", "new-value")
 			errs <- s.Delete("db.cred.v1.example")
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)

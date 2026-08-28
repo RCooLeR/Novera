@@ -1,6 +1,6 @@
 # Wails runtime containment and upgrade policy
 
-Novera currently pins Wails `v3.0.0-beta.9`. It is still a pre-stable
+Novera currently pins Wails `v3.0.0-beta.15`. It is still a pre-stable
 dependency, so updates are isolated security/compatibility migrations rather
 than routine version bumps. The Go module, frontend runtime, CLI, generated
 bindings, and build images must move together.

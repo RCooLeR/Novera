@@ -451,9 +451,13 @@ func cleanPreview(buf []byte) string {
 	if !utf8.Valid(buf) {
 		return fmt.Sprintf("[%d preview bytes]", len(buf))
 	}
-	s := string(buf)
-	s = strings.ReplaceAll(s, "\r", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.Join(strings.Fields(s), " ")
-	return s
+	var out strings.Builder
+	out.Grow(len(buf))
+	for field := range strings.FieldsSeq(string(buf)) {
+		if out.Len() > 0 {
+			out.WriteByte(' ')
+		}
+		out.WriteString(field)
+	}
+	return out.String()
 }

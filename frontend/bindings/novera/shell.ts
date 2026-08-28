@@ -53,9 +53,8 @@ export function SelectFolder(): $CancellablePromise<string> {
 
 /**
  * SetUnsavedResources mirrors the renderer's aggregate dirty-resource state
- * into the native host. The WindowClosing hook consults this value before the
- * WebView is torn down, so an OS title-bar close cannot bypass the renderer's
- * normal save/discard checks.
+ * for native diagnostics. Native close authorization does not trust this
+ * asynchronous mirror; it uses the nonce-based live renderer handshake above.
  */
 export function SetUnsavedResources(unsaved: boolean): $CancellablePromise<void> {
     return $Call.ByID(3659178193, unsaved);

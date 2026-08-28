@@ -1,17 +1,29 @@
 package com.wails.app;
 
 import android.annotation.SuppressLint;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.ViewGroup;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.webkit.WebSettingsCompat;
 import androidx.webkit.WebViewAssetLoader;
+import androidx.webkit.WebViewFeature;
 import com.wails.app.BuildConfig;
 
 /**
@@ -31,7 +43,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        WindowCompat.enableEdgeToEdge(getWindow());
         setContentView(R.layout.activity_main);
+        configureSystemBarInsets();
+        configureBackNavigation();
 
         // Initialize the native Go library
         bridge = new WailsBridge(this);
@@ -52,11 +67,13 @@ public class MainActivity extends AppCompatActivity {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOWNLOAD_FAVICONS_ENABLED)) {
+            WebSettingsCompat.setDownloadFaviconsEnabled(settings, false);
+        }
 
         // Enable debugging in debug builds
         if (BuildConfig.DEBUG) {
@@ -77,9 +94,8 @@ public class MainActivity extends AppCompatActivity {
                 String url = request.getUrl().toString();
                 Log.d(TAG, "Intercepting request: " + url);
 
-                // Handle wails.localhost requests
-                if (request.getUrl().getHost() != null &&
-                        request.getUrl().getHost().equals(WAILS_HOST)) {
+                // Only the app's exact HTTPS origin may reach the embedded asset/runtime bridge.
+                if (isWailsOrigin(request.getUrl())) {
 
                     // For wails API calls (runtime, capabilities, etc.), we need to pass the full URL
                     // including query string because WebViewAssetLoader.PathHandler strips query params
@@ -126,15 +142,65 @@ public class MainActivity extends AppCompatActivity {
                     return assetLoader.shouldInterceptRequest(request.getUrl());
                 }
 
-                return super.shouldInterceptRequest(view, request);
+                // addJavascriptInterface is visible to every frame, while
+                // shouldOverrideUrlLoading is not called for every request (notably POST).
+                // Fail closed for all content outside the app origin. Normal external GET
+                // navigation is handed to the system browser by shouldOverrideUrlLoading.
+                Log.w(TAG, "Blocking non-Wails WebView request: " + url);
+                return new WebResourceResponse(
+                    "text/plain",
+                    "UTF-8",
+                    403,
+                    "Forbidden",
+                    java.util.Collections.emptyMap(),
+                    new java.io.ByteArrayInputStream(new byte[0])
+                );
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (isWailsOrigin(uri)) {
+                    return false;
+                }
+                if (!request.isForMainFrame()) {
+                    return true;
+                }
+                String scheme = uri.getScheme();
+                if ("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme)) {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                    } catch (ActivityNotFoundException error) {
+                        Log.w(TAG, "No browser available for external URL", error);
+                    }
+                }
+                return true;
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                if (!isWailsOrigin(Uri.parse(url))) {
+                    Log.w(TAG, "Refusing runtime injection outside the Wails origin");
+                    return;
+                }
                 Log.d(TAG, "Page loaded: " + url);
                 // Inject Wails runtime
                 bridge.injectRuntime(webView, url);
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                Log.e(TAG, "WebView renderer exited; crashed=" + detail.didCrash());
+                if (view.getParent() instanceof ViewGroup parent) {
+                    parent.removeView(view);
+                }
+                view.destroy();
+                if (view == webView) {
+                    webView = null;
+                }
+                finishAndRemoveTask();
+                return true;
             }
         });
 
@@ -147,6 +213,39 @@ public class MainActivity extends AppCompatActivity {
         String url = WAILS_SCHEME + "://" + WAILS_HOST + "/";
         Log.d(TAG, "Loading URL: " + url);
         webView.loadUrl(url);
+    }
+
+    private static boolean isWailsOrigin(Uri uri) {
+        if (uri == null
+                || !WAILS_SCHEME.equalsIgnoreCase(uri.getScheme())
+                || !WAILS_HOST.equalsIgnoreCase(uri.getHost())) {
+            return false;
+        }
+        int port = uri.getPort();
+        return port == -1 || port == 443;
+    }
+
+    private void configureSystemBarInsets() {
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main_container), (view, windowInsets) -> {
+            Insets insets = windowInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            view.setPadding(insets.left, insets.top, insets.right, insets.bottom);
+            return windowInsets;
+        });
+    }
+
+    private void configureBackNavigation() {
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (webView != null && webView.canGoBack()) {
+                    webView.goBack();
+                    return;
+                }
+                setEnabled(false);
+                getOnBackPressedDispatcher().onBackPressed();
+            }
+        });
     }
 
     /**
@@ -178,21 +277,15 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
-        super.onDestroy();
         if (bridge != null) {
             bridge.shutdown();
+            bridge = null;
         }
         if (webView != null) {
+            webView.removeJavascriptInterface("wails");
             webView.destroy();
+            webView = null;
         }
-    }
-
-    @Override
-    public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+        super.onDestroy();
     }
 }

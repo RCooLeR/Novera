@@ -312,8 +312,7 @@ func exitInfo(waitErr error) (code int, signaled bool) {
 	if waitErr == nil {
 		return 0, false
 	}
-	var ee *exec.ExitError
-	if errors.As(waitErr, &ee) && ee.ProcessState != nil {
+	if ee, ok := errors.AsType[*exec.ExitError](waitErr); ok && ee.ProcessState != nil {
 		code = ee.ProcessState.ExitCode()
 		return code, code == -1
 	}

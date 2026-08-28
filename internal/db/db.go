@@ -33,6 +33,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
+	"novera/internal/jsonsafe"
 	"novera/internal/persistfile"
 	"novera/internal/sqlguard"
 )
@@ -473,13 +474,8 @@ func decodeProfiles(b []byte) ([]Profile, error) {
 		if err := dec.Decode(&raw); err != nil {
 			return nil, err
 		}
-		if err := rejectDuplicateJSONKeys(raw); err != nil {
-			return nil, fmt.Errorf("profile %d: %w", len(profiles), err)
-		}
 		var p Profile
-		profileDecoder := json.NewDecoder(bytes.NewReader(raw))
-		profileDecoder.DisallowUnknownFields()
-		if err := profileDecoder.Decode(&p); err != nil {
+		if err := jsonsafe.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("profile %d: %w", len(profiles), err)
 		}
 		if err := validateProfileStrings(p); err != nil {
@@ -548,76 +544,6 @@ func validateProfileStrings(p Profile) error {
 		if len(item.value) > item.limit {
 			return fmt.Errorf("%s exceeds the %d-byte safety limit", item.label, item.limit)
 		}
-	}
-	return nil
-}
-
-func rejectDuplicateJSONKeys(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if err := validateUniqueJSONValue(dec); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple JSON values")
-		}
-		return err
-	}
-	return nil
-}
-
-func validateUniqueJSONValue(dec *json.Decoder) error {
-	token, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		seen := make(map[string]string)
-		for dec.More() {
-			keyToken, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("JSON object key is not a string")
-			}
-			canonical := strings.ToLower(key)
-			if prior, exists := seen[canonical]; exists {
-				return fmt.Errorf("duplicate JSON object key %q (conflicts with %q)", key, prior)
-			}
-			seen[canonical] = key
-			if err := validateUniqueJSONValue(dec); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim('}') {
-			return errors.New("malformed JSON object")
-		}
-	case '[':
-		for dec.More() {
-			if err := validateUniqueJSONValue(dec); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim(']') {
-			return errors.New("malformed JSON array")
-		}
-	default:
-		return errors.New("unexpected JSON delimiter")
 	}
 	return nil
 }

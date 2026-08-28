@@ -25,6 +25,7 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
+	"novera/internal/jsonsafe"
 	"novera/internal/paths"
 )
 
@@ -261,22 +262,6 @@ func readRegistryFile(path string) ([]byte, error) {
 	return b, nil
 }
 
-func decodeStrict(data []byte, out any) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(out); err != nil {
-		return err
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return errors.New("multiple top-level JSON values")
-		}
-		return err
-	}
-	return nil
-}
-
 func parseRegistry(data []byte) ([]Artifact, error) {
 	if len(data) > maxRegistryBytes {
 		return nil, fmt.Errorf("registry exceeds the %d-byte safety limit", maxRegistryBytes)
@@ -288,14 +273,11 @@ func parseRegistry(data []byte) ([]Artifact, error) {
 	if len(trimmed) == 0 {
 		return nil, errors.New("registry is empty")
 	}
-	if err := rejectDuplicateJSONKeys(trimmed); err != nil {
-		return nil, fmt.Errorf("validate registry JSON object keys: %w", err)
-	}
 	var list []Artifact
 	switch trimmed[0] {
 	case '[':
 		// Compatibility with the unversioned array written by Novera <= 0.1.
-		if err := decodeStrict(trimmed, &list); err != nil {
+		if err := jsonsafe.Unmarshal(trimmed, &list); err != nil {
 			return nil, fmt.Errorf("decode legacy registry: %w", err)
 		}
 	case '{':
@@ -303,7 +285,7 @@ func parseRegistry(data []byte) ([]Artifact, error) {
 			Version   *int            `json:"version"`
 			Artifacts json.RawMessage `json:"artifacts"`
 		}
-		if err := decodeStrict(trimmed, &raw); err != nil {
+		if err := jsonsafe.Unmarshal(trimmed, &raw); err != nil {
 			return nil, fmt.Errorf("decode registry envelope: %w", err)
 		}
 		if raw.Version == nil {
@@ -315,7 +297,7 @@ func parseRegistry(data []byte) ([]Artifact, error) {
 		if len(raw.Artifacts) == 0 || bytes.Equal(bytes.TrimSpace(raw.Artifacts), []byte("null")) {
 			return nil, errors.New("registry artifacts array is required")
 		}
-		if err := decodeStrict(raw.Artifacts, &list); err != nil {
+		if err := jsonsafe.Unmarshal(raw.Artifacts, &list); err != nil {
 			return nil, fmt.Errorf("decode registry artifacts: %w", err)
 		}
 	default:
@@ -386,76 +368,6 @@ func validateArtifactStrings(a Artifact) error {
 		if total > maxArtifactTextBytes {
 			return fmt.Errorf("artifact text exceeds the aggregate %d-byte safety limit", maxArtifactTextBytes)
 		}
-	}
-	return nil
-}
-
-func rejectDuplicateJSONKeys(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if err := validateUniqueJSONValue(dec); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple top-level JSON values")
-		}
-		return err
-	}
-	return nil
-}
-
-func validateUniqueJSONValue(dec *json.Decoder) error {
-	token, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		seen := map[string]string{}
-		for dec.More() {
-			keyToken, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("JSON object key is not a string")
-			}
-			canonical := strings.ToLower(key)
-			if prior, exists := seen[canonical]; exists {
-				return fmt.Errorf("duplicate JSON object key %q (conflicts with %q)", key, prior)
-			}
-			seen[canonical] = key
-			if err := validateUniqueJSONValue(dec); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil || end != json.Delim('}') {
-			if err != nil {
-				return err
-			}
-			return errors.New("malformed JSON object")
-		}
-	case '[':
-		for dec.More() {
-			if err := validateUniqueJSONValue(dec); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil || end != json.Delim(']') {
-			if err != nil {
-				return err
-			}
-			return errors.New("malformed JSON array")
-		}
-	default:
-		return errors.New("unexpected JSON delimiter")
 	}
 	return nil
 }

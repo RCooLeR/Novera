@@ -142,7 +142,7 @@ func (s *FileService) PrepareEditSession(fileID string) (StagingState, error) {
 		}
 	}()
 
-	state, err := runServiceJob(s, jobSpec{
+	state, err := s.runServiceJob(jobSpec{
 		Title:  "Prepare editing",
 		Kind:   jobKindSourceVerification,
 		FileID: fileID,
@@ -343,7 +343,7 @@ func (s *FileService) GetEditWindow(fileID string, startByte int64, maxBytes int
 	}
 	end := aligned + int64(len(raw))
 	if readEnd < size {
-		if nl := lastIndexByte(raw, '\n'); nl >= 0 {
+		if nl := bytes.LastIndexByte(raw, '\n'); nl >= 0 {
 			raw = raw[:nl+1]
 			end = aligned + int64(nl+1)
 		}
@@ -459,7 +459,7 @@ func (s *FileService) GetDiffWindow(fileID string, startByte int64, maxBytes int
 		return DiffWindow{}, err
 	}
 	if end < size {
-		if nl := lastIndexByte(ed, '\n'); nl >= 0 {
+		if nl := bytes.LastIndexByte(ed, '\n'); nl >= 0 {
 			ed = ed[:nl+1]
 			end = aligned + int64(nl+1)
 		}
@@ -718,7 +718,7 @@ func (s *FileService) saveCopyApproved(fileID string, dstPath string, approval s
 	if !f.Edit.MatchesSourceGeneration(f.Path, f.Generation) {
 		return SaveResult{}, manualedit.ErrSessionGenerationChanged
 	}
-	bytesWritten, err := withFileJobResult(s, fileID, "Save edited copy", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
+	bytesWritten, err := s.withFileJobResult(fileID, "Save edited copy", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
 		progress(0, "verifying source")
 		if err := f.Edit.ValidateSourceContext(ctx, func(completed, _ int64) {
 			progress(completed, "verifying prepared source")
@@ -795,15 +795,6 @@ func stagingState(f *session.File) StagingState {
 	}
 }
 
-func lastIndexByte(b []byte, c byte) int {
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] == c {
-			return i
-		}
-	}
-	return -1
-}
-
 // alignToLineStart returns the offset of the line start at or before start,
 // scanning back at most maxScan bytes.
 func alignToLineStart(readRange func(a, b int64) ([]byte, error), start int64, maxScan int64) (int64, error) {
@@ -818,7 +809,7 @@ func alignToLineStart(readRange func(a, b int64) ([]byte, error), start int64, m
 	if err != nil {
 		return 0, err
 	}
-	if nl := lastIndexByte(buf, '\n'); nl >= 0 {
+	if nl := bytes.LastIndexByte(buf, '\n'); nl >= 0 {
 		return from + int64(nl) + 1, nil
 	}
 	// No line boundary exists within the bounded backward scan. Starting at the

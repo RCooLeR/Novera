@@ -359,13 +359,11 @@ func TestConcurrentArtifactCreatesRemainSerializable(t *testing.T) {
 	errs := make(chan error, count)
 	for i := 0; i < count; i++ {
 		i := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			name := fmt.Sprintf("artifact-%02d.txt", i)
 			_, err := s.CreateArtifact(Artifact{Path: name})
 			errs <- err
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)

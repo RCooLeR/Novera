@@ -293,6 +293,19 @@ func TestLoadRepairsPersistedInvalidRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadPreservesDefaultsForLegacyNullMembers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"theme":null,"editor":null}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := (&Service{path: path}).Load()
+	want := defaults()
+	if got.Theme != want.Theme || got.Editor != want.Editor {
+		t.Fatalf("Load() = theme %q, editor %#v; want defaults %q, %#v", got.Theme, got.Editor, want.Theme, want.Editor)
+	}
+}
+
 func TestLoadMigratesBlankOllamaModel(t *testing.T) {
 	svc := &Service{path: filepath.Join(t.TempDir(), "settings.json")}
 	raw := []byte(`{"llm":{"provider":"ollama","baseURL":"http://localhost:11434/v1","model":""}}`)

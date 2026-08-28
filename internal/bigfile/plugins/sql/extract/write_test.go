@@ -32,7 +32,7 @@ func TestSplitByTableWritesOutputsAndManifest(t *testing.T) {
 	summary, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{
 		{Name: "users", CreateOffset: createUsers, InsertOffset: -1},
 		{Name: "orders", CreateOffset: createOrders, InsertOffset: -1},
-	}}, WriteOptions{PlanOptions: PlanOptions{OutputDir: outDir}})
+	}}, WriteOptions{OutputDir: outDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestSplitByTableWritesSHA256EvidenceWhenRequested(t *testing.T) {
 	outDir := filepath.Join(dir, "out")
 	summary, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{
 		{Name: "users", CreateOffset: 0, InsertOffset: -1},
-	}}, WriteOptions{PlanOptions: PlanOptions{OutputDir: outDir}, ComputeSHA256: true})
+	}}, WriteOptions{OutputDir: outDir, ComputeSHA256: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestSplitByTableUsesWholeSourceWhileEditableSliceIsDirty(t *testing.T) {
 	summary, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{
 		{Name: "users", CreateOffset: createUsers, InsertOffset: sliceStart},
 		{Name: "orders", CreateOffset: createOrders, InsertOffset: -1},
-	}}, WriteOptions{PlanOptions: PlanOptions{OutputDir: outDir}})
+	}}, WriteOptions{OutputDir: outDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestExtractTableWritesSelectedTableOnly(t *testing.T) {
 	summary, err := ExtractTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{
 		{Name: "users", CreateOffset: 0, InsertOffset: -1},
 		{Name: "orders", CreateOffset: int64(strings.Index(src, "CREATE TABLE orders")), InsertOffset: -1},
-	}}, "orders", WriteOptions{PlanOptions: PlanOptions{OutputDir: outDir}})
+	}}, "orders", WriteOptions{OutputDir: outDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestSplitByTableRejectsExistingManifestBeforeWritingOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{{Name: "users", CreateOffset: 0, InsertOffset: -1}}}, WriteOptions{PlanOptions: PlanOptions{OutputDir: outDir}})
+	_, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{{Name: "users", CreateOffset: 0, InsertOffset: -1}}}, WriteOptions{OutputDir: outDir})
 	if !errors.Is(err, fileio.ErrExists) {
 		t.Fatalf("err = %v, want ErrExists", err)
 	}
@@ -275,7 +275,7 @@ func TestSplitByTableExistingLaterOutputIsRejectedBeforeEarlierOutput(t *testing
 	_, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{
 		{Name: "users", CreateOffset: 0, InsertOffset: -1},
 		{Name: "orders", CreateOffset: int64(strings.Index(src, "CREATE TABLE orders")), InsertOffset: -1},
-	}}, WriteOptions{PlanOptions: PlanOptions{OutputDir: outDir}})
+	}}, WriteOptions{OutputDir: outDir})
 	if err == nil {
 		t.Fatal("expected conflict error")
 	}
@@ -304,7 +304,7 @@ func TestSplitByTableCancelPreservesCommittedOutputsAndReportsIncomplete(t *test
 		{Name: "users", CreateOffset: 0, InsertOffset: -1},
 		{Name: "orders", CreateOffset: int64(len(first)), InsertOffset: -1},
 	}}, WriteOptions{
-		PlanOptions: PlanOptions{OutputDir: outDir},
+		OutputDir: outDir,
 		Progress: func(done int64, total int64, outputs int) {
 			if !canceled && outputs >= 2 && done > int64(len(first)) {
 				canceled = true
@@ -315,8 +315,7 @@ func TestSplitByTableCancelPreservesCommittedOutputsAndReportsIncomplete(t *test
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
-	var incomplete *IncompleteWriteError
-	if !errors.As(err, &incomplete) {
+	if _, ok := errors.AsType[*IncompleteWriteError](err); !ok {
 		t.Fatalf("err = %T %v, want IncompleteWriteError", err, err)
 	}
 	if summary.Complete || len(summary.Outputs) != 1 || summary.Failure == "" {
@@ -347,7 +346,7 @@ func TestSplitByTableManifestRacePreservesOutputsAndCompetitor(t *testing.T) {
 	summary, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{
 		{Name: "users", CreateOffset: 0, InsertOffset: -1},
 	}}, WriteOptions{
-		PlanOptions: PlanOptions{OutputDir: outDir},
+		OutputDir: outDir,
 		Progress: func(done int64, total int64, outputs int) {
 			if createdCompetitor || done == 0 {
 				return
@@ -358,8 +357,7 @@ func TestSplitByTableManifestRacePreservesOutputsAndCompetitor(t *testing.T) {
 			}
 		},
 	})
-	var incomplete *IncompleteWriteError
-	if !errors.As(err, &incomplete) {
+	if _, ok := errors.AsType[*IncompleteWriteError](err); !ok {
 		t.Fatalf("err = %T %v, want IncompleteWriteError", err, err)
 	}
 	if summary.Complete || len(summary.Outputs) != 1 {
@@ -385,7 +383,7 @@ func TestSplitByTableSourceValidationFailurePreventsFirstOutput(t *testing.T) {
 	summary, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{
 		{Name: "users", CreateOffset: 0, InsertOffset: -1},
 	}}, WriteOptions{
-		PlanOptions: PlanOptions{OutputDir: outDir},
+		OutputDir: outDir,
 		ValidateSource: func(context.Context) error {
 			validationCalls++
 			return validationErr
@@ -424,7 +422,7 @@ func TestSplitByTableManifestValidationFailureRetainsValidatedOutputOnly(t *test
 	summary, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{
 		{Name: "users", CreateOffset: 0, InsertOffset: -1},
 	}}, WriteOptions{
-		PlanOptions: PlanOptions{OutputDir: outDir},
+		OutputDir: outDir,
 		ValidateSource: func(context.Context) error {
 			validationCalls++
 			if validationCalls == 1 {
@@ -436,8 +434,7 @@ func TestSplitByTableManifestValidationFailureRetainsValidatedOutputOnly(t *test
 	if !errors.Is(err, validationErr) {
 		t.Fatalf("err = %v, want manifest validation failure", err)
 	}
-	var incomplete *IncompleteWriteError
-	if !errors.As(err, &incomplete) {
+	if _, ok := errors.AsType[*IncompleteWriteError](err); !ok {
 		t.Fatalf("err = %T %v, want IncompleteWriteError", err, err)
 	}
 	if validationCalls != 2 {
@@ -469,7 +466,7 @@ func TestSplitByTablePreparedValidationRunsOnceForCompletionManifest(t *testing.
 	summary, err := SplitByTable(context.Background(), doc, srcPath, analyze.Summary{Tables: []analyze.Table{
 		{Name: "users", CreateOffset: 0, InsertOffset: -1},
 	}}, WriteOptions{
-		PlanOptions: PlanOptions{OutputDir: outDir},
+		OutputDir: outDir,
 		PrepareSourceValidation: func(context.Context) (func(context.Context) error, error) {
 			prepareCalls++
 			return func(context.Context) error {
@@ -515,8 +512,7 @@ func TestFinishWriteClassifiesCompletionManifestPublication(t *testing.T) {
 		if !errors.Is(err, sentinel) {
 			t.Fatalf("err = %v, want publication warning", err)
 		}
-		var incomplete *IncompleteWriteError
-		if errors.As(err, &incomplete) {
+		if _, ok := errors.AsType[*IncompleteWriteError](err); ok {
 			t.Fatalf("known visible completion manifest was classified incomplete: %v", err)
 		}
 		if !summary.Complete || summary.PublicationUncertain || summary.Failure != "" {
@@ -534,8 +530,7 @@ func TestFinishWriteClassifiesCompletionManifestPublication(t *testing.T) {
 		if !errors.Is(err, sentinel) {
 			t.Fatalf("err = %v, want publication warning", err)
 		}
-		var incomplete *IncompleteWriteError
-		if !errors.As(err, &incomplete) {
+		if _, ok := errors.AsType[*IncompleteWriteError](err); !ok {
 			t.Fatalf("err = %T %v, want IncompleteWriteError", err, err)
 		}
 		if summary.Complete || !summary.PublicationUncertain || summary.Failure == "" {

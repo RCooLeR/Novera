@@ -1745,11 +1745,9 @@ func (d *FileDocument) seedPriorityIndex(offset int64) {
 
 func (d *FileDocument) startPriorityIndexWorker() {
 	d.priorityOnce.Do(func() {
-		d.priorityWG.Add(1)
-		go func() {
-			defer d.priorityWG.Done()
+		d.priorityWG.Go(func() {
 			d.runPriorityIndexWorker()
-		}()
+		})
 	})
 }
 

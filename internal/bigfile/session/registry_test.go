@@ -120,9 +120,7 @@ func TestConcurrentReadEditAndReopen(t *testing.T) {
 	r, id := openTestRegistryFile(t)
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := 0; j < 40; j++ {
 				f, ok := r.Get(id)
 				if !ok {
@@ -131,12 +129,10 @@ func TestConcurrentReadEditAndReopen(t *testing.T) {
 				_, _ = f.Doc.ReadRange(0, 5)
 				f.Release()
 			}
-		}()
+		})
 	}
 	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := 0; j < 20; j++ {
 				f, ok := r.GetEdit(id)
 				if !ok {
@@ -146,7 +142,7 @@ func TestConcurrentReadEditAndReopen(t *testing.T) {
 				f.ResetEdits()
 				f.Release()
 			}
-		}()
+		})
 	}
 	for i := 0; i < 5; i++ {
 		f, err := r.Reopen(id)

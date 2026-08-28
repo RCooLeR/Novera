@@ -15,13 +15,11 @@ import (
 )
 
 func TestCompleteRejectsOversizedProviderResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", strconv.FormatInt(providerhttp.MaxCompletionResponseBytes+1, 10))
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer srv.Close()
-
 	s := &Service{http: srv.Client()}
 	_, err := s.complete(context.Background(), "run-oversize", srv.URL, "model", "", []wireMsg{{Role: "user", Content: "hello"}}, nil)
 	if !errors.Is(err, providerhttp.ErrResponseTooLarge) {
@@ -44,7 +42,6 @@ func TestCompleteDoesNotWriteProviderDebugLogByDefault(t *testing.T) {
 	}
 
 	srv := completionTestServer(t, `{"choices":[{"message":{"content":"private answer"}}]}`)
-	defer srv.Close()
 	s := &Service{http: srv.Client(), debug: debug}
 	got, err := s.complete(context.Background(), "run-default", srv.URL, "model", "", []wireMsg{{Role: "user", Content: "hello"}}, nil)
 	if err != nil {
@@ -68,7 +65,6 @@ func TestCompleteOptInDebugLogRedactsProviderContent(t *testing.T) {
 
 	response := `{"id":"chatcmpl-safe-id","model":"test-model","choices":[{"message":{"role":"assistant","content":"private answer","tool_calls":[{"id":"call-safe-id","type":"function","function":{"name":"write_file","arguments":"{\"content\":\"private file body\"}"}}]}}]}`
 	srv := completionTestServer(t, response)
-	defer srv.Close()
 	s := &Service{http: srv.Client(), debug: debug}
 	got, err := s.complete(context.Background(), "run-debug", srv.URL+"?access_token=do-not-log", "model", "", []wireMsg{{Role: "user", Content: "hello"}}, nil)
 	if err != nil {
@@ -140,7 +136,7 @@ func TestDebugResponsePreviewDropsUnknownFieldsAndRedactsEveryScalar(t *testing.
 
 func completionTestServer(t *testing.T, response string) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	return httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(response))
 	}))

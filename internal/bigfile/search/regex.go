@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 
 	"novera/internal/bigfile/regexutil"
 )
@@ -274,7 +275,7 @@ func FindRegexpBackward(ctx context.Context, r ReaderAtSize, re *regexp.Regexp, 
 			}
 		}
 
-		for i := len(matches) - 1; i >= 0; i-- {
+		for i := range slices.Backward(matches) {
 			index := i
 			if ringStart != 0 {
 				index = (ringStart + i) % len(matches)

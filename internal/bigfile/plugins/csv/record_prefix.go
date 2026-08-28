@@ -6,6 +6,7 @@ import (
 	stdcsv "encoding/csv"
 	"errors"
 	"io"
+	"slices"
 )
 
 // CompleteRecordPrefix returns a prefix ending on a parser-confirmed logical
@@ -58,8 +59,8 @@ func CompleteRecordPrefix(ctx context.Context, data []byte, delimiter rune, maxR
 // trimTrailingPartialRecord remains for the SQL preview path until that
 // root-owned implementation can migrate to parser-confirmed record boundaries.
 func trimTrailingPartialRecord(data []byte) ([]byte, bool) {
-	for i := len(data) - 1; i >= 0; i-- {
-		if data[i] == '\n' || data[i] == '\r' {
+	for i, b := range slices.Backward(data) {
+		if b == '\n' || b == '\r' {
 			return data[:i+1], true
 		}
 	}

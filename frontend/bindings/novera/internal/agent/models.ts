@@ -11,6 +11,8 @@ import { Create as $Create } from "@wailsio/runtime";
  * approved or denied — the approval/audit surface the UI reads back.
  */
 export class AuditEntry {
+    "formatVersion"?: number;
+
     /**
      * RFC3339
      */
@@ -20,7 +22,7 @@ export class AuditEntry {
     "tool": string;
 
     /**
-     * short, secret-free description of the args
+     * bounded target/size metadata; never raw free-form payloads
      */
     "summary": string;
 
@@ -35,7 +37,7 @@ export class AuditEntry {
     "status": string;
 
     /**
-     * clipped result/error
+     * bounded outcome metadata; never raw result/error text
      */
     "detail": string;
 

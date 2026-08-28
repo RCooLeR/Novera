@@ -51,7 +51,7 @@ func TestWithJobResultCancelUsesExactActiveIDAndClearsOwnership(t *testing.T) {
 	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := withJobResult(service, "Analyze SQL", func(ctx context.Context, _ func(int64, string)) (int, error) {
+		_, err := service.withJobResult("Analyze SQL", func(ctx context.Context, _ func(int64, string)) (int, error) {
 			close(started)
 			<-ctx.Done()
 			return 1, ctx.Err()
@@ -77,7 +77,7 @@ func TestWithJobResultCancelUsesExactActiveIDAndClearsOwnership(t *testing.T) {
 
 func TestWithJobResultRejectsStaleCancelAndConcurrentOperation(t *testing.T) {
 	service := NewFileService()
-	if _, err := withJobResult(service, "First complete", func(context.Context, func(int64, string)) (int, error) {
+	if _, err := service.withJobResult("First complete", func(context.Context, func(int64, string)) (int, error) {
 		return 1, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestWithJobResultRejectsStaleCancelAndConcurrentOperation(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := withJobResult(service, "Second", func(context.Context, func(int64, string)) (int, error) {
+		_, err := service.withJobResult("Second", func(context.Context, func(int64, string)) (int, error) {
 			close(started)
 			<-release
 			return 2, nil
@@ -103,7 +103,7 @@ func TestWithJobResultRejectsStaleCancelAndConcurrentOperation(t *testing.T) {
 	if err := service.CancelJob(firstID); !errors.Is(err, ErrJobIDMismatch) {
 		t.Fatalf("stale cancel error = %v, want ErrJobIDMismatch", err)
 	}
-	if _, err := withJobResult(service, "Overlap", func(context.Context, func(int64, string)) (string, error) {
+	if _, err := service.withJobResult("Overlap", func(context.Context, func(int64, string)) (string, error) {
 		return "unexpected", nil
 	}); !errors.Is(err, ErrJobAlreadyRunning) {
 		t.Fatalf("overlap error = %v, want ErrJobAlreadyRunning", err)
@@ -118,7 +118,7 @@ func TestServiceJobProgressEventsAreOwnedBoundedAndMonotonic(t *testing.T) {
 	service := NewFileService()
 	eventMu, events := installBigFileJobRecorder(service)
 	var lateProgress func(int64, int64, string)
-	_, err := runServiceJob(service, jobSpec{Title: "Progress", Kind: jobKindSQLAnalysis, FileID: "f1", Total: 10}, func(_ context.Context, progress func(int64, int64, string)) (int, error) {
+	_, err := service.runServiceJob(jobSpec{Title: "Progress", Kind: jobKindSQLAnalysis, FileID: "f1", Total: 10}, func(_ context.Context, progress func(int64, int64, string)) (int, error) {
 		lateProgress = progress
 		progress(-5, -2, strings.Repeat("é", 200))
 		progress(math.MaxInt64, 10, "done")
@@ -173,13 +173,13 @@ func TestServiceJobPanicAndEmitterFailureAlwaysReleaseOwnership(t *testing.T) {
 	manager.emit = func(string, any) { panic("transport failure") }
 	manager.mu.Unlock()
 
-	_, err := runServiceJob(service, jobSpec{Title: "panic"}, func(context.Context, func(int64, int64, string)) (int, error) {
+	_, err := service.runServiceJob(jobSpec{Title: "panic"}, func(context.Context, func(int64, int64, string)) (int, error) {
 		panic("deliberate")
 	})
 	if err == nil || !strings.Contains(err.Error(), "panicked") {
 		t.Fatalf("panic error = %v", err)
 	}
-	value, err := runServiceJob(service, jobSpec{Title: "next"}, func(_ context.Context, progress func(int64, int64, string)) (int, error) {
+	value, err := service.runServiceJob(jobSpec{Title: "next"}, func(_ context.Context, progress func(int64, int64, string)) (int, error) {
 		progress(1, 1, "done")
 		return 7, nil
 	})
@@ -198,7 +198,7 @@ func TestServiceJobFileCancellationTargetsOnlyMatchingOwner(t *testing.T) {
 	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := runServiceJob(service, jobSpec{Title: "owned", FileID: "f1", FileIDs: []string{"f2", "f1"}}, func(ctx context.Context, _ func(int64, int64, string)) (int, error) {
+		_, err := service.runServiceJob(jobSpec{Title: "owned", FileID: "f1", FileIDs: []string{"f2", "f1"}}, func(ctx context.Context, _ func(int64, int64, string)) (int, error) {
 			close(started)
 			<-ctx.Done()
 			return 0, ctx.Err()
@@ -257,7 +257,7 @@ func TestServiceJobSequenceExhaustionAndJobIDValidation(t *testing.T) {
 	manager.mu.Lock()
 	manager.seq = maxJobProgressValue
 	manager.mu.Unlock()
-	if _, err := withJobResult(service, "too late", func(context.Context, func(int64, string)) (int, error) {
+	if _, err := service.withJobResult("too late", func(context.Context, func(int64, string)) (int, error) {
 		return 1, nil
 	}); !errors.Is(err, ErrJobSequenceExhausted) {
 		t.Fatalf("error = %v, want ErrJobSequenceExhausted", err)
@@ -279,7 +279,7 @@ func TestBigFileJobEndCannotBeOvertakenByLateProgress(t *testing.T) {
 	done := make(chan struct{})
 	var progress func(int64, int64, string)
 	go func() {
-		_, _ = runServiceJob(service, jobSpec{Title: "ordered"}, func(_ context.Context, report func(int64, int64, string)) (int, error) {
+		_, _ = service.runServiceJob(jobSpec{Title: "ordered"}, func(_ context.Context, report func(int64, int64, string)) (int, error) {
 			progress = report
 			close(release)
 			return 1, nil
@@ -313,7 +313,7 @@ func TestServiceJobCancellationBeforeOutputPublicationPreservesDestination(t *te
 	releaseProducer := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := runServiceJob(service, jobSpec{Title: "cancel before publish", FileID: "f1"}, func(ctx context.Context, _ func(int64, int64, string)) (int, error) {
+		_, err := service.runServiceJob(jobSpec{Title: "cancel before publish", FileID: "f1"}, func(ctx context.Context, _ func(int64, int64, string)) (int, error) {
 			_, writeErr := writeSafeOutputContext(ctx, doc, source, destination, func(output io.Writer) error {
 				if _, err := output.Write([]byte("new-output")); err != nil {
 					return err
@@ -349,7 +349,7 @@ func TestServiceJobAtomicOutputCancellationWinsBeforePublication(t *testing.T) {
 	continueCommit := make(chan struct{})
 	result := make(chan error, 1)
 	go func() {
-		_, err := runServiceJob(service, jobSpec{Title: "cancel-first output"}, func(ctx context.Context, _ func(int64, int64, string)) (string, error) {
+		_, err := service.runServiceJob(jobSpec{Title: "cancel-first output"}, func(ctx context.Context, _ func(int64, int64, string)) (string, error) {
 			out, err := fileio.OpenAtomicOutput(path, nil, 0o600)
 			if err != nil {
 				return "", err
@@ -391,7 +391,7 @@ func TestServiceJobPublicationErrorMakesCancellationStale(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, err := runServiceJob(service, jobSpec{Title: "publication evidence"}, func(ctx context.Context, _ func(int64, int64, string)) (int, error) {
+		_, err := service.runServiceJob(jobSpec{Title: "publication evidence"}, func(ctx context.Context, _ func(int64, int64, string)) (int, error) {
 			err := service.jobs().publishAtomicOutput("job1", func() error { return wantPublication })
 			close(published)
 			<-release
@@ -419,7 +419,7 @@ func TestServiceJobAtomicOutputPublicationMakesLateCancellationStale(t *testing.
 	ctxCanceled := make(chan struct{}, 1)
 	result := make(chan error, 1)
 	go func() {
-		_, err := runServiceJob(service, jobSpec{Title: "atomic commit"}, func(ctx context.Context, _ func(int64, int64, string)) (string, error) {
+		_, err := service.runServiceJob(jobSpec{Title: "atomic commit"}, func(ctx context.Context, _ func(int64, int64, string)) (string, error) {
 			out, err := fileio.OpenAtomicOutput(path, nil, 0o600)
 			if err != nil {
 				return "", err
@@ -484,7 +484,7 @@ func TestServiceJobOutputPublicationMakesLateCancellationStale(t *testing.T) {
 
 	jobDone := make(chan error, 1)
 	go func() {
-		_, err := runServiceJob(service, jobSpec{Title: "publish", FileID: "f1"}, func(ctx context.Context, _ func(int64, int64, string)) (int, error) {
+		_, err := service.runServiceJob(jobSpec{Title: "publish", FileID: "f1"}, func(ctx context.Context, _ func(int64, int64, string)) (int, error) {
 			_, writeErr := writeSafeOutputContext(ctx, doc, source, destination, func(output io.Writer) error {
 				_, err := output.Write([]byte("complete-output"))
 				return err

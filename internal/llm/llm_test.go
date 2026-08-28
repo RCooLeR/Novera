@@ -68,12 +68,10 @@ func TestResolveKeyRejectsQuarantinedLegacyRefAtPointOfUse(t *testing.T) {
 }
 
 func TestListModelsRejectsOversizedResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", strconv.FormatInt(providerhttp.MaxModelListResponseBytes+1, 10))
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer srv.Close()
-
 	s := &Service{http: srv.Client()}
 	_, err := s.listModels(context.Background(), srv.URL, "")
 	if !errors.Is(err, providerhttp.ErrResponseTooLarge) {
@@ -85,15 +83,13 @@ func TestListModelsRejectsOversizedResponse(t *testing.T) {
 }
 
 func TestListModelsPreservesJSONParsingAndSorting(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" {
 			t.Errorf("path = %q, want /models", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"id":" zeta "},{"id":""},{"id":"alpha"},{"id":"alpha"}]}`))
 	}))
-	defer srv.Close()
-
 	s := &Service{http: srv.Client()}
 	models, err := s.listModels(context.Background(), srv.URL, "")
 	if err != nil {
@@ -122,12 +118,10 @@ func TestListModelsRejectsMalformedShapeAndUnboundedFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(tt.body))
 			}))
-			defer srv.Close()
-
 			s := &Service{http: srv.Client()}
 			_, err := s.listModels(context.Background(), srv.URL, "")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -138,13 +132,11 @@ func TestListModelsRejectsMalformedShapeAndUnboundedFields(t *testing.T) {
 }
 
 func TestConsumeChatStreamRejectsOversizedResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Content-Length", strconv.FormatInt(providerhttp.MaxStreamResponseBytes+1, 10))
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer srv.Close()
-
 	resp, err := srv.Client().Get(srv.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -160,15 +152,13 @@ func TestConsumeChatStreamRejectsOversizedResponse(t *testing.T) {
 }
 
 func TestConsumeChatStreamPreservesSSEDeltaBehavior(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("event: message\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
-	defer srv.Close()
-
 	resp, err := srv.Client().Get(srv.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -214,12 +204,10 @@ func TestConsumeChatStreamRejectsMalformedOrTruncatedProtocol(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				_, _ = w.Write([]byte(tt.body))
 			}))
-			defer srv.Close()
-
 			resp, err := srv.Client().Get(srv.URL)
 			if err != nil {
 				t.Fatal(err)
@@ -236,13 +224,11 @@ func TestConsumeChatStreamRejectsMalformedOrTruncatedProtocol(t *testing.T) {
 func TestConsumeChatStreamRejectsOversizedSSEEvent(t *testing.T) {
 	first := strings.Repeat("a", maxSSEEventBytes/2+1)
 	second := strings.Repeat("b", maxSSEEventBytes/2+1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: " + first + "\n"))
 		_, _ = w.Write([]byte("data: " + second + "\n\n"))
 	}))
-	defer srv.Close()
-
 	resp, err := srv.Client().Get(srv.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +241,7 @@ func TestConsumeChatStreamRejectsOversizedSSEEvent(t *testing.T) {
 }
 
 func TestConsumeChatStreamParsesSSEEventsAndAzureAnnotations(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("\ufeff: initial comment\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":null,\"prompt_filter_results\":[{}]}\n\n"))
@@ -268,8 +254,6 @@ func TestConsumeChatStreamParsesSSEEventsAndAzureAnnotations(t *testing.T) {
 		// terminal token. It is metadata, not another completion or delta.
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"content_filter_results\":{\"hate\":{}}}]}\n\n"))
 	}))
-	defer srv.Close()
-
 	resp, err := srv.Client().Get(srv.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -287,13 +271,11 @@ func TestConsumeChatStreamParsesSSEEventsAndAzureAnnotations(t *testing.T) {
 }
 
 func TestConsumeChatStreamAcceptsTerminalChoiceWithoutDone(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"total_tokens\":1}}\n\n"))
 	}))
-	defer srv.Close()
-
 	resp, err := srv.Client().Get(srv.URL)
 	if err != nil {
 		t.Fatal(err)

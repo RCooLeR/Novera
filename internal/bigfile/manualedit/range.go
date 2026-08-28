@@ -1,5 +1,7 @@
 package manualedit
 
+import "slices"
+
 func RangeOverlaps(start int64, end int64, ranges []Range) bool {
 	if end <= start {
 		end = start + 1
@@ -28,8 +30,8 @@ func FindNextRangeIndex(ranges []Range, current int64, forward bool) int {
 		}
 		return 0
 	}
-	for i := len(ranges) - 1; i >= 0; i-- {
-		if ranges[i].Start < current {
+	for i, candidate := range slices.Backward(ranges) {
+		if candidate.Start < current {
 			return i
 		}
 	}

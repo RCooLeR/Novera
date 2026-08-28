@@ -97,25 +97,20 @@ func previewLines(kind PreviewKind, text []byte, maxLines int, maxRunes int) []s
 func prefixPreviewLines(label string, text []byte, maxLines int, maxRunes int) []string {
 	normalized := strings.ReplaceAll(string(text), "\r\n", "\n")
 	normalized = strings.ReplaceAll(normalized, "\r", "\n")
-	parts := strings.Split(normalized, "\n")
-	if len(parts) == 0 {
-		parts = []string{""}
-	}
-	if len(parts) > maxLines {
-		parts = append(parts[:maxLines], "...")
-	}
-	out := make([]string, 0, len(parts))
-	for i, part := range parts {
-		if i == len(parts)-1 && part == "..." {
+	out := make([]string, 0, min(maxLines, 15)+1)
+	i := 0
+	for part := range strings.SplitSeq(normalized, "\n") {
+		if i == maxLines {
 			out = append(out, label+" ...")
-			continue
+			break
 		}
 		part = clipRunes(part, maxRunes)
 		if i == 0 {
 			out = append(out, label+": "+part)
-			continue
+		} else {
+			out = append(out, "  "+part)
 		}
-		out = append(out, "  "+part)
+		i++
 	}
 	return out
 }

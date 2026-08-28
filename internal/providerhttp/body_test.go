@@ -38,7 +38,7 @@ func TestReadAllRejectsDeclaredOversizeBeforeReading(t *testing.T) {
 }
 
 func TestReadAllRejectsOversizedChunkedResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
 		if f, ok := w.(http.Flusher); ok {
@@ -46,8 +46,6 @@ func TestReadAllRejectsOversizedChunkedResponse(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, "123456")
 	}))
-	defer srv.Close()
-
 	resp, err := srv.Client().Get(srv.URL)
 	if err != nil {
 		t.Fatal(err)

@@ -847,7 +847,7 @@ var tableElementKeywords = wordSet(`
 
 func wordSet(words string) map[string]bool {
 	set := make(map[string]bool)
-	for _, word := range strings.Fields(words) {
+	for word := range strings.FieldsSeq(words) {
 		set[word] = true
 	}
 	return set
@@ -1315,7 +1315,7 @@ func tokenIsKeywordAt(tokens []sqlToken, pos int, keyword string) bool {
 }
 
 var semanticKeywords = func() map[string]bool {
-	words := strings.Fields(`
+	result := wordSet(`
 		array as asc auto_increment autoincrement bigint binary bit blob bool boolean by
 		cascade case cast char character check collate column comment compression conflict
 		constraint create current_date current_time current_timestamp date datetime decimal
@@ -1327,10 +1327,6 @@ var semanticKeywords = func() map[string]bool {
 		zerofill zone precision always rowid engine charset fulltext index temporary temp
 		unlogged replace or partition inherits strict tablespace
 	`)
-	result := make(map[string]bool, len(words))
-	for _, word := range words {
-		result[word] = true
-	}
 	for word := range knownTypeWords {
 		result[word] = true
 	}

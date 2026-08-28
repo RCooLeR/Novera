@@ -168,7 +168,7 @@ func (s *FileService) SqlAnalyze(fileID string) (SqlSummaryResult, error) {
 	// Register the cancellable job before acquiring a document lease. Close and
 	// refresh therefore never wait behind an analysis that is invisible to the
 	// job manager.
-	return withFileJobResult(s, fileID, "Analyze SQL dump", jobKindSQLAnalysis, func(ctx context.Context, progress func(int64, string)) (SqlSummaryResult, error) {
+	return s.withFileJobResult(fileID, "Analyze SQL dump", jobKindSQLAnalysis, func(ctx context.Context, progress func(int64, string)) (SqlSummaryResult, error) {
 		f, ok := s.reg.Get(fileID)
 		if !ok {
 			return SqlSummaryResult{}, fmt.Errorf("unknown file id %q", fileID)
@@ -271,7 +271,7 @@ func (s *FileService) SqlExtractTableViaDialog(fileID string, tableName string) 
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	written, err := withFileJobResult(s, fileID, "Extract SQL table", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
+	written, err := s.withFileJobResult(fileID, "Extract SQL table", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
 		current, currentSummary, err := s.sqlSummaryForGeneration(fileID, generation)
 		if err != nil {
 			return 0, sqlAnalysisAfterDialogError(err)
@@ -389,7 +389,7 @@ func (s *FileService) SqlSplitByTableViaDialog(fileID string) (TransformResult, 
 	if err != nil || strings.TrimSpace(dir) == "" {
 		return TransformResult{}, err
 	}
-	sum, err := withFileJobResult(s, fileID, "Split SQL dump", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (sqlextract.WriteSummary, error) {
+	sum, err := s.withFileJobResult(fileID, "Split SQL dump", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (sqlextract.WriteSummary, error) {
 		current, summary, err := s.sqlSummaryForGeneration(fileID, generation)
 		if err != nil {
 			return sqlextract.WriteSummary{}, sqlAnalysisAfterDialogError(err)
@@ -414,7 +414,7 @@ func (s *FileService) SqlSplitByTableViaDialog(fileID string) (TransformResult, 
 			return validateCtx.Err()
 		}
 		return sqlextract.SplitByTable(ctx, verifiedSource, current.Path, summary, sqlextract.WriteOptions{
-			PlanOptions:    sqlextract.PlanOptions{OutputDir: dir},
+			OutputDir:      dir,
 			Progress:       func(done int64, _ int64, _ int) { progress(done, "bytes written") },
 			ValidateSource: validateState,
 			ValidateCompletion: func(validateCtx context.Context) error {
@@ -461,7 +461,7 @@ func (s *FileService) SqlExtractSchemaViaDialog(fileID, tableName string) (Trans
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	written, err := withFileJobResult(s, fileID, "Extract SQL schema", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
+	written, err := s.withFileJobResult(fileID, "Extract SQL schema", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
 		current, currentSummary, err := s.sqlSummaryForGeneration(fileID, generation)
 		if err != nil {
 			return 0, sqlAnalysisAfterDialogError(err)
@@ -510,7 +510,7 @@ func (s *FileService) SqlExtractDataViaDialog(fileID, tableName string) (Transfo
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	written, err := withFileJobResult(s, fileID, "Extract SQL data", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
+	written, err := s.withFileJobResult(fileID, "Extract SQL data", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
 		current, currentSummary, err := s.sqlSummaryForGeneration(fileID, generation)
 		if err != nil {
 			return 0, sqlAnalysisAfterDialogError(err)
@@ -710,8 +710,7 @@ func transformResultAfterPublication(result TransformResult, err error) (Transfo
 	if err == nil {
 		return result, nil
 	}
-	var publication *fileio.PublicationError
-	if errors.As(err, &publication) &&
+	if publication, ok := errors.AsType[*fileio.PublicationError](err); ok &&
 		!publication.LocationUncertain &&
 		publication.FinalPath == result.OutputPath {
 		if result.Note != "" {
@@ -797,7 +796,7 @@ func (s *FileService) SqlSampleFixtureViaDialog(fileID string, rowsPerTable int)
 		return TransformResult{}, err
 	}
 
-	size, err := withFileJobResult(s, fileID, "Create SQL fixture", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
+	size, err := s.withFileJobResult(fileID, "Create SQL fixture", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (int64, error) {
 		current, currentSummary, err := s.sqlSummaryForGeneration(fileID, generation)
 		if err != nil {
 			return 0, sqlAnalysisAfterDialogError(err)
@@ -998,7 +997,7 @@ func (s *FileService) SqlReplaceViaDialog(fileID, find, replaceWith string, rege
 		return TransformResult{}, err
 	}
 
-	summary, err := withFileJobResult(s, fileID, "Replace SQL text", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (sqlReplaceJobSummary, error) {
+	summary, err := s.withFileJobResult(fileID, "Replace SQL text", jobKindTransform, func(ctx context.Context, progress func(int64, string)) (sqlReplaceJobSummary, error) {
 		current, ok := s.reg.Get(fileID)
 		if !ok {
 			return sqlReplaceJobSummary{}, fmt.Errorf("unknown file id %q", fileID)
@@ -1106,7 +1105,7 @@ func (s *FileService) SqlReshapeInsertsViaDialog(fileID, mode string, batchSize 
 	if err != nil || strings.TrimSpace(dst) == "" {
 		return TransformResult{}, err
 	}
-	sum, err := withFileJobResult(s, fileID, "Reshape SQL inserts", jobKindTransform, func(ctx context.Context, _ func(int64, string)) (sqlreshape.Summary, error) {
+	sum, err := s.withFileJobResult(fileID, "Reshape SQL inserts", jobKindTransform, func(ctx context.Context, _ func(int64, string)) (sqlreshape.Summary, error) {
 		current, ok := s.reg.Get(fileID)
 		if !ok {
 			return sqlreshape.Summary{}, fmt.Errorf("unknown file id %q", fileID)
@@ -1170,7 +1169,7 @@ type SqlSchemaDiffResult struct {
 // analyzed dumps (A = baseline, B = new), including constraints, indexes,
 // options, qualified identity, and column order.
 func (s *FileService) SqlSchemaDiff(fileIDA, fileIDB string) (SqlSchemaDiffResult, error) {
-	return runServiceJob(s, jobSpec{
+	return s.runServiceJob(jobSpec{
 		Title:   "Compare SQL schemas",
 		Kind:    "sql-schema-diff",
 		FileID:  fileIDA,

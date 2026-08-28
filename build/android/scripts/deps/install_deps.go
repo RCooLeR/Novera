@@ -6,7 +6,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+)
+
+const (
+	compileSDK      = "37"
+	platformVersion = "37.0"
+	buildTools      = "37.0.0"
+	ndkVersion      = "29.0.14206865"
 )
 
 func main() {
@@ -31,6 +39,7 @@ func main() {
 		// Try common default locations
 		home, _ := os.UserHomeDir()
 		possiblePaths := []string{
+			filepath.Join(home, "AppData", "Local", "Android", "Sdk"),
 			filepath.Join(home, "Android", "Sdk"),
 			filepath.Join(home, "Library", "Android", "sdk"),
 			"/usr/local/share/android-sdk",
@@ -47,6 +56,14 @@ func main() {
 		errors = append(errors, "ANDROID_HOME not set. Install Android Studio and set ANDROID_HOME environment variable")
 	} else {
 		fmt.Printf("✓ ANDROID_HOME: %s\n", androidHome)
+		platformDir := filepath.Join(androidHome, "platforms", "android-"+platformVersion)
+		if _, err := os.Stat(platformDir); err != nil {
+			errors = append(errors, "Android SDK Platform "+compileSDK+" is not installed")
+		}
+		buildToolsDir := filepath.Join(androidHome, "build-tools", buildTools)
+		if _, err := os.Stat(buildToolsDir); err != nil {
+			errors = append(errors, "Android SDK Build-Tools "+buildTools+" is not installed")
+		}
 	}
 
 	// Check adb
@@ -76,29 +93,20 @@ func main() {
 	// Check NDK
 	ndkHome := os.Getenv("ANDROID_NDK_HOME")
 	if ndkHome == "" && androidHome != "" {
-		// Look for NDK in default location
-		ndkDir := filepath.Join(androidHome, "ndk")
-		if entries, err := os.ReadDir(ndkDir); err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() {
-					ndkHome = filepath.Join(ndkDir, entry.Name())
-					break
-				}
-			}
-		}
+		ndkHome = filepath.Join(androidHome, "ndk", ndkVersion)
 	}
 
-	if ndkHome == "" {
-		errors = append(errors, "Android NDK not found. Install NDK via Android Studio > SDK Manager > SDK Tools > NDK (Side by side)")
+	if !hasNDKVersion(ndkHome, ndkVersion) {
+		errors = append(errors, "Android NDK "+ndkVersion+" not found. Install that exact side-by-side version")
 	} else {
 		fmt.Printf("✓ Android NDK: %s\n", ndkHome)
 	}
 
 	// Check Java
-	if !checkCommand("java", "-version") {
-		errors = append(errors, "Java not found. Install JDK 11+ (OpenJDK recommended)")
+	if major, ok := javaMajorVersion(); !ok || major < 17 {
+		errors = append(errors, "JDK 17 or newer is required by Android Gradle Plugin 9.3")
 	} else {
-		fmt.Println("✓ Java is installed")
+		fmt.Printf("✓ Java %d is installed\n", major)
 	}
 
 	// Check for AVD (Android Virtual Device)
@@ -124,23 +132,57 @@ func main() {
 		fmt.Println("Setup instructions:")
 		fmt.Println("1. Install Android Studio: https://developer.android.com/studio")
 		fmt.Println("2. Open SDK Manager and install:")
-		fmt.Println("   - Android SDK Platform (API 34)")
-		fmt.Println("   - Android SDK Build-Tools")
+		fmt.Println("   - Android SDK Platform (API " + compileSDK + ")")
+		fmt.Println("   - Android SDK Build-Tools " + buildTools)
 		fmt.Println("   - Android SDK Platform-Tools")
 		fmt.Println("   - Android Emulator")
-		fmt.Println("   - NDK (Side by side)")
+		fmt.Println("   - NDK (Side by side) " + ndkVersion)
 		fmt.Println("3. Set environment variables:")
-		if runtime.GOOS == "darwin" {
+		switch runtime.GOOS {
+		case "windows":
+			fmt.Println(`   # PowerShell`)
+			fmt.Println(`   $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"`)
+			fmt.Println(`   $env:Path += ";$env:ANDROID_HOME\platform-tools;$env:ANDROID_HOME\emulator"`)
+		case "darwin":
 			fmt.Println("   export ANDROID_HOME=$HOME/Library/Android/sdk")
-		} else {
+			fmt.Println("   export PATH=$PATH:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator")
+		default:
 			fmt.Println("   export ANDROID_HOME=$HOME/Android/Sdk")
+			fmt.Println("   export PATH=$PATH:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator")
 		}
-		fmt.Println("   export PATH=$PATH:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator")
 		fmt.Println("4. Create an AVD via Android Studio > Tools > Device Manager")
 		os.Exit(1)
 	}
 
 	fmt.Println("✓ All Android development dependencies are installed!")
+}
+
+func hasNDKVersion(path, want string) bool {
+	data, err := os.ReadFile(filepath.Join(path, "source.properties"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "Pkg.Revision = "+want)
+}
+
+func javaMajorVersion() (int, bool) {
+	output, err := exec.Command("java", "-version").CombinedOutput()
+	if err != nil {
+		return 0, false
+	}
+	versionLine := string(output)
+	const marker = "version \""
+	start := strings.Index(versionLine, marker)
+	if start < 0 {
+		return 0, false
+	}
+	versionLine = versionLine[start+len(marker):]
+	end := strings.IndexByte(versionLine, '"')
+	if end < 0 {
+		return 0, false
+	}
+	major, err := strconv.Atoi(strings.SplitN(versionLine[:end], ".", 2)[0])
+	return major, err == nil
 }
 
 func checkCommand(name string, args ...string) bool {
