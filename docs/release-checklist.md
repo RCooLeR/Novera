@@ -5,6 +5,11 @@ This checklist is normative. The failing `release-gate` in
 is proven for the exact tag commit and the repository owner deliberately
 approves publication.
 
+Application commands run in `src/` (frontend commands in `src/frontend/`). The
+root Task facade still writes artifacts to root `bin/`; workflow and governance
+files remain at the repository root. See the
+[repository layout](../README.md#project-layout).
+
 ## Governance and identity
 
 - [ ] The copyright owner selected and committed the project license and

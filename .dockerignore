@@ -1,6 +1,8 @@
 **
 !.dockerignore
-!build/
-build/**
-!build/docker/
-!build/docker/Dockerfile.cross
+!src/
+src/**
+!src/build/
+src/build/**
+!src/build/docker/
+!src/build/docker/Dockerfile.cross

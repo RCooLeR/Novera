@@ -1,0 +1,213 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { sortIndicator, type Sort } from "../lib/grid";
+import { virtualRange } from "../lib/virtualRange";
+
+// A windowed, sortable result grid: only the rows in (and near) the viewport are
+// in the DOM, with spacer rows preserving scroll height — so a 5000-row result
+// stays smooth. Column widths are computed once per dataset (content-aware) and
+// the layout is fixed, so columns don't jump as rows scroll. The real row
+// height is measured after render to keep the window math drift-free.
+const OVERSCAN = 10;
+const CH = 7.6; // approx px per monospace char at our font size
+const CELL_PAD = 22; // horizontal padding + border, px
+const MIN_COL = 5; // chars
+const MAX_COL = 60; // chars
+const WIDTH_SAMPLE = 1000; // rows scanned for width (kept stable thereafter)
+
+// Rainbow-CSV palette (ported from Quarry): each column gets its own colour so a
+// delimited file's fields are visually separable. Cycled past 8 columns.
+const CSV_PALETTE = ["#e06c75", "#d19a66", "#e5c07b", "#98c379", "#56b6c2", "#61afef", "#c678dd", "#b48ead"];
+
+export default function VirtualGrid({
+  columns,
+  rows,
+  nulls,
+  sort,
+  onSort,
+  onNearEnd,
+  loadingMore,
+  totalRows,
+  windowStart,
+  onVisibleRange,
+  rainbow,
+}: {
+  columns: string[];
+  rows: string[][];
+  // Optional mask parallel to rows: true marks a real SQL NULL, so NULL styling
+  // is keyed off identity rather than the literal text "NULL" (which a real value
+  // could also be). Omitted for non-DB grids (CSV/XLSX), which have no NULLs.
+  nulls?: boolean[][];
+  sort: Sort;
+  onSort: (col: number) => void;
+  // Fired when the rendered window reaches the end of the loaded rows, so the
+  // parent can fetch the next page (lazy loading for large files).
+  onNearEnd?: () => void;
+  loadingMore?: boolean;
+  // --- windowed mode (large files) ---
+  // When totalRows is provided, the grid virtualizes over the FULL dataset:
+  // `rows` is only the loaded window starting at absolute index `windowStart`,
+  // unloaded rows render as placeholders, and onVisibleRange reports the absolute
+  // [start,end) so the parent can fetch the covering window.
+  totalRows?: number;
+  windowStart?: number;
+  onVisibleRange?: (start: number, end: number) => void;
+  // Colour each column with the rainbow-CSV palette (CSV/TSV grids only).
+  rainbow?: boolean;
+}) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rowRef = useRef<HTMLTableRowElement | null>(null);
+  const headerRef = useRef<HTMLTableRowElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(480);
+  const [rowH, setRowH] = useState(25);
+  const [headerH, setHeaderH] = useState(25);
+
+  const colWidths = useMemo(() => {
+    const chars = columns.map((c) => c.length);
+    const n = Math.min(rows.length, WIDTH_SAMPLE);
+    for (let r = 0; r < n; r++) {
+      const row = rows[r];
+      for (let i = 0; i < chars.length; i++) {
+        const len = row[i] ? row[i].length : 0;
+        if (len > chars[i]) chars[i] = len;
+      }
+    }
+    return chars.map((c) => Math.round(Math.min(Math.max(c, MIN_COL), MAX_COL) * CH + CELL_PAD));
+  }, [columns, rows]);
+
+  const windowed = totalRows != null;
+  const ws = windowStart ?? 0;
+  const total = windowed ? totalRows : rows.length;
+  const rownumW = Math.max(40, String(total).length * 9 + 16);
+  const totalW = rownumW + colWidths.reduce((a, b) => a + b, 0);
+
+  // Observe container changes independently of React renders (window resizing
+  // and panel splitters can change the viewport without changing grid props).
+  // Avoid measuring layout on every scroll-driven render.
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const measure = () => {
+      if (element.clientHeight > 0) setViewportH(element.clientHeight);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  // Measure a real row when data changes so spacer math remains drift-free.
+  useLayoutEffect(() => {
+    if (rowRef.current) {
+      const h = rowRef.current.getBoundingClientRect().height;
+      if (h > 0 && Math.abs(h - rowH) > 0.5) setRowH(h);
+    }
+    if (headerRef.current) {
+      const h = headerRef.current.getBoundingClientRect().height;
+      if (h > 0 && Math.abs(h - headerH) > 0.5) setHeaderH(h);
+    }
+  }, [rows, rowH, headerH]);
+
+  const { start, end, top, topPad, bottomPad: botPad } = virtualRange(total, scrollTop, viewportH, rowH, OVERSCAN, headerH);
+  const colSpan = columns.length + 1;
+
+  useLayoutEffect(() => {
+    if (top !== scrollTop) {
+      if (scrollRef.current) scrollRef.current.scrollTop = top;
+      setScrollTop(top);
+    }
+  }, [top, scrollTop]);
+
+  // Append mode: ask the parent for more when the viewport reaches loaded rows.
+  useEffect(() => {
+    if (onNearEnd && !windowed && total > 0 && end >= total) onNearEnd();
+  }, [onNearEnd, windowed, end, total]);
+
+  // Windowed mode: report the absolute visible range so the parent can load the
+  // covering window (the parent debounces and guards against redundant fetches).
+  useEffect(() => {
+    if (onVisibleRange && windowed) onVisibleRange(start, end);
+  }, [onVisibleRange, windowed, start, end]);
+
+  return (
+    <div className="vgrid" ref={scrollRef} onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}>
+      <table className="dbq__table vgrid__table" style={{ width: totalW }}>
+        <colgroup>
+          <col style={{ width: rownumW }} />
+          {colWidths.map((w, i) => (
+            <col key={i} style={{ width: w }} />
+          ))}
+        </colgroup>
+        <thead>
+          <tr ref={headerRef}>
+            <th className="dbq__rownum">#</th>
+            {columns.map((c, i) => (
+              <th
+                key={i}
+                className="dbq__sortable"
+                style={rainbow ? { color: CSV_PALETTE[i % CSV_PALETTE.length] } : undefined}
+                aria-sort={sort?.col === i ? (sort.dir === 1 ? "ascending" : "descending") : "none"}
+              >
+                <button type="button" className="dbq__sortbtn" onClick={() => onSort(i)}>
+                  {c}
+                  <span aria-hidden="true">{sortIndicator(sort, i)}</span>
+                </button>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {topPad > 0 && (
+            <tr aria-hidden style={{ height: topPad }}>
+              <td colSpan={colSpan} />
+            </tr>
+          )}
+          {Array.from({ length: Math.max(0, end - start) }, (_, vi) => {
+            const ri = start + vi;
+            const li = ri - ws; // index within the loaded window
+            const row = li >= 0 && li < rows.length ? rows[li] : null;
+            return (
+              <tr key={ri} ref={vi === 0 ? rowRef : undefined} style={{ height: rowH }}>
+                <td className="dbq__rownum">{ri + 1}</td>
+                {row
+                  ? row.map((cell, ci) => (
+                      <td
+                        key={ci}
+                        className={nulls?.[li]?.[ci] ? "dbq__null" : ""}
+                        style={rainbow ? { color: CSV_PALETTE[ci % CSV_PALETTE.length] } : undefined}
+                      >
+                        {cell}
+                      </td>
+                    ))
+                  : columns.map((_, ci) => (
+                      <td key={ci} className="vgrid__pending">
+                        ·
+                      </td>
+                    ))}
+              </tr>
+            );
+          })}
+          {botPad > 0 && (
+            <tr aria-hidden style={{ height: botPad }}>
+              <td colSpan={colSpan} />
+            </tr>
+          )}
+          {loadingMore && (
+            <tr>
+              <td className="dbq__empty" colSpan={colSpan}>
+                Loading more…
+              </td>
+            </tr>
+          )}
+          {total === 0 && !loadingMore && (
+            <tr>
+              <td className="dbq__empty" colSpan={colSpan}>
+                No rows
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}

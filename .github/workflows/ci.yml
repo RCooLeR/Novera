@@ -14,11 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.27.0"
+  GO_VERSION: "1.27.1"
   GOTOOLCHAIN: local
-  NODE_VERSION: "24.20.0"
+  NODE_VERSION: "24.21.0"
   TASK_VERSION: "v3.53.1"
-  WAILS_VERSION: "v3.0.0-beta.15"
+  WAILS_VERSION: "v3.0.0-beta.23"
 
 jobs:
   goreleaser-check:
@@ -33,7 +33,7 @@ jobs:
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
-          version: "v2.18.0"
+          version: "v2.18.2"
           install-only: true
 
       - name: Check GoReleaser config
@@ -60,13 +60,14 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+          cache-dependency-path: src/go.sum
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: src/frontend/package-lock.json
 
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
@@ -87,13 +88,13 @@ jobs:
 
       - name: Verify Go module files
         run: |
-          go mod verify
-          go mod tidy -diff
+          go -C src mod verify
+          go -C src mod tidy -diff
 
-      # Build renderer assets before compiling the root package: main.go embeds
-      # frontend/dist, which does not exist in a clean checkout.
+      # Build renderer assets before compiling the module's main package:
+      # src/main.go embeds frontend/dist relative to src/.
       - name: Frontend checks and embeddable production assets
-        working-directory: frontend
+        working-directory: src/frontend
         run: |
           npm ci
           npm audit --audit-level=moderate
@@ -104,7 +105,7 @@ jobs:
 
       - name: Go tests
         if: runner.os != 'Windows'
-        run: go test . ./internal/...
+        run: go -C src test . ./internal/... ./build/scripts
 
       - name: Go tests
         if: runner.os == 'Windows'
@@ -112,16 +113,20 @@ jobs:
         run: |
           $env:GOTMPDIR = Join-Path $pwd ".gotmp-ci"
           New-Item -ItemType Directory -Force $env:GOTMPDIR | Out-Null
-          go test . ./internal/...
+          go -C src test . ./internal/... ./build/scripts
 
       - name: Go vet
-        run: go vet . ./internal/...
+        run: go -C src vet . ./internal/... ./build/scripts
+
+      - name: Go race tests
+        if: runner.os == 'Linux'
+        run: go -C src test -race -timeout 5m . ./internal/...
 
       - name: Production build
         run: task build
 
       - name: Assert build did not mutate tracked source
-        run: git diff --exit-code -- go.mod go.sum frontend/bindings
+        run: git diff --exit-code -- src/go.mod src/go.sum src/frontend/bindings
 
   go-vulnerability-check:
     name: Go vulnerability scan
@@ -136,6 +141,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+          cache-dependency-path: src/go.sum
 
       - name: Install Linux desktop dependencies
         run: |
@@ -148,17 +154,18 @@ jobs:
             libgtk-4-dev \
             libwebkitgtk-6.0-dev
 
-      # govulncheck loads the root package, whose production entry point embeds
-      # frontend/dist. The renderer itself is not executed by this analysis.
+      # govulncheck loads the module's main package, whose production entry point
+      # embeds src/frontend/dist. The renderer is not executed by this analysis.
       - name: Prepare embeddable frontend assets
         run: |
-          mkdir -p frontend/dist
-          printf '<!doctype html><title>govulncheck placeholder</title>\n' > frontend/dist/index.html
+          mkdir -p src/frontend/dist
+          printf '<!doctype html><title>govulncheck placeholder</title>\n' > src/frontend/dist/index.html
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
 
       - name: Scan reachable Go vulnerabilities
+        working-directory: src
         run: govulncheck . ./internal/...
 
   clean-export:
@@ -182,13 +189,14 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+          cache-dependency-path: src/go.sum
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: src/frontend/package-lock.json
 
       - name: Install Linux desktop dependencies
         run: |
@@ -210,10 +218,10 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/novera-export"
-          go mod verify
-          go mod tidy -diff
+          go -C src mod verify
+          go -C src mod tidy -diff
           (
-            cd frontend
+            cd src/frontend
             npm ci
             npm audit --audit-level=moderate
             npm run typecheck
@@ -221,7 +229,7 @@ jobs:
             npm run test
             npm run build
           )
-          go test . ./internal/...
-          go vet . ./internal/...
+          go -C src test . ./internal/... ./build/scripts
+          go -C src vet . ./internal/... ./build/scripts
           task build
           test -x bin/Novera

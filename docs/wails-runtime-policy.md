@@ -1,9 +1,22 @@
 # Wails runtime containment and upgrade policy
 
-Novera currently pins Wails `v3.0.0-beta.15`. It is still a pre-stable
+Novera currently pins Wails `v3.0.0-beta.23`. It is still a pre-stable
 dependency, so updates are isolated security/compatibility migrations rather
 than routine version bumps. The Go module, frontend runtime, CLI, generated
 bindings, and build images must move together.
+
+The application module is in [src/go.mod](../src/go.mod), frontend runtime
+pins are in [src/frontend/package.json](../src/frontend/package.json), and
+native assets are in [src/build/](../src/build/). Run direct Go/Wails commands
+from `src/`; the repository-root Taskfile delegates there.
+
+The beta.23 migration was prepared on 2026-09-20. The Go module, npm runtime,
+and CLI pins agree; regenerated bindings preserve the existing 150-method
+contract. Windows production compilation and local regression checks passed.
+Native launch/dialog/event/close checks on Windows, macOS, and Linux and the
+clean-host packaging matrix remain outstanding. This is a migration candidate,
+not completion of the native acceptance checklist below. See the
+[project analysis](project-analysis-2026-09-20.md) for evidence and limitations.
 
 ## Containment boundary
 

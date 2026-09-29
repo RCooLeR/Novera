@@ -1,0 +1,15 @@
+goos: windows
+goarch: amd64
+pkg: novera/.gotmp/folded-search-baseline
+cpu: 13th Gen Intel(R) Core(TM) i9-13900KF
+BenchmarkFoldedRepeatedPrefix/forward-32         	       2	  87902250 ns/op	   2.98 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/forward-32         	       2	  89576300 ns/op	   2.93 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/forward-32         	       2	  84864300 ns/op	   3.09 MB/s	       8 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/forward-32         	       2	  86703650 ns/op	   3.02 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/forward-32         	       2	  81074550 ns/op	   3.23 MB/s	       8 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	       2	  79734250 ns/op	   3.29 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	       2	  79607300 ns/op	   3.29 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	       1	 102747500 ns/op	   2.55 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	       2	  78825200 ns/op	   3.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	       2	  78107750 ns/op	   3.36 MB/s	       0 B/op	       0 allocs/op
+PASS

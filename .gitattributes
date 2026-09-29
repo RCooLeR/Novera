@@ -2,4 +2,4 @@
 * text=auto eol=lf
 
 # Encoding and line-ending fixtures are byte-exact test assets.
-internal/bigfile/replace/testdata/encodings/*.txt binary
+src/internal/bigfile/replace/testdata/encodings/*.txt binary

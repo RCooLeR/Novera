@@ -11,8 +11,8 @@ Write "none" only after checking each category.
 ## Validation
 
 - [ ] Added or updated normal and adversarial tests.
-- [ ] Ran `go test . ./internal/...` and `go vet . ./internal/...`, or documented an environment blocker.
-- [ ] Ran `npm audit --audit-level=moderate`, typecheck, lint, tests, and production frontend build.
+- [ ] Ran `go -C src test . ./internal/...` and `go -C src vet . ./internal/...` from the repository root, or documented an environment blocker.
+- [ ] Ran `npm audit --audit-level=moderate`, typecheck, lint, tests, and production frontend build in `src/frontend`.
 - [ ] Regenerated bindings after bound Go changes and reviewed the exact bridge diff.
 - [ ] Verified the build did not mutate tracked dependency or generated files.
 - [ ] Used synthetic fixtures and removed credentials, local data, logs, and generated outputs.

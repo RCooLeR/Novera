@@ -56,7 +56,7 @@ bundle but not across reports. Users must be able to exclude individual entries
 and save locally for inspection; Novera must not transmit the bundle
 automatically.
 
-Bug reports and security reports must follow `SECURITY.md` and the repository
-templates. Maintainers should delete diagnostic attachments when no longer
+Bug reports and security reports must follow [SECURITY.md](../SECURITY.md) and
+the repository templates. Maintainers should delete diagnostic attachments when no longer
 needed and document any exceptional retention during a coordinated security
 investigation.

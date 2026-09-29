@@ -8,8 +8,9 @@ operation, record and line structure, filesystem, address space, available
 memory, and free disk space; Novera does not promise support for every file size.
 
 The engine was historically ported from a project named Quarry and lives under
-`internal/bigfile/`. The reviewed tree does not identify a verifiable upstream
-repository, revision, or license for that port. That provenance must be added
+[src/internal/bigfile/](../src/internal/bigfile/). The reviewed tree does not
+identify a verifiable upstream repository, revision, or license for that port.
+That provenance must be added
 before public distribution; this document intentionally does not substitute a
 generic or guessed link.
 
@@ -41,8 +42,21 @@ Features:
 - **Go to** line number, `0x` byte offset, or percent.
 - **Hex view** (automatic for binaries) and **follow-tail** for live logs.
 - **Per-line syntax highlighting** for ~45 languages plus a dedicated SQL
-  highlighter (`frontend/src/lib/lineHighlight.ts`), tokenised per line so a
-  collapsed/truncated long line never bleeds colour.
+  highlighter ([lineHighlight.ts](../src/frontend/src/lib/lineHighlight.ts)),
+  tokenised per line so a collapsed/truncated long line never bleeds colour.
+
+### Search semantics and remaining limit
+
+Forward bounded regex search preserves whole-buffer non-overlapping match
+alignment across chunks. Whole-word plain search preserves multibyte delimiter
+boundaries, and dense searches observe cancellation between matches.
+
+Backward regex search still evaluates non-overlapping matches within each read
+window. Repeated overlapping candidates can therefore produce different
+offsets when chunk alignment changes; reverse results are not guaranteed to be
+the exact reverse of a complete forward scan. The
+[2026-09-20 analysis](project-analysis-2026-09-20.md#remaining-findings-and-prioritized-follow-up)
+contains a reproduction and the required semantic/performance follow-up.
 
 ### Text-window contract
 
@@ -200,7 +214,7 @@ The Big Tools export panel exposes JSONL only. SQLite and XLSX publication
 remains fail-closed and those controls are intentionally absent until their
 output paths have end-to-end publication guarantees.
 
-## Architecture (`internal/bigfile/`)
+## Architecture (`src/internal/bigfile/`)
 
 | Package | Role |
 | --- | --- |
@@ -212,7 +226,8 @@ output paths have end-to-end publication guarantees.
 | `search` / `replace` | Streaming, time-bounded search and replace |
 | `plugins/csv`, `plugins/sql/*` | CSV dialect/schema/profile, SQL analyse/extract/reshape/schema diff; unsafe cleanup presets remain disabled |
 
-`fileservice*.go` is the Wails-bound surface; `main.go` registers it via
+`src/internal/bigfile/fileservice*.go` is the Wails-bound surface;
+[src/main.go](../src/main.go) registers it via
 `bigfile.NewFileService()`. The bound methods serve windows, search, edit
 staging, saves, hex, and CSV/SQL transforms. Bound request/response DTOs are
 size-limited; output-producing operations return metadata rather than output

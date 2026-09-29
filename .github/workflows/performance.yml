@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.27.0"
+  GO_VERSION: "1.27.1"
   GOTOOLCHAIN: local
 
 jobs:
@@ -30,11 +30,12 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+          cache-dependency-path: src/go.sum
 
       - name: Verify module inputs
         run: |
-          go mod verify
-          go mod tidy -diff
+          go -C src mod verify
+          go -C src mod tidy -diff
 
       - name: Record benchmark environment
         run: |
@@ -49,7 +50,8 @@ jobs:
       - name: Run stable large-file benchmarks
         run: |
           set -o pipefail
-          go test -run '^$' -bench Benchmark -benchmem -count 5 \
+          go -C src test -run '^$' -bench Benchmark -benchmem -count 5 \
+            ./internal/bigfile/asciifold \
             ./internal/bigfile/document \
             ./internal/bigfile/lineindex \
             ./internal/bigfile/manualedit \

@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.27.0"
+  GO_VERSION: "1.27.1"
   GOTOOLCHAIN: local
 
 concurrency:
@@ -34,7 +34,7 @@ jobs:
       matrix:
         include:
           - language: go
-            build_mode: autobuild
+            build_mode: manual
           - language: javascript-typescript
             build_mode: none
     steps:
@@ -47,6 +47,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+          cache-dependency-path: src/go.sum
 
       - name: Install Go analysis prerequisites
         if: matrix.language == 'go'
@@ -59,17 +60,21 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libgtk-4-dev \
             libwebkitgtk-6.0-dev
-          mkdir -p frontend/dist
-          printf '<!doctype html><title>CodeQL placeholder</title>\n' > frontend/dist/index.html
+          mkdir -p src/frontend/dist
+          printf '<!doctype html><title>CodeQL placeholder</title>\n' > src/frontend/dist/index.html
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build_mode }}
 
+      - name: Build Go source for CodeQL
+        if: matrix.language == 'go'
+        run: go -C src build . ./internal/...
+
       - name: Analyze
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           category: /language:${{ matrix.language }}
 

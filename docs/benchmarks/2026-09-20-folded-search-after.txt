@@ -1,0 +1,15 @@
+goos: windows
+goarch: amd64
+pkg: novera/internal/bigfile/asciifold
+cpu: 13th Gen Intel(R) Core(TM) i9-13900KF
+BenchmarkFoldedRepeatedPrefix/forward-32         	     469	    258500 ns/op	1014.10 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/forward-32         	     460	    264344 ns/op	 991.68 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/forward-32         	     444	    261263 ns/op	1003.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/forward-32         	     450	    262893 ns/op	 997.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/forward-32         	     452	    259044 ns/op	1011.97 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	     457	    258702 ns/op	1013.30 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	     454	    265882 ns/op	 985.94 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	     468	    255727 ns/op	1025.09 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	     465	    277855 ns/op	 943.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkFoldedRepeatedPrefix/backward-32        	     460	    261994 ns/op	1000.57 MB/s	       0 B/op	       0 allocs/op
+PASS

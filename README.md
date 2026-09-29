@@ -48,8 +48,8 @@ xterm.js, virtualized grids, and generated Wails bindings.
 
 ## Stack
 
-- Go 1.27.0
-- Wails v3.0.0-beta.15
+- Go 1.27.1
+- Wails v3.0.0-beta.23
 - React 19 + TypeScript 6 + Vite 8
 - Monaco editor
 - xterm.js
@@ -58,50 +58,55 @@ xterm.js, virtualized grids, and generated Wails bindings.
 
 ## Prerequisites
 
-- Go 1.27.0
-- Node 24.20.x LTS with npm 11.x
+- Go 1.27.1
+- Node 24.21.x LTS with npm 11.x
 - macOS 13 or later when building or running the macOS package
 - Linux packages use GTK 4 and WebKitGTK 6.0 (Ubuntu 24.04+ or Debian 13+)
-- Wails v3 CLI:
+- Wails v3 and Task CLIs:
 
 ```powershell
-go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.15
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.23
+go install github.com/go-task/task/v3/cmd/task@v3.53.1
 ```
 
 ## Development
 
+Run these commands from the repository root. Root Task commands delegate to the
+application in `src/`; direct Go and Wails commands must run inside `src/`.
+
 Install frontend dependencies:
 
 ```powershell
-cd frontend
-npm ci
+npm --prefix src/frontend ci
 ```
 
 Run the app with hot reload:
 
 ```powershell
-cd ..
-wails3 dev -config ./build/config.yml -port 9245
+task dev
 ```
 
 Run frontend checks:
 
 ```powershell
-cd frontend
-npm run typecheck
-npm run test
+npm --prefix src/frontend run typecheck
+npm --prefix src/frontend run test
 ```
 
 Run focused backend tests:
 
 ```powershell
+Push-Location src
 go test ./internal/settings ./internal/agent ./internal/datatools ./internal/db
+Pop-Location
 ```
 
 Run all backend tests:
 
 ```powershell
+Push-Location src
 go test . ./internal/...
+Pop-Location
 ```
 
 ## Build
@@ -126,7 +131,7 @@ bin/Novera.exe
 - iOS simulator and Android builds are experimental and are not CI-verified.
   Android production packaging fails closed until release signing and artifact
   verification exist; the explicitly named debug task is for local testing only.
-  See [Android build status](build/android/README.md) for the current toolchain
+  See [Android build status](src/build/android/README.md) for the current toolchain
   and the remaining Wails mobile-host/security blocker.
 - Windows MSIX packaging is disabled until a reviewed Wails v3 configuration,
   signing identity, and clean-machine install/upgrade checks are committed. NSIS
@@ -139,10 +144,12 @@ bin/Novera.exe
 If Go service types or method signatures change, regenerate TypeScript bindings:
 
 ```powershell
+Push-Location src
 wails3 generate bindings -f '-tags production -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui"' -clean=true -ts
+Pop-Location
 ```
 
-The generated bindings live in `frontend/bindings/` and are committed so the
+The generated bindings live in `src/frontend/bindings/` and are committed so the
 frontend remains type-safe without requiring every contributor to regenerate
 them before editing UI code.
 
@@ -170,34 +177,40 @@ prebuilt assets. The current workflow must not be represented as release-ready.
 ## Project Layout
 
 ```text
-main.go                         Wails app bootstrap and service wiring
-secret_service.go               Secret API exposed to the frontend
-shell_service.go                Native shell helpers and folder picker
-internal/
-  agent/                        Agent mode, tool loop, approvals, audit, rollback
-  artifacts/                    Artifact registry and freshness checks
-  bigfile/                      Large-file engine with bounded read windows:
-                                read/edit, line index, piece-table edits,
-                                copy-only publication, hex, CSV/SQL tools
-  datatools/                    CSV and SQL dump inspection/transforms
-  db/                           Database profiles, read-only query service
-  gitsvc/                       Git status/diff/stage/commit service
-  jobs/                         Background job ledger and logs
-  llm/                          Ask-mode streaming and provider integration
-  netsafe/                      Endpoint/redirect safety helpers for LLM/HTTP
-  secret/                       OS-backed secret storage
-  settings/                     Persisted non-secret preferences
-  sqlguard/                     Single read-only SQL query guard
-  terminal/                     PTY/ConPTY terminal service
-  watcher/                      Filesystem watcher bridge
-  workspace/                    Workspace path containment and file APIs
-frontend/
-  src/components/               Workbench views and panels
-  src/state/store.ts            App state and async actions
-  src/lib/                      Bindings re-exports, Monaco setup, utilities
-  bindings/                     Generated Wails TypeScript bindings
-build/                          Wails build config and platform packaging files
+Taskfile.yml                    Root build/dev/run and platform-task facade
+.github/                        CI, release workflows, and contribution templates
+docs/                           Architecture, runtime, and project policies
+src/
+  Taskfile.yml                  Application task definitions
+  go.mod, go.sum                Go module and dependency lockfile
+  main.go                       Wails bootstrap and service wiring
+  secret_service.go             Narrow frontend-facing secret API
+  shell_service.go              Native shell helpers and folder picker
+  internal/
+    agent/, llm/               Agent approvals/tool loop and provider integration
+    bigfile/, datatools/        Bounded large-file engine and CSV/SQL tools
+    db/, gitsvc/, terminal/     Database, Git, and PTY/ConPTY services
+    workspace/, watcher/       Workspace containment and filesystem events
+    secret/, settings/         Credentials and non-secret preferences
+    artifacts/, jobs/          Artifact lineage and background-job ledger
+    netsafe/, sqlguard/        Network and read-only SQL safety boundaries
+  frontend/
+    src/components/             Workbench views and panels
+    src/state/store.ts          App state and async actions
+    src/lib/                    Bindings adapters, Monaco setup, utilities
+    bindings/                   Committed generated Wails bindings
+  build/                        Native build configuration and packaging assets
+bin/                            Ignored build artifacts (still at repository root)
 ```
+
+### Layout migration
+
+The Go module, frontend, native assets, and application Taskfile moved under
+`src/`. Update IDE module roots and local scripts that previously ran Go/Wails
+from the repository root or npm from `frontend/`. Go import paths remain
+`novera/...`; this is a repository-layout change, not a module rename. Root
+`task build`, `task dev`, `task run`, and platform tasks remain the entry points,
+and build artifacts remain under root `bin/`.
 
 ## Safety Model
 
@@ -252,8 +265,8 @@ Important local-LLM controls:
 Generated and local-only folders are ignored:
 
 - `bin/`
-- `frontend/dist/`
-- `frontend/node_modules/`
+- `src/frontend/dist/`
+- `src/frontend/node_modules/`
 - `.task/`
 - `.gotmp/`
 - `.idea/`
@@ -272,4 +285,5 @@ temporary LLM/tool scratch files.
 - [Release checklist](docs/release-checklist.md)
 - [Wails runtime containment and upgrade policy](docs/wails-runtime-policy.md)
 - [Large-file performance evidence](docs/performance.md)
+- [Project analysis and dependency migration, 2026-09-20](docs/project-analysis-2026-09-20.md)
 - [Diagnostics and support-data policy](docs/diagnostics-policy.md)
