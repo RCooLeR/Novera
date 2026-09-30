@@ -1,0 +1,10 @@
+# Reviewed synthetic credential-reference identifiers in fake-store tests.
+# These historical matches are the literal `llm.apikey.v1.foreign`, not API
+# keys. The original and squashed commits contain the identical test-file blob.
+# Match only these six findings; keep all other files/history scanned.
+512a2bbe89e57c426e229e954c4f0164481a5a35:internal/db/db_test.go:generic-api-key:410
+512a2bbe89e57c426e229e954c4f0164481a5a35:internal/db/db_test.go:generic-api-key:425
+512a2bbe89e57c426e229e954c4f0164481a5a35:internal/db/db_test.go:generic-api-key:1224
+b9c7c245c49e9cf426d0da5e769586f1bdcda90f:internal/db/db_test.go:generic-api-key:410
+b9c7c245c49e9cf426d0da5e769586f1bdcda90f:internal/db/db_test.go:generic-api-key:425
+b9c7c245c49e9cf426d0da5e769586f1bdcda90f:internal/db/db_test.go:generic-api-key:1224
