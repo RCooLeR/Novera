@@ -33,6 +33,12 @@ updates:
     labels:
       - dependencies
       - frontend
+    # typescript-eslint 8.70.0 supports TypeScript >=4.8.4 <6.1.0.
+    # Keep patch updates, and revisit this ceiling when the linter supports
+    # newer compilers (8.70.1 in PR #23 has the same supported range).
+    ignore:
+      - dependency-name: typescript
+        versions: [">=6.1.0"]
     groups:
       frontend-runtime:
         dependency-type: production

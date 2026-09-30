@@ -71,7 +71,10 @@ jobs:
 
       - name: Build Go source for CodeQL
         if: matrix.language == 'go'
-        run: go -C src build . ./internal/...
+        # CodeQL's Go extractor expects the build subcommand first; a leading
+        # `-C` makes it ignore the invocation even though the Go build succeeds.
+        working-directory: src
+        run: go build . ./internal/...
 
       - name: Analyze
         uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1

@@ -9,9 +9,10 @@ import (
 	pty "github.com/aymanbagabas/go-pty"
 )
 
-func prepareTerminalCommand(cmd *pty.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-}
+// go-pty starts Unix commands with Setsid and Setctty. The new session already
+// gives the shell its own process group, whose ID is the shell PID. Setpgid is
+// incompatible with that session setup and makes the child fail with EPERM.
+func prepareTerminalCommand(_ *pty.Cmd) {}
 
 type terminalProcessTree struct {
 	pid int

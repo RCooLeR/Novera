@@ -39,6 +39,12 @@ Versioning once public releases begin.
 
 ### Fixed
 
+- Linux and macOS terminals start successfully with their own PTY session and
+  process group, while retaining process-group cleanup during shutdown.
+- Go CodeQL analysis follows the relocated module and extracts its source;
+  secret scanning excludes only reviewed historical test-reference matches.
+- Automated TypeScript updates stay within the linter-supported 6.0 patch line
+  so grouped tooling updates do not break installation on peer dependencies.
 - Case-insensitive search avoids repeated-prefix slowdowns; whole-word search
   preserves matches beside UTF-8 delimiters spanning read chunks.
 - Dense forward/backward searches observe cancellation between matches, and
