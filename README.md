@@ -49,7 +49,7 @@ xterm.js, virtualized grids, and generated Wails bindings.
 ## Stack
 
 - Go 1.27.1
-- Wails v3.0.0-beta.23
+- Wails v3.0.0-beta.26
 - React 19 + TypeScript 6 + Vite 8
 - Monaco editor
 - xterm.js
@@ -65,7 +65,7 @@ xterm.js, virtualized grids, and generated Wails bindings.
 - Wails v3 and Task CLIs:
 
 ```powershell
-go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.23
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.26
 go install github.com/go-task/task/v3/cmd/task@v3.53.1
 ```
 

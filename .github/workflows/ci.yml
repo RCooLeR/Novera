@@ -18,7 +18,7 @@ env:
   GOTOOLCHAIN: local
   NODE_VERSION: "24.21.0"
   TASK_VERSION: "v3.53.1"
-  WAILS_VERSION: "v3.0.0-beta.23"
+  WAILS_VERSION: "v3.0.0-beta.26"
 
 jobs:
   goreleaser-check:

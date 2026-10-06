@@ -2,7 +2,7 @@
 
 This directory contains Novera's experimental Android build. Its build stack is
 kept current, but production packaging remains deliberately disabled until the
-mobile host is synchronized with Wails v3.0.0-beta.23 and receives a dedicated
+mobile host is synchronized with Wails v3.0.0-beta.26 and receives a dedicated
 security review. The existing `package` and `package:fat` tasks therefore fail
 closed; do not replace them with debug-key or unsigned release fallbacks.
 

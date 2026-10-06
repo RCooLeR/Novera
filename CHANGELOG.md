@@ -11,6 +11,8 @@ Versioning once public releases begin.
 
 ### Security
 
+- Updated DOMPurify to 3.4.16 and source-map-js to 1.2.2 to clear newly reported
+  frontend dependency vulnerabilities.
 - PostgreSQL connections now reject protocol messages larger than 16 MiB before
   allocating their bodies, using pgx 5.11's protocol limit.
 - Malformed XLSX rows in Excelize's disk-backed shared-string lookup return a
@@ -24,9 +26,11 @@ Versioning once public releases begin.
 
 ### Changed
 
-- Updated Go to 1.27.1, the synchronized Wails stack to beta.23, React to 19.3,
+- Updated Go to 1.27.1, the synchronized Wails stack to beta.26, React to 19.3,
   Vite to 8.3, Vitest to 5, database drivers, compatible transitive dependencies,
   and CI/build tooling. TypeScript remains on 6.0.3 for ESLint compatibility.
+- Updated SQLite to 1.60.1 and Monaco to 0.57, including upstream query-binding
+  and editor performance fixes. Wails beta.26 adds Windows WebView2 recovery.
 - Linux CI now runs the Go race detector; frontend tests use Vitest's persistent
   transform cache and include mounted-component grid/table regressions.
 - Application sources, the Go module, frontend, and native build assets now
@@ -39,6 +43,7 @@ Versioning once public releases begin.
 
 ### Fixed
 
+- CI now checks that Wails Go, frontend, lockfile, and build CLI versions agree.
 - Linux and macOS terminals start successfully with their own PTY session and
   process group, while retaining process-group cleanup during shutdown.
 - Go CodeQL analysis follows the relocated module and extracts its source;
