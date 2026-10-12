@@ -11,6 +11,9 @@ Versioning once public releases begin.
 
 ### Security
 
+- Updated Go to 1.27.2 across the module, workflows, and Docker image to fix
+  reachable standard-library vulnerabilities; updated the networking modules
+  and vulnerability scanner alongside it.
 - Updated DOMPurify to 3.4.16 and source-map-js to 1.2.2 to clear newly reported
   frontend dependency vulnerabilities.
 - PostgreSQL connections now reject protocol messages larger than 16 MiB before
@@ -26,11 +29,16 @@ Versioning once public releases begin.
 
 ### Changed
 
-- Updated Go to 1.27.1, the synchronized Wails stack to beta.26, React to 19.3,
+- Updated Go to 1.27.2, the synchronized Wails stack to beta.28, React to 19.3,
   Vite to 8.3, Vitest to 5, database drivers, compatible transitive dependencies,
   and CI/build tooling. TypeScript remains on 6.0.3 for ESLint compatibility.
 - Updated SQLite to 1.60.1 and Monaco to 0.57, including upstream query-binding
   and editor performance fixes. Wails beta.26 adds Windows WebView2 recovery.
+- Refreshed compatible Go and frontend dependencies, Task 3.54, GoReleaser
+  2.18.3, Zig 0.17, Gradle 9.8.1, AndroidX Core 1.19.1, and AndroidX WebKit 1.17.1.
+  TypeScript stays on the linter-supported line, SQLite keeps its required libc
+  version, and the experimental Android host retains NDK 29 pending native
+  compiler validation.
 - Linux CI now runs the Go race detector; frontend tests use Vitest's persistent
   transform cache and include mounted-component grid/table regressions.
 - Application sources, the Go module, frontend, and native build assets now
@@ -43,7 +51,8 @@ Versioning once public releases begin.
 
 ### Fixed
 
-- CI now checks that Wails Go, frontend, lockfile, and build CLI versions agree.
+- CI now checks that Wails Go, frontend, lockfile, and build CLI versions agree,
+  and that the Go module, workflows, and Docker image use the same Go version.
 - Linux and macOS terminals start successfully with their own PTY session and
   process group, while retaining process-group cleanup during shutdown.
 - Go CodeQL analysis follows the relocated module and extracts its source;

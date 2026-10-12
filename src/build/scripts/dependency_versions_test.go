@@ -9,6 +9,33 @@ import (
 	"testing"
 )
 
+func TestGoVersionAlignment(t *testing.T) {
+	t.Parallel()
+	version := func(path, pattern string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join("../../..", path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		matches := regexp.MustCompile(pattern).FindAllSubmatch(data, -1)
+		if len(matches) != 1 {
+			t.Fatalf("%s: expected one Go version pin, got %d", path, len(matches))
+		}
+		return string(matches[0][1])
+	}
+	want := version("src/go.mod", `(?m)^go ([0-9]+\.[0-9]+\.[0-9]+)\s*$`)
+	for _, workflow := range []string{"ci.yml", "release.yml", "security.yml", "performance.yml"} {
+		got := version(".github/workflows/"+workflow, `(?m)^\s*GO_VERSION:\s*["']?([0-9]+\.[0-9]+\.[0-9]+)["']?\s*(?:#.*)?$`)
+		if got != want {
+			t.Errorf("%s uses Go %s; go.mod requires %s (update the module, workflows and Docker image together)", workflow, got, want)
+		}
+	}
+	got := version("src/build/docker/Dockerfile.cross", `(?m)^FROM\s+[^\r\n]*golang:([0-9]+\.[0-9]+\.[0-9]+)-bookworm@sha256:[a-f0-9]{64}\s*$`)
+	if got != want {
+		t.Errorf("Docker image uses Go %s; go.mod requires %s", got, want)
+	}
+}
+
 // Dependabot proposes the Go and npm updates independently, but Wails' CLI,
 // generator, Go runtime and renderer must be validated at the same version.
 func TestWailsVersionAlignment(t *testing.T) {

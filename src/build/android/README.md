@@ -2,18 +2,18 @@
 
 This directory contains Novera's experimental Android build. Its build stack is
 kept current, but production packaging remains deliberately disabled until the
-mobile host is synchronized with Wails v3.0.0-beta.26 and receives a dedicated
+mobile host is synchronized with Wails v3.0.0-beta.28 and receives a dedicated
 security review. The existing `package` and `package:fat` tasks therefore fail
 closed; do not replace them with debug-key or unsigned release fallbacks.
 
 ## Toolchain baseline
 
-The configuration baseline reviewed as of 2026-09-20 is:
+The configuration baseline reviewed as of 2026-10-12 is:
 
 | Component | Version |
 | --- | --- |
 | Android Gradle Plugin | 9.4.1 |
-| Gradle wrapper | 9.7.1 |
+| Gradle wrapper | 9.8.1 |
 | Java source/target | 17 |
 | Android compile SDK | 37 |
 | Android target SDK | 36 |
@@ -22,26 +22,38 @@ The configuration baseline reviewed as of 2026-09-20 is:
 | Android NDK | 29.0.14206865 (r29) |
 | AndroidX Activity | 1.13.0 |
 | AndroidX AppCompat | 1.8.0 |
-| AndroidX Core | 1.19.0 |
-| AndroidX WebKit | 1.17.0 |
+| AndroidX Core | 1.19.1 |
+| AndroidX WebKit | 1.17.1 |
 | Material Components | 1.14.0 |
 
 AGP 9.4 supports API 37 and requires Gradle 9.6 or newer and JDK 17 or
-newer. The wrapper uses the current Gradle 9.7.1 distribution and pins its
+newer. The wrapper uses the current Gradle 9.8.1 distribution and pins its
 published SHA-256 digest. Android dependencies use current stable releases
 compatible with the API-24 floor.
 
-The 2026-09-20 review verified the published 9.4.1 plugin POMs and Gradle
-compatibility. Local Gradle could not resolve the plugin, so this revision's
-Android compile is unverified. See the
-[project analysis](../../../docs/project-analysis-2026-09-20.md) for the exact
-validation status. Desktop compilation does not clear the mobile-host blocker.
+The 2026-10-12 review verified the wrapper distribution checksum and ran
+`--version`, `help`, and `:app:dependencies --configuration debugRuntimeClasspath`
+successfully with Java 25. The updated Core and WebKit dependencies resolved.
+`:app:compileDebugJavaWithJavac` stopped because no Android SDK is installed, so
+Android compilation remains unverified. Java used the existing Windows root
+certificate store for these checks because the local Java trust store did not
+trust the distribution download's certificate chain; certificate verification
+remained enabled.
+
+NDK r30 (30.0.16248370) is available and updates LLVM, but this revision retains
+r29. Neither an Android SDK nor an NDK is installed in the validation environment,
+so r30 could not be exercised with the arm64 and x86_64 Go shared-library builds.
+Validate both native targets before changing the NDK pin in the Gradle build,
+Taskfile, and dependency installer together. Desktop compilation does not clear
+the mobile-host blocker.
 
 Primary compatibility references:
 
 - [Android Gradle Plugin 9.4 release notes](https://developer.android.com/build/releases/agp-9-4-0-release-notes)
 - [Gradle current release metadata](https://services.gradle.org/versions/current)
 - [Android NDK downloads](https://developer.android.com/ndk/downloads)
+- [Android NDK r30 changes](https://github.com/android/ndk/wiki/Changelog-r30)
+- [AndroidX Core releases](https://developer.android.com/jetpack/androidx/releases/core)
 - [AndroidX WebKit releases](https://developer.android.com/jetpack/androidx/releases/webkit)
 - [Google Play target API requirements](https://developer.android.com/google/play/requirements/target-sdk)
 

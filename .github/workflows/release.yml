@@ -13,11 +13,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GO_VERSION: "1.27.1"
+  GO_VERSION: "1.27.2"
   GOTOOLCHAIN: local
   NODE_VERSION: "24.21.0"
-  TASK_VERSION: "v3.53.1"
-  WAILS_VERSION: "v3.0.0-beta.26"
+  TASK_VERSION: "v3.54.0"
+  WAILS_VERSION: "v3.0.0-beta.28"
 
 jobs:
   release-gate:
@@ -208,7 +208,7 @@ jobs:
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
-          version: "v2.18.2"
+          version: "v2.18.3"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
