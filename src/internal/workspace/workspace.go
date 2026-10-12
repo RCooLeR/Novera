@@ -1690,9 +1690,8 @@ func openTableIter(abs, rel, delim string) ([]string, *tableIter, error) {
 			return nil, nil, err
 		}
 		next := func() (cols []string, ok bool, err error) {
-			// Excelize 2.11 validates in-memory shared-string indices, but its
-			// disk-backed lookup can still panic on malformed worksheet values.
-			// Keep that parser failure within this iterator: callers close both
+			// Keep unexpected spreadsheet parser failures within this iterator
+			// even after the upstream shared-string index fixes: callers close both
 			// resources on an error, including while consuming the header below.
 			defer func() {
 				if recover() != nil {

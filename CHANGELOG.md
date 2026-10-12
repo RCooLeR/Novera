@@ -18,9 +18,11 @@ Versioning once public releases begin.
   frontend dependency vulnerabilities.
 - PostgreSQL connections now reject protocol messages larger than 16 MiB before
   allocating their bodies, using pgx 5.11's protocol limit.
-- Malformed XLSX rows in Excelize's disk-backed shared-string lookup return a
-  bounded error and release temporary files instead of crashing the application.
-  The upstream vulnerability scan finding remains visible pending a complete fix.
+- Pinned Excelize to upstream security patch
+  `v2.11.1-0.20260731010303-ae2113b410e5` pending its next stable release. It fixes
+  negative style IDs (GHSA-5h23-36rv-pm65) and disk-backed shared-string bounds.
+  Invalid shared-string references consistently produce empty cells in memory
+  and on disk; parser panic containment and temporary-file cleanup remain in place.
 - Release publication remains intentionally disabled pending native signing,
   notarization, install/launch verification, and owner approval.
 - Renderer bridge methods now have a repository-wide exact allowlist test.
