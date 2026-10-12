@@ -12,9 +12,9 @@ require (
 	// Pinned pre-release: keep the Go module, frontend runtime, and CLI aligned,
 	// and require the full native regression matrix for every beta update.
 	github.com/wailsapp/wails/v3 v3.0.0-beta.28
-	// Official fix for GHSA-5h23-36rv-pm65 pending the next stable release;
-	// also fixes disk-backed shared-string index validation.
-	github.com/xuri/excelize/v2 v2.11.1-0.20260731010303-ae2113b410e5
+	// Official security fixes through GHSA-mx22-3794-2vpv pending the next
+	// stable release, including the streaming row-bound and shared-string fixes.
+	github.com/xuri/excelize/v2 v2.11.1-0.20261003002531-6258dcebc4e2
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/sys v0.49.0
 	golang.org/x/text v0.43.0

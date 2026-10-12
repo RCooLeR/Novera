@@ -19,8 +19,11 @@ Versioning once public releases begin.
 - PostgreSQL connections now reject protocol messages larger than 16 MiB before
   allocating their bodies, using pgx 5.11's protocol limit.
 - Pinned Excelize to upstream security patch
-  `v2.11.1-0.20260731010303-ae2113b410e5` pending its next stable release. It fixes
-  negative style IDs (GHSA-5h23-36rv-pm65) and disk-backed shared-string bounds.
+  `v2.11.1-0.20261003002531-6258dcebc4e2` pending its next stable release,
+  covering all 19 upstream advisories published through October 12. This includes
+  a row-iteration denial of service triggered by oversized worksheet row numbers
+  (GHSA-jw42-f3rr-4cc3), malformed encrypted-file bounds, negative style IDs,
+  and disk-backed shared-string bounds.
   Invalid shared-string references consistently produce empty cells in memory
   and on disk; parser panic containment and temporary-file cleanup remain in place.
 - Release publication remains intentionally disabled pending native signing,
@@ -55,6 +58,8 @@ Versioning once public releases begin.
 
 - CI now checks that Wails Go, frontend, lockfile, and build CLI versions agree,
   and that the Go module, workflows, and Docker image use the same Go version.
+- Increased the Go vulnerability job's setup budget to accommodate observed
+  slow Ubuntu package downloads while retaining mandatory vulnerability checks.
 - Linux and macOS terminals start successfully with their own PTY session and
   process group, while retaining process-group cleanup during shutdown.
 - Go CodeQL analysis follows the relocated module and extracts its source;

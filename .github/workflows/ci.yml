@@ -131,7 +131,9 @@ jobs:
   go-vulnerability-check:
     name: Go vulnerability scan
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Slow Ubuntu downloads can spend over 15 minutes on GTK/WebKit alone.
+    # Leave time for the scan after setup; vulnerability findings still fail it.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -3,14 +3,115 @@ package workspace
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xuri/excelize/v2"
 )
+
+// GHSA-jw42-f3rr-4cc3: Columns reads ahead into the next row, so validating
+// only Rows.Next leaves a huge row number able to produce endless blank rows.
+// Bound the test's own iteration so the vulnerable dependency fails promptly.
+func TestXLSXRowNumbersAreBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		invalidRow int
+		rowNumber  int64
+		spilled    bool
+	}{
+		{name: "first_row", invalidRow: 1, rowNumber: excelize.TotalRows + 1},
+		{name: "header_read_ahead", invalidRow: 2, rowNumber: excelize.TotalRows + 1},
+		{name: "data_read_ahead", invalidRow: 3, rowNumber: 1 << 60},
+		{name: "first_row_spilled", invalidRow: 1, rowNumber: excelize.TotalRows + 1, spilled: true},
+		{name: "header_read_ahead_spilled", invalidRow: 2, rowNumber: excelize.TotalRows + 1, spilled: true},
+		{name: "data_read_ahead_spilled", invalidRow: 3, rowNumber: 1 << 60, spilled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("TMPDIR", tempDir)
+			t.Setenv("TMP", tempDir)
+			t.Setenv("TEMP", tempDir)
+			var sheet strings.Builder
+			sheet.WriteString(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`)
+			for row := 1; row <= tc.invalidRow; row++ {
+				r := int64(row)
+				if row == tc.invalidRow {
+					r = tc.rowNumber
+				}
+				fmt.Fprintf(&sheet, `<row r="%d"><c t="inlineStr"><is><t>value</t></is></c></row>`, r)
+			}
+			sheet.WriteString(`</sheetData></worksheet>`)
+			if tc.spilled {
+				sheet.WriteString(strings.Repeat(" ", maxXlsxXMLMemoryBytes))
+			}
+			path := workbookWithWorksheetXML(t, sheet.String())
+			_, iter, err := openTableIter(path, filepath.Base(path), "")
+			if iter != nil {
+				t.Cleanup(iter.close)
+				for step := 0; step < tc.invalidRow && err == nil; step++ {
+					_, _, err = iter.next()
+				}
+				iter.close()
+			}
+			if !errors.Is(err, excelize.ErrMaxRows) {
+				t.Fatalf("row number %d: got %v, want ErrMaxRows within %d reads", tc.rowNumber, err, tc.invalidRow)
+			}
+			entries, readErr := os.ReadDir(tempDir)
+			if readErr != nil || len(entries) != 0 {
+				t.Fatalf("workbook temporary files leaked: entries=%v err=%v", entries, readErr)
+			}
+		})
+	}
+}
+
+func workbookWithWorksheetXML(t *testing.T, sheet string) string {
+	t.Helper()
+	book := excelize.NewFile()
+	defer book.Close()
+	source, err := book.WriteToBuffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(source.Bytes()), int64(source.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	patched := false
+	for _, file := range zr.File {
+		if file.Name != "xl/worksheets/sheet1.xml" {
+			if err := zw.Copy(file); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		patched = true
+		w, err := zw.Create(file.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(w, sheet); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !patched {
+		t.Fatal("fixture does not contain sheet1.xml")
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "row-numbers.xlsx")
+	if err := os.WriteFile(path, archive.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 // Exercise both shared-string storage paths through the application's iterator.
 // The security-patched dependency treats invalid indices as empty cells in both
