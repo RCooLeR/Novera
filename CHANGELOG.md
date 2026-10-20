@@ -11,6 +11,10 @@ Versioning once public releases begin.
 
 ### Security
 
+- Updated the synchronized Wails Go runtime, frontend runtime, and CLI to
+  beta.31 for the upstream macOS child-frame control-channel, Windows
+  notification interpolation, CLI template argument, and server-mode
+  request-validation fixes.
 - Updated Go to 1.27.2 across the module, workflows, and Docker image to fix
   reachable standard-library vulnerabilities; updated the networking modules
   and vulnerability scanner alongside it.
@@ -34,7 +38,7 @@ Versioning once public releases begin.
 
 ### Changed
 
-- Updated Go to 1.27.2, the synchronized Wails stack to beta.28, React to 19.3,
+- Updated Go to 1.27.2, the synchronized Wails stack to beta.31, React to 19.3,
   Vite to 8.3, Vitest to 5, database drivers, compatible transitive dependencies,
   and CI/build tooling. TypeScript remains on 6.0.3 for ESLint compatibility.
 - Updated SQLite to 1.60.1 and Monaco to 0.57, including upstream query-binding
@@ -56,6 +60,8 @@ Versioning once public releases begin.
 
 ### Fixed
 
+- Aligned CI and release CLI versions with both Wails dependency updates so
+  the merged Dependabot changes pass the existing version-alignment check.
 - CI now checks that Wails Go, frontend, lockfile, and build CLI versions agree,
   and that the Go module, workflows, and Docker image use the same Go version.
 - Increased the Go vulnerability job's setup budget to accommodate observed

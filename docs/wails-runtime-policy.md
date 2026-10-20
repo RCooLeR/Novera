@@ -1,6 +1,6 @@
 # Wails runtime containment and upgrade policy
 
-Novera currently pins Wails `v3.0.0-beta.28`. It is still a pre-stable
+Novera currently pins Wails `v3.0.0-beta.31`. It is still a pre-stable
 dependency, so updates are isolated security/compatibility migrations rather
 than routine version bumps. The Go module, frontend runtime, CLI, generated
 bindings, and build images must move together.
@@ -18,9 +18,13 @@ clean-host packaging matrix remain outstanding. This is a migration candidate,
 not completion of the native acceptance checklist below. See the
 [project analysis](project-analysis-2026-09-20.md) for evidence and limitations.
 
-The beta.28 update synchronizes the Go module, npm runtime, and CI/release CLI
-pins. `TestWailsVersionAlignment` checks these pins and the npm lockfile together
-so independently proposed dependency updates cannot silently mix versions.
+The 2026-10-20 update synchronizes the Go module, npm runtime, and CI/release CLI
+at beta.31. Dependabot proposed beta.30 separately for Go and npm, leaving each
+PR's version-alignment check failing. Beta.31 additionally fixes the published
+macOS child-frame control-channel, Windows notification interpolation, CLI
+template argument, and server-mode request-validation advisories.
+`TestWailsVersionAlignment` checks these pins and the npm lockfile together so
+independently proposed dependency updates cannot silently mix versions.
 Native interaction and clean-host packaging checks remain release blockers;
 automated tests and compilation alone do not complete that acceptance matrix.
 
