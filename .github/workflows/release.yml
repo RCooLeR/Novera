@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GO_VERSION: "1.27.2"
+  GO_VERSION: "1.27.3"
   GOTOOLCHAIN: local
   NODE_VERSION: "24.21.0"
   TASK_VERSION: "v3.54.0"
