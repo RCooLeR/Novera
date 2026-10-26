@@ -68,6 +68,10 @@ Versioning once public releases begin.
 
 ### Fixed
 
+- Synchronized Wails Go, frontend, and build CLI at beta.34 for upstream
+  Windows WebView2 COM dispatch, activation/Tab focus, transient-runtime-error,
+  and Vite readiness fixes. Native interaction and packaging acceptance remain
+  outstanding, and release publication remains frozen.
 - Windows CI now checks each required install, audit, validation, and frontend
   build command separately so a later success cannot hide an earlier failure.
 - Aligned CI and release CLI versions with both Wails dependency updates so
