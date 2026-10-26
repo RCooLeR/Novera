@@ -59,7 +59,7 @@ xterm.js, virtualized grids, and generated Wails bindings.
 ## Prerequisites
 
 - Go 1.27.3
-- Node 24.21.x LTS with npm 11.x
+- Node 24.22.1 or newer 24.x LTS with npm 11.x
 - macOS 13 or later when building or running the macOS package
 - Linux packages use GTK 4 and WebKitGTK 6.0 (Ubuntu 24.04+ or Debian 13+)
 - Wails v3 and Task CLIs:
