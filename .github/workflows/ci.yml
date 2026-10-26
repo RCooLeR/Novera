@@ -81,27 +81,45 @@ jobs:
             libgtk-4-dev \
             libwebkitgtk-6.0-dev
 
-      - name: Install Wails and Task
-        run: |
-          go install github.com/go-task/task/v3/cmd/task@${{ env.TASK_VERSION }}
-          go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+      # Keep native commands in separate steps so an earlier failure cannot be
+      # hidden by a later success in Windows PowerShell.
+      - name: Install Task
+        run: go install github.com/go-task/task/v3/cmd/task@${{ env.TASK_VERSION }}
 
-      - name: Verify Go module files
-        run: |
-          go -C src mod verify
-          go -C src mod tidy -diff
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+
+      - name: Verify Go module checksums
+        run: go -C src mod verify
+
+      - name: Verify Go module files are tidy
+        run: go -C src mod tidy -diff
 
       # Build renderer assets before compiling the module's main package:
       # src/main.go embeds frontend/dist relative to src/.
-      - name: Frontend checks and embeddable production assets
+      - name: Install frontend dependencies
         working-directory: src/frontend
-        run: |
-          npm ci
-          npm audit --audit-level=moderate
-          npm run typecheck
-          npm run lint
-          npm run test
-          npm run build
+        run: npm ci
+
+      - name: Audit frontend dependencies
+        working-directory: src/frontend
+        run: npm audit --audit-level=moderate
+
+      - name: Typecheck frontend
+        working-directory: src/frontend
+        run: npm run typecheck
+
+      - name: Lint frontend
+        working-directory: src/frontend
+        run: npm run lint
+
+      - name: Test frontend
+        working-directory: src/frontend
+        run: npm run test
+
+      - name: Build embeddable production assets
+        working-directory: src/frontend
+        run: npm run build
 
       - name: Go tests
         if: runner.os != 'Windows'
