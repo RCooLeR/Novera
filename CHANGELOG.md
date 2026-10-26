@@ -11,6 +11,12 @@ Versioning once public releases begin.
 
 ### Security
 
+- Updated DOMPurify to 3.4.17 and routed Monaco's embedded sanitizer import to
+  the patched package in both development and production. Production builds
+  reject the old embedded copy; regression tests cover documentation markup,
+  dangerous links, and the upstream XHTML SVG attribute fix.
+- Updated Go to 1.27.3 across the module, workflows, and Docker image for the
+  upstream crypto/x509 certificate-trust fix.
 - Updated the synchronized Wails Go runtime, frontend runtime, and CLI to
   beta.31 for the upstream macOS child-frame control-channel, Windows
   notification interpolation, CLI template argument, and server-mode
@@ -38,6 +44,8 @@ Versioning once public releases begin.
 
 ### Changed
 
+- Updated SQLite to 1.61.0 with its required libc 1.79.0, Lucide React to 1.61.0,
+  Zustand to 5.0.16, Vite to 8.3.5, and CodeQL Action to 4.39.1.
 - Updated Go to 1.27.2, the synchronized Wails stack to beta.31, React to 19.3,
   Vite to 8.3, Vitest to 5, database drivers, compatible transitive dependencies,
   and CI/build tooling. TypeScript remains on 6.0.3 for ESLint compatibility.
@@ -60,6 +68,8 @@ Versioning once public releases begin.
 
 ### Fixed
 
+- Windows CI now checks each required install, audit, validation, and frontend
+  build command separately so a later success cannot hide an earlier failure.
 - Aligned CI and release CLI versions with both Wails dependency updates so
   the merged Dependabot changes pass the existing version-alignment check.
 - CI now checks that Wails Go, frontend, lockfile, and build CLI versions agree,

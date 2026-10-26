@@ -2,12 +2,16 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import wails from "@wailsio/runtime/plugins/vite";
 import { cspForVite } from "./src/lib/cspPolicy.ts";
+import { checkMonacoSanitizer, resolveMonacoSanitizer } from "./scripts/monaco-sanitizer.ts";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
   const csp = cspForVite(command, mode);
   return {
+    optimizeDeps: { rolldownOptions: { plugins: [resolveMonacoSanitizer()] } },
     plugins: [
+      resolveMonacoSanitizer(),
+      checkMonacoSanitizer(),
       {
         name: "novera-renderer-csp",
         transformIndexHtml(html) {
