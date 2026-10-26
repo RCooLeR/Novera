@@ -1,6 +1,6 @@
 # Wails runtime containment and upgrade policy
 
-Novera currently pins Wails `v3.0.0-beta.31`. It is still a pre-stable
+Novera currently pins Wails `v3.0.0-beta.34`. It is still a pre-stable
 dependency, so updates are isolated security/compatibility migrations rather
 than routine version bumps. The Go module, frontend runtime, CLI, generated
 bindings, and build images must move together.
@@ -27,6 +27,33 @@ template argument, and server-mode request-validation advisories.
 independently proposed dependency updates cannot silently mix versions.
 Native interaction and clean-host packaging checks remain release blockers;
 automated tests and compilation alone do not complete that acceptance matrix.
+
+The 2026-10-26 update synchronizes Go, npm, and the CI/release CLI at beta.34.
+The [beta.32 release](https://github.com/wailsapp/wails/releases/tag/v3.0.0-beta.32),
+[beta.33 release](https://github.com/wailsapp/wails/releases/tag/v3.0.0-beta.33),
+and [beta.34 release](https://github.com/wailsapp/wails/releases/tag/v3.0.0-beta.34)
+and their [combined source diff](https://github.com/wailsapp/wails/compare/v3.0.0-beta.31...v3.0.0-beta.34)
+were reviewed for Novera's integration seams:
+
+- Windows fixes preserve inherited WebView2 COM vtable slots, restore focus
+  after activation and Tab handoff, and log transient runtime COM failures
+  instead of terminating the process. These affect the main workbench webview;
+  keyboard focus and native lifecycle behavior still need interactive checks.
+- Windows custom question-dialog labels and callbacks now use TaskDialog with
+  a MessageBox fallback. Novera uses native open/save dialogs and its own
+  renderer close confirmation, not the question-dialog API.
+- The generator can export typed names for events registered with
+  `application.RegisterEvent`. Novera emits and validates string-named events
+  without those registrations, so this does not require a bridge expansion.
+- The development server's readiness check now uses a TCP probe, fixing Vite
+  startup delays. The macOS menu-header/work-area and updater/systray changes
+  do not introduce new Novera calls to those APIs.
+
+This remains a development migration under the existing release freeze.
+Automated build/contract checks do not establish native Windows/macOS/Linux
+interaction, clean-host packaging, or performance/memory acceptance. Those
+checks remain outstanding until their results are recorded; no release gate
+or bridge allowlist is relaxed by this update.
 
 ## Containment boundary
 
