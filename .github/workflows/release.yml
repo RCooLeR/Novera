@@ -17,7 +17,7 @@ env:
   GOTOOLCHAIN: local
   NODE_VERSION: "24.22.1"
   TASK_VERSION: "v3.54.0"
-  WAILS_VERSION: "v3.0.0-beta.34"
+  WAILS_VERSION: "v3.1.0"
 
 jobs:
   release-gate:

@@ -11,6 +11,12 @@ Versioning once public releases begin.
 
 ### Security
 
+- Updated ESLint and TypeScript ESLint, with scoped minimatch 11.0.4 overrides
+  for their remaining 10.x dependencies, to bound glob preprocessing expansion
+  (CVE-2026-118764).
+- Synchronized the Wails Go runtime, frontend runtime, and CLI at stable 3.1.0;
+  updated pgx, SQLite, and the stable Excelize 2.11.1 release. The public release
+  freeze and native acceptance requirements remain in place.
 - Updated DOMPurify to 3.4.17 and routed Monaco's embedded sanitizer import to
   the patched package in both development and production. Production builds
   reject the old embedded copy; regression tests cover documentation markup,

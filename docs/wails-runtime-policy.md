@@ -1,9 +1,15 @@
 # Wails runtime containment and upgrade policy
 
-Novera currently pins Wails `v3.0.0-beta.34`. It is still a pre-stable
-dependency, so updates are isolated security/compatibility migrations rather
+Novera currently pins stable Wails `v3.1.0`. Runtime updates remain isolated
+security/compatibility migrations rather
 than routine version bumps. The Go module, frontend runtime, CLI, generated
 bindings, and build images must move together.
+
+The [3.1.0 release](https://github.com/wailsapp/wails/releases/tag/v3.1.0)
+adds experimental CGO-free macOS/Linux backends and YAML packaging support.
+Novera retains its existing build tasks and desktop boundaries. Regenerating
+bindings with the paired CLI preserves the checked-in service contract; this
+does not validate the new backend, native interactions, or clean-host packaging.
 
 The application module is in [src/go.mod](../src/go.mod), frontend runtime
 pins are in [src/frontend/package.json](../src/frontend/package.json), and
@@ -72,11 +78,11 @@ the allowlist.
 This boundary contains growth; it does not claim the remaining direct imports
 or concrete service registration have already been migrated to final facades.
 
-## Stable-migration milestone
+## Stable-migration acceptance
 
-The first stable Wails v3 release that supports all maintained desktop targets
-opens a dedicated migration milestone. Public release remains blocked if the
-current beta prevents a required security or platform update. Exit criteria:
+The stable Wails v3 dependency is synchronized across Go, npm, and the CLI.
+This version selection does not complete native acceptance. Public release
+remains frozen until the maintained desktop targets meet these exit criteria:
 
 1. Read upstream release/migration notes and enumerate API, binding, event,
    WebView, packaging, and platform changes.
