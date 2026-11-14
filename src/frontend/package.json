@@ -26,29 +26,35 @@
     "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
     "dompurify": "3.4.17",
-    "lucide-react": "^1.69.0",
+    "lucide-react": "^1.73.0",
     "monaco-editor": "^0.57.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "zustand": "^5.0.16"
+    "zustand": "^5.1.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.2.1",
-    "eslint": "^10.14.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "eslint": "^10.15.0",
     "globals": "^17.14.0",
-    "jsdom": "^31.0.0",
+    "jsdom": "^31.0.1",
     "typescript": "~6.0.3",
-    "typescript-eslint": "^8.72.1",
-    "vite": "^8.3.6",
+    "typescript-eslint": "^8.72.2",
+    "vite": "^8.3.8",
     "vitest": "^5.1.0"
   },
   "overrides": {
     "dompurify": "$dompurify",
-    "eslint": { "minimatch": "11.0.4" },
-    "@eslint/config-array": { "minimatch": "11.0.4" },
-    "@typescript-eslint/typescript-estree": { "minimatch": "11.0.4" }
+    "eslint": {
+      "minimatch": "11.0.8"
+    },
+    "@eslint/config-array": {
+      "minimatch": "11.0.8"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.8"
+    }
   }
 }
