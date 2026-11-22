@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.29.0@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 # Cross-compile Wails v3 apps to any platform
 #
 # Darwin: Zig + macOS SDK
@@ -16,7 +16,8 @@
 #   docker run --rm -v "$(pwd)/src:/app" -v "$(pwd)/bin:/out" wails-cross windows amd64
 #   docker run --rm -v "$(pwd)/src:/app" -v "$(pwd)/bin:/out" wails-cross windows arm64
 
-FROM --platform=${TARGETPLATFORM} golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea
+# FROM defaults to TARGETPLATFORM; build.sh still enforces native Linux architecture.
+FROM golang:1.27.4-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d
 
 ARG TARGETARCH
 ARG TARGETPLATFORM
@@ -31,9 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Zig - automatically selects correct binary for host architecture
-ARG ZIG_VERSION=0.17.0
-ARG ZIG_SHA256_AMD64=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
-ARG ZIG_SHA256_ARM64=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+ARG ZIG_VERSION=0.17.1
+ARG ZIG_SHA256_AMD64=3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
+ARG ZIG_SHA256_ARM64=a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795
 RUN case "${TARGETARCH}" in \
         amd64) ZIG_ARCH=x86_64; ZIG_SHA256="${ZIG_SHA256_AMD64}" ;; \
         arm64) ZIG_ARCH=aarch64; ZIG_SHA256="${ZIG_SHA256_ARM64}" ;; \

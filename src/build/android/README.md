@@ -8,12 +8,12 @@ closed; do not replace them with debug-key or unsigned release fallbacks.
 
 ## Toolchain baseline
 
-The configuration baseline reviewed as of 2026-10-12 is:
+The current configuration baseline is:
 
 | Component | Version |
 | --- | --- |
-| Android Gradle Plugin | 9.4.1 |
-| Gradle wrapper | 9.8.1 |
+| Android Gradle Plugin | 9.5.2 |
+| Gradle wrapper | 9.9.2 |
 | Java source/target | 17 |
 | Android compile SDK | 37 |
 | Android target SDK | 36 |
@@ -23,11 +23,11 @@ The configuration baseline reviewed as of 2026-10-12 is:
 | AndroidX Activity | 1.13.0 |
 | AndroidX AppCompat | 1.8.0 |
 | AndroidX Core | 1.19.1 |
-| AndroidX WebKit | 1.17.1 |
+| AndroidX WebKit | 1.18.0 |
 | Material Components | 1.14.0 |
 
-AGP 9.4 supports API 37 and requires Gradle 9.6 or newer and JDK 17 or
-newer. The wrapper uses the current Gradle 9.8.1 distribution and pins its
+AGP 9.5 supports API 37 and requires Gradle 9.6 or newer and JDK 17 or
+newer. The wrapper uses the current Gradle 9.9.2 distribution and pins its
 published SHA-256 digest. Android dependencies use current stable releases
 compatible with the API-24 floor.
 

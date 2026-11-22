@@ -30,7 +30,7 @@ func TestGoVersionAlignment(t *testing.T) {
 			t.Errorf("%s uses Go %s; go.mod requires %s (update the module, workflows and Docker image together)", workflow, got, want)
 		}
 	}
-	got := version("src/build/docker/Dockerfile.cross", `(?m)^FROM\s+[^\r\n]*golang:([0-9]+\.[0-9]+\.[0-9]+)-bookworm@sha256:[a-f0-9]{64}\s*$`)
+	got := version("src/build/docker/Dockerfile.cross", `(?m)^FROM\s+[^\r\n]*golang:([0-9]+\.[0-9]+\.[0-9]+)-trixie@sha256:[a-f0-9]{64}\s*$`)
 	if got != want {
 		t.Errorf("Docker image uses Go %s; go.mod requires %s", got, want)
 	}
